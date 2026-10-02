@@ -14,6 +14,7 @@ dependencies = [
     "aiomqtt>=2.0",
     "pyyaml>=6.0",
     "jsonschema>=4.23",
+    "nh3>=0.3.6",
 ]
 
 [project.optional-dependencies]

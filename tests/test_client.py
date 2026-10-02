@@ -8,6 +8,30 @@ from vulcan_notify.client import SessionExpiredError, VulcanClient
 from vulcan_notify.models import Student
 
 
+@pytest.mark.parametrize("tenant", ["firstdistrict", "seconddistrict", None])
+async def test_message_inbox_link_uses_session_tenant(tenant):
+    session = {"base_url": "https://uczen.eduvulcan.pl/legacydistrict", "cookies": []}
+    if tenant is not None:
+        session["tenant"] = tenant
+    client = VulcanClient(session)
+    client._request_url = AsyncMock(
+        return_value=[
+            {
+                "id": 1,
+                "apiGlobalKey": "synthetic-message-key",
+                "temat": "Zebranie rodziców",
+                "skrzynka": "Test mailbox",
+            }
+        ]
+    )
+    messages = await client.get_messages()
+    district = tenant or "legacydistrict"
+    assert messages[0].mailbox_url == f"https://wiadomosci.eduvulcan.pl/{district}/App/odebrane"
+    client._request_url.assert_awaited_once_with(
+        f"https://wiadomosci.eduvulcan.pl/{district}/api/Odebrane?idLastWiadomosc=0&pageSize=50"
+    )
+
+
 @pytest.fixture
 def session_data() -> dict:
     return {

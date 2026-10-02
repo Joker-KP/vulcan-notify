@@ -69,7 +69,7 @@ class Settings(BaseSettings):
     # turned a 00:00-05:00 window into 02:00-07:00 local -- the loop went quiet two
     # hours after midnight and resumed half an hour before the kids left, so the
     # morning schedule was always five hours stale.
-    quiet_hours_tz: str = "Europe/Warsaw"
+    quiet_hours_tz: str = "Europe/Warsaw"  # also the display zone for message email dates
     quiet_hours_start: int = Field(default=0, ge=0, le=23)
     quiet_hours_end: int = Field(default=5, ge=0, le=23)
 
@@ -95,6 +95,7 @@ class Settings(BaseSettings):
     email_from: str = ""
     email_to: list[str] = []
     email_subject_prefix: str = "eduVULCAN"
+    email_message_subject_prefix: str = "[Nowa wiadomość]"
     email_include_message_bodies: bool = False
     email_ai_summary: bool = False
     email_ai_timeout_seconds: float = Field(default=30, gt=0)
@@ -120,8 +121,10 @@ class Settings(BaseSettings):
                 or any(char.isspace() or char in ",;<>" for char in address)
             ):
                 raise ValueError("EMAIL_TO must contain bare email addresses")
-        if "\r" in self.email_subject_prefix or "\n" in self.email_subject_prefix:
-            raise ValueError("EMAIL_SUBJECT_PREFIX must be a single line")
+        for name in ("email_subject_prefix", "email_message_subject_prefix"):
+            prefix = getattr(self, name)
+            if "\r" in prefix or "\n" in prefix:
+                raise ValueError(f"{name.upper()} must be a single line")
         if bool(self.smtp_username) != bool(self.smtp_password):
             raise ValueError("Set SMTP_USERNAME and SMTP_PASSWORD together, or leave both unset")
         return self

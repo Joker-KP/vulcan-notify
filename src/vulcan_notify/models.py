@@ -99,6 +99,7 @@ class Message:
     has_attachments: bool  # hasZalaczniki
     is_read: bool  # przeczytana
     content: str | None = None  # tresc (HTML, from detail endpoint)
+    mailbox_url: str | None = None  # public inbox URL for the authenticated tenant
 
 
 @dataclass

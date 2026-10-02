@@ -248,7 +248,7 @@ Current output status:
 | HTTP API | Implemented | Reads local SQLite state in the separate `vulcan-api` service; liveness at `/api/alive`, freshness at `/api/health` (`?soft=1` forces HTTP 200). |
 | iCalendar feed | Implemented | Lesson schedule at `/calendar/{student}.ics`; currently excludes exams and homework. |
 | macOS Calendar | Implemented, optional, macOS only | Exams/homework via AppleScript, enabled by `CALENDAR_MAP`. |
-| Email | Implemented, optional | Per-sync SMTP digest of detected student changes and new messages; optional AI replacement and persistent retries. |
+| Email | Implemented, optional | Per-sync digest of student changes, with optional AI replacement; separate email per new message; persistent retries. |
 | ntfy | Deployment-only | Used by `deploy/vulcan-deploy.sh`; no adapter for synchronized school changes. |
 
 ### Terminal / logs
@@ -257,9 +257,13 @@ Useful for development, diagnostics, cron/container logs and manual synchronizat
 
 ### Email
 
-`email.py` prepares a plain digest of the current `FullSyncResult` when `EMAIL_ENABLED=true`, including partial results before session recovery. Baselines and unchanged runs create no email. The digest is committed to `email_outbox` before optional AI preparation or SMTP delivery. `EMAIL_AI_SUMMARY=true` also requires `LLM_API_KEY`; AI failure falls back to the plain body. Message bodies require `EMAIL_INCLUDE_MESSAGE_BODIES=true`, which also controls their inclusion in AI input.
+`email.py` prepares a plain digest of student changes in the current `FullSyncResult` when `EMAIL_ENABLED=true`, including partial results before session recovery. New messages are excluded from the digest and each creates a separate email with `EMAIL_MESSAGE_SUBJECT_PREFIX` (default `[Nowa wiadomość]`) plus the original subject. Baselines and unchanged runs create no email. Both notifications and the digest are committed to `email_outbox` before optional AI preparation or SMTP delivery. `EMAIL_AI_SUMMARY=true` also requires `LLM_API_KEY`; AI failure falls back to the plain digest. Message bodies require `EMAIL_INCLUDE_MESSAGE_BODIES=true`. Individual messages do not use AI and are excluded from digest AI input.
 
-Delivery is tracked per sync-run/recipient; retries reuse the stored body and Message-ID without repeating AI. Successful records clear private envelope/body fields and retain deduplication metadata. SMTP errors retain queued messages without blocking other outputs. Syncs drain the queue, and explicit `email-retry` works without upstream authentication. Quiet-hour MQTT heartbeat does not drain email.
+Individual message bodies use Polish metadata labels without repeating the subject; the sender value is bold in HTML. Dates display as `YYYY-MM-DD HH:MM (dzień tygodnia)` in `QUIET_HOURS_TZ` (default `Europe/Warsaw`); weekday names are Polish and derived after timezone conversion. Source offsets and daylight-saving rules are respected. Naive source timestamps mean UTC. Invalid zones fall back to UTC and unparseable date strings are preserved.
+
+With message bodies enabled, HTML preserves original paragraphs, breaks, lists, tables and allowed inline formatting through the local `nh3` sanitizer in `text.py`. Paragraph top/bottom margins default to zero, with explicit author styles retained; plain text uses single paragraph boundaries and preserves explicit blank lines. Active content and remote images are removed; links are restricted to HTTP/HTTPS/mailto. A separate HTML parser creates readable plain text with block boundaries and decoded entities. Keep the original stored content unchanged; rendering belongs in the email adapter. Existing `strip_html()` behavior for MQTT, display and TUI remains separate.
+
+Digest delivery is tracked per sync-run/recipient; individual messages use upstream message identity/recipient to deduplicate across runs. Notifications have a text link and HTML inbox button, using `Message.mailbox_url` from the client's authenticated tenant. The link opens the unified received-message inbox. Both MIME alternatives persist in the outbox, and migration adds nullable `html_body` without altering old queued content. Retries reuse the stored bodies and Message-ID without repeating AI. Successful records clear private envelope/body fields and retain deduplication metadata. SMTP errors retain queued messages without blocking other outputs. Syncs drain the queue, and explicit `email-retry` works without upstream authentication. Quiet-hour MQTT heartbeat does not drain email. Previously queued combined digests retain their original content.
 
 Entity persistence and email enqueue have separate commits; a crash in between can lose an unqueued notification. Ambiguous SMTP acceptance can cause duplicate delivery. Do not claim exactly-once or guaranteed inbox delivery. Use a single sync/delivery owner. See `docs/email.md` for settings and behavior.
 
@@ -689,6 +693,7 @@ Direct environment readers do not load `.env` themselves. Compose uses `env_file
 | `SMTP_PORT`, `SMTP_SECURITY` | `Settings` | `587`, `starttls`; implicit TLS (`ssl`) and plain relay (`none`) supported. |
 | `SMTP_USERNAME`, `SMTP_PASSWORD` | `Settings` | Unset; optional credentials, configured together. |
 | `EMAIL_SUBJECT_PREFIX` | `Settings` | `eduVULCAN`. |
+| `EMAIL_MESSAGE_SUBJECT_PREFIX` | `Settings` | `[Nowa wiadomość]`; followed by each original message subject. |
 | `SMTP_TIMEOUT_SECONDS`, `EMAIL_AI_TIMEOUT_SECONDS` | `Settings` | Both `30`; socket-operation and AI-preparation timeouts. |
 | `POLL_INTERVAL` | `sync-loop.sh`; also declared in `Settings` | `1800` seconds in both readers. |
 | `QUIET_HOURS_START`, `QUIET_HOURS_END` | `sync-loop.sh` and `Settings` | `0`, `5`; equal values disable quiet hours. |

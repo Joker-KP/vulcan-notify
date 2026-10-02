@@ -86,7 +86,7 @@ On first sync for a student, every item is treated as baseline: stored silently,
 | `db.py` | Async SQLite persistence via aiosqlite. All writes are `ON CONFLICT ... DO UPDATE`. | `Database` |
 | `display.py` | Terminal output with ANSI colors (auto-disabled when piped). | `format_result()` |
 | `calendar.py` | macOS Calendar integration via AppleScript. Dedup by stored UID; soft-deleted items remove events. | `sync_calendar()` |
-| `email.py` | Per-sync SMTP digest; optional existing AI summary replacement, per-recipient durable retries. | `format_summary()`, `queue_summary()`, `drain_email_outbox()`, `publish_email()` |
+| `email.py` | Per-sync student-change digest with optional AI replacement; separate notifications per new message; per-recipient durable retries. | `format_summary()`, `queue_summary()`, `queue_messages()`, `drain_email_outbox()`, `publish_email()` |
 | `mqtt.py` | Maps `Change` → topic + JSON payload; writes to the `mqtt_outbox` table; drains outbox to Mosquitto on every sync and publishes a retained heartbeat + LWT on `<prefix>/status`. | `topic_for()`, `build_payload()`, `build_status_payload()`, `drain_outbox()` |
 | `api.py` | aiohttp HTTP server (port 8585). Grade aggregates, homework/messages/schedule endpoints, iCalendar feed. | `build_app()` |
 | `ics.py` | Zero-dependency RFC 5545 iCalendar writer. | `build_calendar()` |
@@ -106,7 +106,7 @@ SQLite lives at `DB_PATH` (default `vulcan_notify.db`). Tables:
 | `messages` | `id` with `UNIQUE(api_global_key)` | `content` is backfilled in batches of `SYNC_MESSAGE_BACKFILL_BATCH` per run for legacy rows. |
 | `schedule` | `(student_key, date, time_from, subject)` | Per-lesson schedule including substitutions (`sub_teacher`, `sub_room`), cancellations (`annotation`), and extra lessons (`is_extra`). |
 | `mqtt_outbox` | `id` AUTOINCREMENT | Every MQTT publish is enqueued first; drained on each run. Broker outages survive restarts. |
-| `email_outbox` | `delivery_key` | Digest per sync-run/recipient; pending envelopes persist across restarts. Successful rows retain deduplication metadata while clearing private content. |
+| `email_outbox` | `delivery_key` | Digest per sync-run/recipient and notification per upstream message/recipient; pending envelopes persist across restarts. Successful rows retain deduplication metadata while clearing private content. |
 | `sync_state` | `key` | Generic KV. Holds `last_sync:<student>` (has this student ever synced — drives first-sync suppression) and `last_success:<student>:<section>` (freshness, written only after a confirmed fetch). The two are deliberately separate. |
 | `sync_runs` | `id` AUTOINCREMENT | History of runs: `completed`, `degraded` (a section failed), `failed`, or `interrupted` (abandoned mid-run, reconciled on the next start). Pruned past `SYNC_HISTORY_KEEP_DAYS`. |
 | `sync_sections` | `id` AUTOINCREMENT | Per-section, per-student outcome for each run, with item counts and error detail. Without it a partial outage — grades broken, everything else fine — is invisible. |
@@ -138,7 +138,22 @@ Optional (`EMAIL_ENABLED=true`). The CLI passes each completed or interrupted
 are suppressed independently for students and messages. A plain digest is committed
 before optional AI preparation; `EMAIL_AI_SUMMARY=true` and `LLM_API_KEY` enable the
 existing summarizer's default prompt. AI failures fall back to the plain digest.
-Message bodies require `EMAIL_INCLUDE_MESSAGE_BODIES=true`.
+New messages are queued separately before digest AI preparation, with subjects
+`<EMAIL_MESSAGE_SUBJECT_PREFIX> <original subject>` (default `[Nowa wiadomość]`).
+Their bodies require `EMAIL_INCLUDE_MESSAGE_BODIES=true`; individual messages do
+not use AI and are excluded from digest AI input. Upstream message identity plus
+recipient prevents repeated enqueue across sync runs.
+
+`client.get_messages()` also sets `Message.mailbox_url` from the session's tenant:
+`https://wiadomosci.eduvulcan.pl/<tenant>/App/odebrane`. Individual notifications
+include a text link and an HTML alternative with an inbox button. Metadata is
+escaped, the sender value is bold, and dates include a Polish weekday after
+conversion to the household timezone. With bodies enabled, the original layout is
+preserved through `text.message_html()` using a local `nh3` sanitizer; the plain
+version uses `text.message_text()` to preserve block/line/list/table boundaries.
+Both
+versions are stored in `email_outbox`; the additive `html_body` migration preserves
+older plain-text queue records, and successful delivery clears both bodies.
 
 SMTP uses certificate-verified STARTTLS by default, with implicit TLS and plain
 relay modes available. Blocking operations run in a worker thread. Delivery is

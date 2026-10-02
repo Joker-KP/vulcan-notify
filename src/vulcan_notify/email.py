@@ -1,4 +1,4 @@
-"""SMTP change digests with a persistent, per-recipient retry outbox."""
+"""SMTP change digests and separate message notifications with persistent retries."""
 
 from __future__ import annotations
 
@@ -11,22 +11,26 @@ import ssl
 from datetime import UTC, datetime
 from email.message import EmailMessage
 from email.utils import format_datetime, make_msgid
+from html import escape
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from vulcan_notify.config import parse_email_sender, settings
 from vulcan_notify.summarizer import summarize
-from vulcan_notify.text import strip_html
+from vulcan_notify.text import message_html, message_text, strip_html
 
 if TYPE_CHECKING:
     from vulcan_notify.config import Settings
     from vulcan_notify.db import Database
+    from vulcan_notify.models import Message
     from vulcan_notify.sync import FullSyncResult
 
 log = logging.getLogger(__name__)
+_WEEKDAYS_PL = ("poniedziałek", "wtorek", "środa", "czwartek", "piątek", "sobota", "niedziela")
 
 
-def format_summary(result: FullSyncResult, config: Settings) -> tuple[str, int]:
-    """Describe only this run's events, respecting student/account baselines."""
+def format_summary(result: FullSyncResult) -> tuple[str, int]:
+    """Describe only this run's student changes, respecting baselines."""
     lines = ["eduVULCAN — detected changes", ""]
     count = 0
     for student_result in result.student_results:
@@ -44,23 +48,6 @@ def format_summary(result: FullSyncResult, config: Settings) -> tuple[str, int]:
                 lines.append(f"  Date: {date}")
         lines.append("")
 
-    if not result.is_first_message_sync:
-        for message in result.new_messages:
-            count += 1
-            lines.extend(
-                [
-                    f"New message: {strip_html(message.subject)}",
-                    f"From: {strip_html(message.sender)}",
-                    f"Date: {message.date}",
-                    f"Mailbox: {message.mailbox}",
-                ]
-            )
-            if message.has_attachments:
-                lines.append("Attachments: yes (view in eduVULCAN)")
-            if config.email_include_message_bodies and message.content:
-                lines.append(strip_html(message.content))
-            lines.append("")
-
     if result.has_failures:
         lines.append(
             "Some sections failed; this summary covers successfully detected changes only."
@@ -68,18 +55,79 @@ def format_summary(result: FullSyncResult, config: Settings) -> tuple[str, int]:
     return "\n".join(lines).strip(), count
 
 
-async def queue_summary(result: FullSyncResult, db: Database) -> None:
-    """Persist the plain digest before attempting optional AI or SMTP."""
-    if not settings.email_enabled:
-        return
-    body, count = format_summary(result, settings)
-    if not count:
-        return
-    subject = f"{settings.email_subject_prefix}: {count} change(s)"
+def _format_message_date(value: str, config: Settings) -> str:
+    """Display ISO timestamps in the household zone; naive timestamps mean UTC."""
+    try:
+        stamp = datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=UTC)
+    try:
+        local = stamp.astimezone(ZoneInfo(config.quiet_hours_tz))
+    except (ZoneInfoNotFoundError, ValueError):
+        log.warning("Unknown message display timezone; using UTC")
+        local = stamp.astimezone(UTC)
+    return f"{local:%Y-%m-%d %H:%M} ({_WEEKDAYS_PL[local.weekday()]})"
+
+
+def _message_metadata(message: Message, config: Settings) -> list[str]:
+    lines = [
+        f"Nadawca: {strip_html(message.sender)}",
+        f"Data: {_format_message_date(message.date, config)}",
+        f"Skrzynka: {message.mailbox}",
+    ]
+    if message.has_attachments:
+        lines.append("Załączniki: tak (zobacz w eduVULCAN)")
+    return lines
+
+
+def format_message(message: Message, config: Settings) -> str:
+    """One upstream message, retaining its sender, date and mailbox identity."""
+    lines = _message_metadata(message, config)
+    if config.email_include_message_bodies and message.content:
+        lines.extend(["", message_text(message.content, message.mailbox_url)])
+    return "\n".join(lines)
+
+
+def _message_html(message: Message, config: Settings) -> str:
+    """Render metadata, original body layout and the public inbox footer."""
+    metadata = _message_metadata(message, config)
+    sender = escape(strip_html(message.sender))
+    content = f"Nadawca: <strong>{sender}</strong><br>\n"
+    content += "<br>\n".join(escape(line) for line in metadata[1:])
+    if config.email_include_message_bodies and message.content:
+        original = message_html(message.content, message.mailbox_url)
+        content += f'<div style="margin-top:16px">{original}</div>'
+    footer = ""
+    if message.mailbox_url:
+        url = escape(message.mailbox_url, quote=True)
+        footer = (
+            '<div style="margin-top:24px;padding-top:16px;border-top:1px solid #d0d0d0;'
+            'font-family:Arial,sans-serif">'
+            f'<a href="{url}" style="display:inline-block;padding:10px 14px;'
+            'border:1px solid #999;border-radius:6px;text-decoration:none;font-weight:600">'
+            "Otwórz skrzynkę wiadomości</a></div>"
+        )
+    return (
+        '<html><body><div style="font-family:Arial,sans-serif">'
+        f"{content}</div>\n"
+        f"{footer}</body></html>"
+    )
+
+
+async def _queue_email(
+    db: Database,
+    identity: str,
+    subject: str,
+    body: str,
+    html_body: str | None = None,
+) -> list[str]:
+    """Queue one email per recipient, returning only newly inserted delivery keys."""
     date_header = format_datetime(datetime.now(UTC))
     new_keys: list[str] = []
     for recipient in dict.fromkeys(settings.email_to):
-        key = hashlib.sha256(f"{result.notification_id}\0{recipient}".encode()).hexdigest()
+        key = hashlib.sha256(f"{identity}\0{recipient}".encode()).hexdigest()
         inserted = await db.enqueue_email(
             key,
             settings.email_from,
@@ -88,9 +136,39 @@ async def queue_summary(result: FullSyncResult, db: Database) -> None:
             body,
             make_msgid(domain="vulcan-notify.local"),
             date_header,
+            html_body=html_body,
         )
         if inserted:
             new_keys.append(key)
+    return new_keys
+
+
+async def queue_messages(result: FullSyncResult, db: Database) -> None:
+    """Queue separate notifications, deduplicated by upstream message and recipient."""
+    if not settings.email_enabled or result.is_first_message_sync:
+        return
+    for message in result.new_messages:
+        # Keep the original subject while flattening upstream line breaks for headers.
+        title = " ".join(message.subject.split())
+        subject = f"{settings.email_message_subject_prefix} {title}".strip()
+        identity = f"message:{message.api_global_key or message.id}"
+        body = format_message(message, settings)
+        html_body = _message_html(message, settings)
+        if message.mailbox_url:
+            body += f"\n\nOtwórz skrzynkę wiadomości:\n{message.mailbox_url}"
+        await _queue_email(db, identity, subject, body, html_body)
+    await db.commit()
+
+
+async def queue_summary(result: FullSyncResult, db: Database) -> None:
+    """Persist the plain digest before attempting optional AI or SMTP."""
+    if not settings.email_enabled:
+        return
+    body, count = format_summary(result)
+    if not count:
+        return
+    subject = f"{settings.email_subject_prefix}: {count} change(s)"
+    new_keys = await _queue_email(db, result.notification_id, subject, body)
     await db.commit()
 
     # Retry uses the stored body. If preparation is interrupted, the queued plain
@@ -120,6 +198,8 @@ def _send_email(row: dict[str, str], config: Settings) -> None:
     message["Message-ID"] = row["message_id"]
     message["Date"] = row["date_header"]
     message.set_content(row["body"])
+    if row["html_body"]:
+        message.add_alternative(row["html_body"], subtype="html")
 
     context = ssl.create_default_context()
     connection: smtplib.SMTP
@@ -180,7 +260,7 @@ async def drain_email_outbox(db: Database) -> tuple[int, int]:
         await db.commit()
     pending = len(rows) - delivered
     if rows:
-        log.info("Email digests: SMTP accepted=%d, pending=%d", delivered, pending)
+        log.info("Email notifications: SMTP accepted=%d, pending=%d", delivered, pending)
     return delivered, pending
 
 
@@ -189,6 +269,8 @@ async def publish_email(result: FullSyncResult, db: Database) -> None:
     if not settings.email_enabled:
         return
     try:
+        # Persist individual messages before optional AI preparation of the digest.
+        await queue_messages(result, db)
         await queue_summary(result, db)
         await drain_email_outbox(db)
     except Exception as exc:

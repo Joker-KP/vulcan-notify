@@ -173,6 +173,7 @@ CREATE TABLE IF NOT EXISTS email_outbox (
     recipient TEXT,
     subject TEXT,
     body TEXT,
+    html_body TEXT,
     message_id TEXT NOT NULL,
     date_header TEXT NOT NULL,
     enqueued_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -248,6 +249,13 @@ class Database:
 
     async def _migrate(self) -> None:
         """Handle schema migrations."""
+        # Preserve queued plain-text emails when adding multipart notifications.
+        cursor = await self.db.execute("PRAGMA table_info(email_outbox)")
+        email_columns = {row[1] for row in await cursor.fetchall()}
+        if email_columns and "html_body" not in email_columns:
+            await self.db.execute("ALTER TABLE email_outbox ADD COLUMN html_body TEXT")
+            logger.info("Migrating: adding html_body column to email_outbox")
+
         # Drop legacy hash-based tables
         for table in ("seen_items", "poll_state"):
             cursor = await self.db.execute(
@@ -669,12 +677,13 @@ class Database:
         body: str,
         message_id: str,
         date_header: str,
+        html_body: str | None = None,
     ) -> bool:
         cursor = await self.db.execute(
             "INSERT OR IGNORE INTO email_outbox "
-            "(delivery_key, sender, recipient, subject, body, message_id, date_header) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (delivery_key, sender, recipient, subject, body, message_id, date_header),
+            "(delivery_key, sender, recipient, subject, body, message_id, date_header, html_body) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (delivery_key, sender, recipient, subject, body, message_id, date_header, html_body),
         )
         return cursor.rowcount == 1
 
@@ -686,7 +695,8 @@ class Database:
 
     async def list_email_outbox(self) -> list[dict[str, str]]:
         cursor = await self.db.execute(
-            "SELECT delivery_key, sender, recipient, subject, body, message_id, date_header "
+            "SELECT delivery_key, sender, recipient, subject, body, message_id, date_header, "
+            "COALESCE(html_body, '') "
             "FROM email_outbox WHERE sent_at IS NULL ORDER BY enqueued_at, rowid"
         )
         columns = [
@@ -697,13 +707,14 @@ class Database:
             "body",
             "message_id",
             "date_header",
+            "html_body",
         ]
         return [dict(zip(columns, row, strict=True)) for row in await cursor.fetchall()]
 
     async def mark_email_sent(self, delivery_key: str) -> None:
         await self.db.execute(
             "UPDATE email_outbox SET sent_at = CURRENT_TIMESTAMP, sender = NULL, "
-            "recipient = NULL, subject = NULL, body = NULL, last_error = NULL "
+            "recipient = NULL, subject = NULL, body = NULL, html_body = NULL, last_error = NULL "
             "WHERE delivery_key = ?",
             (delivery_key,),
         )

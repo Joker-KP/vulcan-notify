@@ -26,7 +26,7 @@ Supports multiple students under one parent account.
 - **Terminal output** - colored when interactive, plain when piped
 - **macOS Calendar** - exams and homework as all-day events with reminders (iCloud syncs to iOS)
 - **MQTT events** - every detected change published to Mosquitto (with a persistent outbox for retries)
-- **Email digests** - detected changes sent over SMTP, with persistent retries and optional AI summary replacement ([setup](docs/email.md))
+- **Email notifications** - change digests with optional AI summary, plus a separate email for each new message; persistent SMTP retries ([setup](docs/email.md))
 - **HTTP API** - grade aggregates, homework, messages, and schedule over aiohttp on port 8585
 - **iCalendar feed** - per-student `.ics` feed for subscribing from iOS/macOS Calendar, Google Calendar, or Home Assistant
 - **AI summaries** - optional digest of recent changes or messages via any OpenAI-compatible API
@@ -219,8 +219,9 @@ All settings are via environment variables or `.env` file:
 | `SMTP_HOST`, `EMAIL_FROM`, `EMAIL_TO` | (empty) | Required email server, sender, and JSON recipient list |
 | `SMTP_PORT`, `SMTP_SECURITY` | `587`, `starttls` | SMTP port and TLS mode (`starttls`, `ssl`, `none`) |
 | `SMTP_USERNAME`, `SMTP_PASSWORD` | (none) | Optional SMTP credentials |
-| `EMAIL_AI_SUMMARY` | `false` | Replace email body with existing AI summary; also requires `LLM_API_KEY` |
-| `EMAIL_INCLUDE_MESSAGE_BODIES` | `false` | Include message bodies in email and its optional AI input |
+| `EMAIL_AI_SUMMARY` | `false` | Replace the student-change digest body with an AI summary; also requires `LLM_API_KEY` |
+| `EMAIL_MESSAGE_SUBJECT_PREFIX` | `[Nowa wiadomość]` | Prefix for separate new-message notifications, followed by the original subject |
+| `EMAIL_INCLUDE_MESSAGE_BODIES` | `false` | Include original message bodies in individual notifications; messages are excluded from digest AI input |
 | `NTFY_TOPIC` | `vulcan-notify` | ntfy.sh topic (if used) |
 | `NTFY_SERVER` | `https://ntfy.sh` | ntfy server base URL |
 | `LLM_BASE_URL` | `https://api.cerebras.ai/v1` | OpenAI-compatible API base URL for AI summaries |

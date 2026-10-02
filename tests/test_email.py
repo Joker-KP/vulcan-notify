@@ -3,6 +3,8 @@
 import asyncio
 import smtplib
 from dataclasses import replace
+from email import policy
+from email.parser import BytesParser
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -41,6 +43,7 @@ def email_config(monkeypatch):
         smtp_username="test-user",
         smtp_password="test-password",
         llm_api_key=None,
+        quiet_hours_tz="Europe/Warsaw",
     )
     monkeypatch.setattr(email, "settings", config)
     return config
@@ -57,7 +60,7 @@ def smtp(monkeypatch):
 
 def changed_result():
     change = Change("updated", "grade", STUDENT.name, "Math: 3 → 4", "Test, weight 2")
-    return FullSyncResult([SyncResult(STUDENT, new_grades=[change])], [MESSAGE])
+    return FullSyncResult([SyncResult(STUDENT, new_grades=[change])])
 
 
 async def test_disabled_output_does_not_access_db_or_smtp(monkeypatch):
@@ -70,6 +73,7 @@ async def test_disabled_output_does_not_access_db_or_smtp(monkeypatch):
 
 async def test_first_baseline_and_unchanged_sync_do_not_email(db, email_config, smtp):
     result = changed_result()
+    result.new_messages = [MESSAGE]
     result.student_results[0].is_first_sync = True
     result.is_first_message_sync = True
     await email.publish_email(result, db)
@@ -78,8 +82,9 @@ async def test_first_baseline_and_unchanged_sync_do_not_email(db, email_config, 
     assert await db.list_email_outbox() == []
 
 
-def test_digest_covers_every_change_and_preserves_student_and_mailbox_scope(email_config):
+def test_digest_covers_every_student_change_and_excludes_messages():
     result = changed_result()
+    result.new_messages = [MESSAGE]
     other = replace(STUDENT, key="other-key", name="Other Student")
     result.student_results.append(
         SyncResult(
@@ -99,13 +104,12 @@ def test_digest_covers_every_change_and_preserves_student_and_mailbox_scope(emai
     result.student_results[0].new_homework = [
         Change("new", "homework", STUDENT.name, "Read chapter", "Due 2026-10-04"),
     ]
-    body, count = email.format_summary(result, email_config)
-    assert count == 8
+    body, count = email.format_summary(result)
+    assert count == 7
     assert "Math: 3 → 4" in body
     assert "Test Student (3A, Test School)" in body
     assert "Other Student (3A, Test School)" in body
-    assert "Mailbox: Test Student" in body
-    assert "Attachments: yes" in body
+    assert "Trip details" not in body
     assert "Private message body" not in body
     for kind in ["substitution", "cancellation", "addition", "attendance", "homework", "exam"]:
         assert f"[{kind}/new]" in body
@@ -115,26 +119,35 @@ def test_message_bodies_opt_in_and_partial_failure_notice(email_config):
     email_config.email_include_message_bodies = True
     result = changed_result()
     result.message_failure = "Sensitive upstream failure details"
-    body, _ = email.format_summary(result, email_config)
+    body = email.format_message(MESSAGE, email_config)
     assert "Private message body\nSecond line" in body
     assert "<p>" not in body
-    assert "Some sections failed" in body
-    assert "Sensitive upstream failure details" not in body
+    assert "Skrzynka: Test Student" in body
+    assert "Załączniki: tak" in body
+    summary, _ = email.format_summary(result)
+    assert "Some sections failed" in summary
+    assert "Sensitive upstream failure details" not in summary
 
 
 @pytest.mark.parametrize(
     "student_baseline,message_baseline,count", [(True, False, 1), (False, True, 1)]
 )
-def test_student_and_account_baselines_are_independent(
+async def test_student_and_account_baselines_are_independent(
+    db,
     email_config,
+    smtp,
     student_baseline,
     message_baseline,
     count,
 ):
     result = changed_result()
+    result.new_messages = [MESSAGE]
     result.student_results[0].is_first_sync = student_baseline
     result.is_first_message_sync = message_baseline
-    assert email.format_summary(result, email_config)[1] == count
+    await email.publish_email(result, db)
+    assert smtp.send_message.call_count == count
+    subject = str(smtp.send_message.call_args.args[0]["Subject"])
+    assert subject.startswith("[Nowa wiadomość]" if student_baseline else "eduVULCAN:")
 
 
 async def test_durable_per_recipient_retry_and_deduplication(db, email_config, smtp, caplog):
@@ -198,11 +211,11 @@ async def test_smtp_transport_headers_and_utf8(db, email_config, smtp, security)
         )
         assert context.check_hostname
     message = smtp.send_message.call_args.args[0]
-    assert message["Subject"] == "eduVULCAN: 2 change(s)"
+    assert message["Subject"] == "eduVULCAN: 1 change(s)"
     assert message["From"] == "school@example.org"
     assert message["To"] == "parent@example.org"
     assert "Math: 3 → 4" in message.get_content()
-    assert "Trip details" in message.get_content()
+    assert "Trip details" not in message.get_content()
     assert "Private message body" not in message.get_content()
     assert message["Message-ID"] and message["Date"]
 
@@ -246,9 +259,6 @@ async def test_sender_name_is_preserved_in_header_and_removed_from_envelope(
     assert message["From"].addresses[0].addr_spec == "school@example.org"
     assert smtp.send_message.call_args.kwargs["from_addr"] == "school@example.org"
     # Verify names survive actual MIME header encoding, including non-ASCII names.
-    from email import policy
-    from email.parser import BytesParser
-
     parsed = BytesParser(policy=policy.default).parsebytes(message.as_bytes())
     assert parsed["From"].addresses[0].display_name == name
 
@@ -362,6 +372,7 @@ async def test_ai_requires_explicit_opt_in_and_key(
         {"email_from": "Name\x00 <school@example.org>"},
         {"email_to": ["parent@example.org\nBcc: other@example.org"]},
         {"email_subject_prefix": "School\r\nBcc: other@example.org"},
+        {"email_message_subject_prefix": "Message\r\nBcc: other@example.org"},
         {"smtp_security": "invalid"},
         {"smtp_port": 0},
         {"smtp_timeout_seconds": 0},
@@ -478,3 +489,319 @@ async def test_smtp_failure_does_not_prevent_mqtt_or_fail_sync(
     # cmd_sync closes the DB; reopen to inspect the durable failure.
     await db.connect()
     assert len(await db.list_email_outbox()) == 1
+
+
+async def test_each_new_message_has_own_subject_and_body_separate_from_digest(
+    db,
+    email_config,
+    smtp,
+):
+    email_config.email_include_message_bodies = True
+    result = changed_result()
+    first = replace(MESSAGE, subject="Zebranie rodziców")
+    second = replace(
+        MESSAGE,
+        id=2,
+        api_global_key="other-message-key",
+        subject="Plan wycieczki",
+        content="<p>Different private content</p>",
+        mailbox="Other Student",
+    )
+    result.new_messages = [first, second]
+    await email.publish_email(result, db)
+    sent = {str(call.args[0]["Subject"]): call.args[0] for call in smtp.send_message.call_args_list}
+    assert set(sent) == {
+        "[Nowa wiadomość] Zebranie rodziców",
+        "[Nowa wiadomość] Plan wycieczki",
+        "eduVULCAN: 1 change(s)",
+    }
+    first_body = sent["[Nowa wiadomość] Zebranie rodziców"].get_body(("plain",)).get_content()
+    assert "Private message body" in first_body
+    assert "Nadawca: Test Teacher" in first_body and "Skrzynka: Test Student" in first_body
+    assert "Different private content" not in first_body
+    second_body = sent["[Nowa wiadomość] Plan wycieczki"].get_body(("plain",)).get_content()
+    assert "Different private content" in second_body
+    assert "Skrzynka: Other Student" in second_body
+    assert "Math: 3 → 4" not in first_body + second_body
+    assert "Zebranie rodziców" not in first_body
+    assert "Plan wycieczki" not in second_body
+    digest = sent["eduVULCAN: 1 change(s)"].get_content()
+    assert "Math: 3 → 4" in digest
+    assert "Zebranie rodziców" not in digest and "Plan wycieczki" not in digest
+
+
+async def test_messages_only_send_no_digest_or_ai(db, email_config, smtp, monkeypatch):
+    email_config.email_ai_summary = True
+    email_config.llm_api_key = "synthetic-key"
+    ai = AsyncMock()
+    monkeypatch.setattr(email, "summarize", ai)
+    await email.publish_email(FullSyncResult([], [MESSAGE]), db)
+    smtp.send_message.assert_called_once()
+    sent = smtp.send_message.call_args.args[0]
+    assert sent["Subject"] == "[Nowa wiadomość] Trip details"
+    assert "Private message body" not in sent.get_body(("plain",)).get_content()
+    ai.assert_not_awaited()
+
+
+async def test_custom_message_prefix_and_upstream_line_breaks(db, email_config, smtp):
+    email_config.email_message_subject_prefix = "[Szkoła]"
+    message = replace(MESSAGE, subject="Zebranie\r\nrodziców <klasa 3A>")
+    await email.publish_email(FullSyncResult([], [message]), db)
+    sent = smtp.send_message.call_args.args[0]
+    assert sent["Subject"] == "[Szkoła] Zebranie rodziców <klasa 3A>"
+    assert "Bcc" not in sent
+
+
+async def test_message_retry_deduplicates_across_runs_and_recipients(db, email_config, smtp):
+    email_config.email_to = ["parent@example.org", "second@example.org"]
+    smtp.send_message.side_effect = [{}, TimeoutError()]
+    await email.publish_email(FullSyncResult([], [MESSAGE]), db)
+    pending = await db.list_email_outbox()
+    assert len(pending) == 1
+    assert pending[0]["recipient"] == "second@example.org"
+    assert pending[0]["subject"] == "[Nowa wiadomość] Trip details"
+    original_message_id = pending[0]["message_id"]
+    await db.close()
+    await db.connect()
+    smtp.send_message.side_effect = None
+    smtp.reset_mock()
+    # A different run rediscovering the same upstream message must not re-enqueue it.
+    await email.publish_email(FullSyncResult([], [MESSAGE]), db)
+    smtp.send_message.assert_called_once()
+    assert smtp.send_message.call_args.args[0]["Message-ID"] == original_message_id
+    assert smtp.send_message.call_args.kwargs["to_addrs"] == ["second@example.org"]
+    await email.publish_email(FullSyncResult([], [MESSAGE]), db)
+    assert smtp.send_message.call_count == 1
+    assert await db.list_email_outbox() == []
+
+
+async def test_individual_messages_are_durable_before_ai_and_excluded_from_ai_input(
+    db,
+    email_config,
+    smtp,
+    monkeypatch,
+):
+    email_config.email_ai_summary = True
+    email_config.llm_api_key = "synthetic-key"
+    email_config.email_include_message_bodies = True
+    result = changed_result()
+    result.new_messages = [MESSAGE]
+
+    async def ai(body, config):
+        pending = await db.list_email_outbox()
+        assert len(pending) == 2
+        assert "Trip details" not in body and "Private message body" not in body
+        assert any("Private message body" in row["body"] for row in pending)
+        return "AI: Grade improved."
+
+    monkeypatch.setattr(email, "summarize", ai)
+    await email.publish_email(result, db)
+    sent = {str(call.args[0]["Subject"]): call.args[0] for call in smtp.send_message.call_args_list}
+    assert sent["eduVULCAN: 1 change(s)"].get_content().startswith("AI: Grade improved.")
+    assert (
+        "Private message body"
+        in sent["[Nowa wiadomość] Trip details"].get_body(("plain",)).get_content()
+    )
+
+
+@pytest.mark.parametrize("include_body", [False, True])
+async def test_message_footer_has_html_button_and_plain_link(db, email_config, smtp, include_body):
+    email_config.email_include_message_bodies = include_body
+    url = "https://wiadomosci.eduvulcan.pl/testdistrict/App/odebrane"
+    message = replace(
+        MESSAGE,
+        mailbox_url=url,
+        subject="Zebranie <klasa> & rodzice",
+        sender="Teacher & Parent",
+    )
+    result = changed_result()
+    result.new_messages = [message]
+    await email.publish_email(result, db)
+    sent = smtp.send_message.call_args_list[0].args[0]
+    # Inspect serialized MIME, as an email client would receive it.
+    parsed = BytesParser(policy=policy.default).parsebytes(sent.as_bytes())
+    assert parsed.get_content_type() == "multipart/alternative"
+    plain = parsed.get_body(preferencelist=("plain",)).get_content()
+    html = parsed.get_body(preferencelist=("html",)).get_content()
+    assert plain.rstrip().endswith(f"Otwórz skrzynkę wiadomości:\n{url}")
+    assert f'href="{url}"' in html
+    assert html.count("Otwórz skrzynkę wiadomości") == 1
+    assert "margin-top:24px" in html and "border-radius:6px" in html
+    assert "Nadawca: <strong>Teacher &amp; Parent</strong>" in html
+    assert "Zebranie" not in html and "Zebranie" not in plain
+    assert parsed["Subject"] == "[Nowa wiadomość] Zebranie <klasa> & rodzice"
+    assert "<klasa>" not in html
+    assert html.index("Skrzynka:") < html.index("Otwórz skrzynkę wiadomości")
+    assert "Data: 2026-10-02 11:00 (piątek)" in plain
+    assert "Data: 2026-10-02 11:00 (piątek)" in html
+    assert ("Private message body" in plain) is include_body
+    assert ("Private message body" in html) is include_body
+    digest = smtp.send_message.call_args_list[1].args[0]
+    assert not digest.is_multipart()
+    assert url not in digest.get_content()
+    cursor = await db.db.execute("SELECT body, html_body FROM email_outbox")
+    assert all(tuple(row) == (None, None) for row in await cursor.fetchall())
+
+
+async def test_mailbox_link_and_html_are_preserved_across_restarts_and_retries(
+    db,
+    email_config,
+    smtp,
+):
+    url = "https://wiadomosci.eduvulcan.pl/originaldistrict/App/odebrane"
+    message = replace(MESSAGE, mailbox_url=url)
+    smtp.send_message.side_effect = TimeoutError()
+    await email.publish_email(FullSyncResult([], [message]), db)
+    pending = (await db.list_email_outbox())[0]
+    assert url in pending["body"] and url in pending["html_body"]
+    await db.close()
+    await db.connect()
+    smtp.send_message.side_effect = None
+    updated = replace(
+        message, mailbox_url="https://wiadomosci.eduvulcan.pl/otherdistrict/App/odebrane"
+    )
+    await email.publish_email(FullSyncResult([], [updated]), db)
+    sent = smtp.send_message.call_args.args[0]
+    assert sent["Message-ID"] == pending["message_id"]
+    assert url in sent.get_body(preferencelist=("plain",)).get_content()
+    assert url in sent.get_body(preferencelist=("html",)).get_content()
+    assert "otherdistrict" not in sent.as_string()
+
+
+async def test_html_footer_escapes_body_and_url(db, email_config, smtp):
+    email_config.email_include_message_bodies = True
+    message = replace(
+        MESSAGE,
+        mailbox_url='https://wiadomosci.eduvulcan.pl/testdistrict/App/odebrane?x="&y=1',
+        content="&lt;script&gt;alert('test')&lt;/script&gt;",
+    )
+    await email.publish_email(FullSyncResult([], [message]), db)
+    html = smtp.send_message.call_args.args[0].get_body(preferencelist=("html",)).get_content()
+    assert "<script>" not in html
+    assert "&lt;script&gt;" in html
+    assert (
+        'href="https://wiadomosci.eduvulcan.pl/testdistrict/App/odebrane?x=&quot;&amp;y=1"' in html
+    )
+
+
+async def test_migration_preserves_existing_plain_email_queue(tmp_path, email_config, smtp):
+    import aiosqlite
+
+    path = tmp_path / "legacy-email.db"
+    async with aiosqlite.connect(path) as connection:
+        await connection.executescript(
+            "CREATE TABLE email_outbox (delivery_key TEXT PRIMARY KEY, sender TEXT, "
+            "recipient TEXT, subject TEXT, body TEXT, message_id TEXT NOT NULL, "
+            "date_header TEXT NOT NULL, enqueued_at TEXT DEFAULT CURRENT_TIMESTAMP, "
+            "sent_at TEXT, attempts INTEGER DEFAULT 0, last_error TEXT);"
+        )
+        await connection.execute(
+            "INSERT INTO email_outbox "
+            "(delivery_key, sender, recipient, subject, body, message_id, date_header) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "legacy-key",
+                "school@example.org",
+                "parent@example.org",
+                "Legacy subject",
+                "Existing queued content",
+                "<legacy-id@example.org>",
+                "Fri, 02 Oct 2026 09:00:00 +0000",
+            ),
+        )
+        await connection.commit()
+    database = Database(path)
+    await database.connect()
+    try:
+        pending = await database.list_email_outbox()
+        assert len(pending) == 1
+        assert pending[0]["body"] == "Existing queued content"
+        assert pending[0]["html_body"] == ""
+        assert await email.drain_email_outbox(database) == (1, 0)
+        sent = smtp.send_message.call_args.args[0]
+        assert sent["Subject"] == "Legacy subject"
+        assert sent["Message-ID"] == "<legacy-id@example.org>"
+        assert not sent.is_multipart()
+        # Repeat initialization to check migration remains idempotent.
+        await database.close()
+        await database.connect()
+        assert await database.list_email_outbox() == []
+    finally:
+        await database.close()
+
+
+@pytest.mark.parametrize(
+    "timestamp,zone,expected",
+    [
+        ("2026-01-15T09:02:41.183Z", "Europe/Warsaw", "2026-01-15 10:02 (czwartek)"),
+        ("2026-07-15T09:02:41+00:00", "Europe/Warsaw", "2026-07-15 11:02 (środa)"),
+        ("2026-03-15T11:02:41.183+01:00", "Europe/Warsaw", "2026-03-15 11:02 (niedziela)"),
+        ("2026-07-15T11:02:41+02:00", "Europe/Warsaw", "2026-07-15 11:02 (środa)"),
+        ("2026-03-29T00:30:00Z", "Europe/Warsaw", "2026-03-29 01:30 (niedziela)"),
+        ("2026-03-29T01:30:00Z", "Europe/Warsaw", "2026-03-29 03:30 (niedziela)"),
+        ("2026-10-25T00:30:00Z", "Europe/Warsaw", "2026-10-25 02:30 (niedziela)"),
+        ("2026-10-25T01:30:00Z", "Europe/Warsaw", "2026-10-25 02:30 (niedziela)"),
+        ("2026-01-15T23:30:00Z", "Europe/Warsaw", "2026-01-16 00:30 (piątek)"),
+        ("2026-10-02T09:00:00", "Europe/Warsaw", "2026-10-02 11:00 (piątek)"),
+        ("2026-07-15T11:02:41+02:00", "UTC", "2026-07-15 09:02 (środa)"),
+        ("2026-01-15T09:00:00Z", "America/Los_Angeles", "2026-01-15 01:00 (czwartek)"),
+        ("2026-09-29T16:23:00Z", "Europe/Warsaw", "2026-09-29 18:23 (wtorek)"),
+    ],
+)
+def test_message_date_uses_configured_zone_and_minute_precision(
+    email_config,
+    timestamp,
+    zone,
+    expected,
+):
+    email_config.quiet_hours_tz = zone
+    body = email.format_message(replace(MESSAGE, date=timestamp), email_config)
+    assert f"Data: {expected}\n" in body
+    assert "Nadawca: Test Teacher" in body
+    assert "Skrzynka: Test Student" in body
+    assert "Załączniki: tak" in body
+    assert MESSAGE.subject not in body
+    for label in ["New message:", "From:", "Date:", "Mailbox:", "Attachments:", "Temat:"]:
+        assert label not in body
+
+
+@pytest.mark.parametrize("timestamp", ["", "unrecognized timestamp"])
+def test_unrecognized_message_date_is_preserved(email_config, timestamp):
+    body = email.format_message(replace(MESSAGE, date=timestamp), email_config)
+    assert f"Data: {timestamp}\n" in body
+
+
+@pytest.mark.parametrize("zone", ["Missing/Timezone", "/invalid-zone"])
+def test_unknown_message_timezone_falls_back_to_utc(email_config, zone, caplog):
+    email_config.quiet_hours_tz = zone
+    message = replace(MESSAGE, date="2026-07-15T11:02:41+02:00")
+    body = email.format_message(message, email_config)
+    assert "Data: 2026-07-15 09:02 (środa)" in body
+    assert "using UTC" in caplog.text
+
+
+async def test_rich_message_body_and_bold_sender_survive_mime_serialization(db, email_config, smtp):
+    email_config.email_include_message_bodies = True
+    message = replace(
+        MESSAGE,
+        date="2026-09-29T16:23:00Z",
+        content='<p style="color:blue;margin-bottom:12px">Dzień dobry,</p>'
+        "<p><strong>Ważne</strong> informacje.</p><div>A<br>B</div>"
+        "<ol><li>Przynieść zeszyt</li><li>Podpisać zgodę</li></ol>",
+    )
+    await email.publish_email(FullSyncResult([], [message]), db)
+    parsed = BytesParser(policy=policy.default).parsebytes(
+        smtp.send_message.call_args.args[0].as_bytes()
+    )
+    html = parsed.get_body(("html",)).get_content()
+    plain = parsed.get_body(("plain",)).get_content()
+    assert "Nadawca: <strong>Test Teacher</strong>" in html
+    assert "Data: 2026-09-29 18:23 (wtorek)" in html and "(wtorek)" in plain
+    assert "<p style=" in html and "color:blue" in html
+    assert "<strong>Ważne</strong>" in html
+    assert "<div>A<br>B</div>" in html
+    assert "<ol><li>Przynieść zeszyt</li><li>Podpisać zgodę</li></ol>" in html
+    assert "margin-top:0;margin-bottom:0;" in html
+    assert "Dzień dobry,\nWażne informacje." in plain
+    assert "A\nB" in plain
+    assert "1. Przynieść zeszyt\n2. Podpisać zgodę" in plain

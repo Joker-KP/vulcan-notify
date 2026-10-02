@@ -6,6 +6,7 @@ import asyncio
 import logging
 import random
 from typing import Any
+from urllib.parse import urlsplit
 
 import aiohttp
 
@@ -90,7 +91,7 @@ class VulcanClient:
     def __init__(self, session_data: dict[str, Any]) -> None:
         self._session_data = session_data
         self._base_url: str = session_data["base_url"]
-        self._tenant: str = session_data.get("tenant", "")
+        self._tenant: str = session_data.get("tenant") or urlsplit(self._base_url).path.strip("/")
         self._messages_base = f"https://wiadomosci.eduvulcan.pl/{self._tenant}"
         self._ssl_ctx = _make_ssl_context()
         self._http: aiohttp.ClientSession | None = None
@@ -488,6 +489,7 @@ class VulcanClient:
                 mailbox=m.get("skrzynka", ""),
                 has_attachments=m.get("hasZalaczniki", False),
                 is_read=m.get("przeczytana", False),
+                mailbox_url=f"{self._messages_base}/App/odebrane",
             )
             for m in data
         ]

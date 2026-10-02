@@ -154,7 +154,7 @@ async def cmd_email_retry() -> None:
     await db.connect()
     try:
         delivered, pending = await drain_email_outbox(db)
-        print(f"Email digests: SMTP accepted={delivered}, pending={pending}")
+        print(f"Email notifications: SMTP accepted={delivered}, pending={pending}")
         if pending:
             sys.exit(1)
     finally:
