@@ -2,6 +2,10 @@
 
 Reverse-engineered from the `uczen.eduvulcan.pl` SPA (March 2026).
 
+The [machine-readable OpenAPI contract and on-demand gathering/checking jobs](eduvulcan/README.md)
+record current structural evidence and verification gaps. This document remains
+the historical explanatory reference; its examples alone do not prove live compatibility.
+
 ## Authentication
 
 The web API uses ASP.NET session cookies. No JWTs involved - the auth flow is WS-Federation (SAML XML tokens) between three domains:
@@ -221,7 +225,7 @@ Homework detail. Returns description, teacher, attachments, and student response
 }
 ```
 
-### GET /api/SprawdzianyZadaniaDomowe?key={key}
+### GET /api/SprawdzianyZadaniaDomowe?key={key}&dataOd={from}&dataDo={to}
 
 Calendar view combining both exams and homework. Used by the "Sprawdziany i zadania domowe" page.
 
@@ -297,6 +301,19 @@ Response: list of lesson dicts with keys:
   - `sala` — replacement room (may be empty string)
   - `dzien`, `nrLekcji`, `godzinaOd`, `godzinaDo`, `grupa`, `zajecia`, `informacjeNieobecnosc` — nullable overrides for reschedules/absences
 - `zmianyUwagi` — list of free-text remarks about the change
+
+### GET /api/RealizacjaZajec13?key={key}&dataOd={from}&dataDo={to}&status={status}
+
+Lesson realization, used by the web `/realizacjaZajec` page. Both tabs use this
+endpoint: `status=2` selects **Zaplanowane**, and `status=1` selects **Zrealizowane**.
+This is a separate entity from the lesson schedule returned by `PlanZajec`.
+
+The observed response is an array of records with `id`, `data`, `nrLekcji`,
+`przedmiot`, `nauczyciel`, `blokTematyczny` and `tematOpis` (topic/description).
+Additional fields are `online` (Zajęcia online), `kolekcjePoLekcji` and
+`existsKolekcjePoLekcji` (Kolekcje po lekcji), and `zasoby` (Zasoby). Online links
+and collections were empty and resources null in the sample; populated shapes
+remain unverified. See `docs/eduvulcan/openapi.yaml` for the captured schema.
 
 ### GET /api/KomunikatStartowy
 

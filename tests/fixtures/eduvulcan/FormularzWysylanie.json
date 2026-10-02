@@ -1,0 +1,7 @@
+{
+  "endpoint": "/api/FormularzWysylanie",
+  "source": "sanitized-live",
+  "responses": [
+    []
+  ]
+}

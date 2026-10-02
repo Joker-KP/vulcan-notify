@@ -1,0 +1,12 @@
+{
+  "endpoint": "/api/WiadomosciNieodczytane",
+  "source": "sanitized-live",
+  "responses": [
+    {
+      "liczbaWiadomosciNieodczytanych": 1
+    },
+    {
+      "liczbaWiadomosciNieodczytanych": 1
+    }
+  ]
+}

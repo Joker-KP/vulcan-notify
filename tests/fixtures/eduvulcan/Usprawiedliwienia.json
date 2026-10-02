@@ -1,0 +1,58 @@
+{
+  "endpoint": "/api/Usprawiedliwienia",
+  "source": "sanitized-live",
+  "responses": [
+    {
+      "usprawiedliwieniaAktywne": false,
+      "usprawiedliwieniaBlokada": {
+        "dataOd": null,
+        "dataDo": null,
+        "obowiazujeDo": null,
+        "oddzialy": {}
+      },
+      "usprawiedliwienia": [
+        {
+          "status": 1,
+          "dzien": "2000-01-03T08:00:00+01:00",
+          "poczatekLekcji": null,
+          "koniecLekcji": null,
+          "idPoraLekcji": null,
+          "numerLekcji": null,
+          "idUsprawiedliwienieDzien": 1,
+          "idUsprawiedliwienieDzienPoraLekcji": 1
+        }
+      ]
+    },
+    {
+      "usprawiedliwieniaAktywne": false,
+      "usprawiedliwieniaBlokada": {
+        "dataOd": null,
+        "dataDo": null,
+        "obowiazujeDo": null,
+        "oddzialy": {}
+      },
+      "usprawiedliwienia": []
+    },
+    {
+      "usprawiedliwieniaAktywne": false,
+      "usprawiedliwieniaBlokada": {
+        "dataOd": null,
+        "dataDo": null,
+        "obowiazujeDo": null,
+        "oddzialy": {}
+      },
+      "usprawiedliwienia": [
+        {
+          "status": 1,
+          "dzien": "2000-01-03T08:00:00+01:00",
+          "poczatekLekcji": null,
+          "koniecLekcji": null,
+          "idPoraLekcji": null,
+          "numerLekcji": null,
+          "idUsprawiedliwienieDzien": 1,
+          "idUsprawiedliwienieDzienPoraLekcji": 1
+        }
+      ]
+    }
+  ]
+}

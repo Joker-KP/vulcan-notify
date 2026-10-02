@@ -1,0 +1,48 @@
+{
+  "endpoint": "/api/RealizacjaZajec13",
+  "source": "sanitized-live",
+  "responses": [
+    [],
+    [
+      {
+        "blokTematyczny": "",
+        "data": "2000-01-03T08:00:00+01:00",
+        "przedmiot": "SYNTHETIC",
+        "nauczyciel": "SYNTHETIC",
+        "tematOpis": "SYNTHETIC",
+        "online": "",
+        "nrLekcji": 1,
+        "kolekcjePoLekcji": [],
+        "existsKolekcjePoLekcji": false,
+        "zasoby": null,
+        "id": 1
+      },
+      {
+        "blokTematyczny": "",
+        "data": "2000-01-03T08:00:00+01:00",
+        "przedmiot": "SYNTHETIC",
+        "nauczyciel": "SYNTHETIC",
+        "tematOpis": "SYNTHETIC",
+        "online": "",
+        "nrLekcji": 1,
+        "kolekcjePoLekcji": [],
+        "existsKolekcjePoLekcji": false,
+        "zasoby": null,
+        "id": 1
+      },
+      {
+        "blokTematyczny": "",
+        "data": "2000-01-03T08:00:00+01:00",
+        "przedmiot": "SYNTHETIC",
+        "nauczyciel": "SYNTHETIC",
+        "tematOpis": "SYNTHETIC",
+        "online": "",
+        "nrLekcji": 1,
+        "kolekcjePoLekcji": [],
+        "existsKolekcjePoLekcji": false,
+        "zasoby": null,
+        "id": 1
+      }
+    ]
+  ]
+}

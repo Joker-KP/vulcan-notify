@@ -1,0 +1,22 @@
+{
+  "endpoint": "/api/Informacje",
+  "source": "sanitized-live",
+  "responses": [
+    {
+      "nazwa": "SYNTHETIC",
+      "imienia": "SYNTHETIC",
+      "numer": "",
+      "miejscowosc": "SYNTHETIC",
+      "ulica": "SYNTHETIC",
+      "kodPocztowy": "SYNTHETIC",
+      "nrDomu": "SYNTHETIC",
+      "nrMieszkania": "",
+      "dyrektor": "SYNTHETIC",
+      "stronaWwwUrl": "SYNTHETIC",
+      "mail": "SYNTHETIC",
+      "telSluzbowy": "",
+      "telKomorkowy": "SYNTHETIC",
+      "telDomowy": ""
+    }
+  ]
+}

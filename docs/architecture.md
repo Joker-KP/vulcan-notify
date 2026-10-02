@@ -79,6 +79,7 @@ On first sync for a student, every item is treated as baseline: stored silently,
 | `config.py` | `pydantic-settings` singleton loaded from `.env` + env vars. | `Settings`, `settings` |
 | `auth.py` | Persistent Chromium recovery before credentials; explicit headed interactive login; macOS Keychain fallback. | `auto_login()`, `login_and_save_session()`, `cookies_for_url()` |
 | `client.py` | aiohttp wrapper over the eduVulcan web API. Detects HTML responses as expired-session sentinel. | `VulcanClient` |
+| `eduvulcan_contract.py` | Explicit upstream OpenAPI gathering and structural checks; sanitized fixtures and reports, independent of SQLite sync and notification delivery. | `api-gather`, `api-check` |
 | `models.py` | Dataclasses for API responses: `Student`, `Grade`, `AttendanceEntry`, `Exam`, `Homework`, `Message`, `Lesson`. | — |
 | `sync.py` | Orchestrates one full sync run per student; writes a `sync_runs` row; fans out to channels. | `sync_all()`, `SyncResult` |
 | `differ.py` | Detects new/updated/deleted items. Returns `Change` dataclasses. | `diff_grades`, `diff_attendance`, `diff_exams`, `diff_homework`, `diff_messages`, `diff_schedule` |

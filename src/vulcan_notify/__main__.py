@@ -335,6 +335,10 @@ def main() -> None:
             asyncio.run(cmd_auth())
         case "test":
             asyncio.run(cmd_test())
+        case "api-gather" | "api-check":
+            from vulcan_notify.eduvulcan_contract import main as contract_main
+
+            contract_main(sys.argv[1:])
         case "sync":
             asyncio.run(cmd_sync())
         case "heartbeat":
@@ -357,9 +361,14 @@ def main() -> None:
                 sys.exit(1)
             asyncio.run(cmd_summarize(summary_type=summary_type, days=days))
         case _:
-            print("Usage: vulcan-notify [auth|test|sync|heartbeat|calendar|tui|summarize]")
+            print(
+                "Usage: vulcan-notify "
+                "[auth|test|api-gather|api-check|sync|heartbeat|calendar|tui|summarize]"
+            )
             print("  auth      - Interactive login and save session")
             print("  test      - Test if saved session is valid")
+            print("  api-gather - Gather the upstream OpenAPI baseline and sanitized fixtures")
+            print("  api-check  - Check live upstream responses against the saved contract")
             print("  sync      - Fetch latest data and show changes (default)")
             print("  heartbeat - Publish the retained MQTT heartbeat only, no sync")
             print("  calendar  - Force re-sync all events to macOS Calendar")

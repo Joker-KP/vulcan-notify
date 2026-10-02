@@ -1,0 +1,40 @@
+{
+  "endpoint": "/api/WychowawcyTablica",
+  "source": "sanitized-live",
+  "responses": [
+    [
+      {
+        "imieNazwisko": "SYNTHETIC",
+        "isGlowny": false,
+        "globalKeySkrzynka": "00000000-0000-4000-8000-000000000001"
+      },
+      {
+        "imieNazwisko": "SYNTHETIC",
+        "isGlowny": false,
+        "globalKeySkrzynka": "00000000-0000-4000-8000-000000000001"
+      },
+      {
+        "imieNazwisko": "SYNTHETIC",
+        "isGlowny": false,
+        "globalKeySkrzynka": "00000000-0000-4000-8000-000000000001"
+      }
+    ],
+    [
+      {
+        "imieNazwisko": "SYNTHETIC",
+        "isGlowny": false,
+        "globalKeySkrzynka": "00000000-0000-4000-8000-000000000001"
+      },
+      {
+        "imieNazwisko": "SYNTHETIC",
+        "isGlowny": false,
+        "globalKeySkrzynka": "00000000-0000-4000-8000-000000000001"
+      },
+      {
+        "imieNazwisko": "SYNTHETIC",
+        "isGlowny": false,
+        "globalKeySkrzynka": "00000000-0000-4000-8000-000000000001"
+      }
+    ]
+  ]
+}

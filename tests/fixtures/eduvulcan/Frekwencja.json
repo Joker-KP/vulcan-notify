@@ -1,0 +1,163 @@
+{
+  "endpoint": "/api/Frekwencja",
+  "source": "sanitized-live",
+  "responses": [
+    {
+      "oddzialy": [
+        {
+          "idPoraLekcji": 1,
+          "idLekcjaOddzial": 1,
+          "numerLekcji": 1,
+          "kategoriaFrekwencji": 1,
+          "data": "2000-01-03T08:00:00+01:00",
+          "godzinaOd": "2000-01-03T08:00:00+01:00",
+          "godzinaDo": "2000-01-03T08:00:00+01:00",
+          "opisZajec": "SYNTHETIC",
+          "nauczyciel": "SYNTHETIC",
+          "dataOd": "2000-01-03T08:00:00+01:00",
+          "dataDo": "2000-01-03T08:00:00+01:00"
+        },
+        {
+          "idPoraLekcji": 1,
+          "idLekcjaOddzial": 1,
+          "numerLekcji": 1,
+          "kategoriaFrekwencji": 1,
+          "data": "2000-01-03T08:00:00+01:00",
+          "godzinaOd": "2000-01-03T08:00:00+01:00",
+          "godzinaDo": "2000-01-03T08:00:00+01:00",
+          "opisZajec": "SYNTHETIC",
+          "nauczyciel": "SYNTHETIC",
+          "dataOd": "2000-01-03T08:00:00+01:00",
+          "dataDo": "2000-01-03T08:00:00+01:00"
+        },
+        {
+          "idPoraLekcji": 1,
+          "idLekcjaOddzial": 1,
+          "numerLekcji": 1,
+          "kategoriaFrekwencji": 1,
+          "data": "2000-01-03T08:00:00+01:00",
+          "godzinaOd": "2000-01-03T08:00:00+01:00",
+          "godzinaDo": "2000-01-03T08:00:00+01:00",
+          "opisZajec": "SYNTHETIC",
+          "nauczyciel": "SYNTHETIC",
+          "dataOd": "2000-01-03T08:00:00+01:00",
+          "dataDo": "2000-01-03T08:00:00+01:00"
+        }
+      ],
+      "dziennikiZajecInnych": [
+        {
+          "kategoriaFrekwencji": 1,
+          "data": "2000-01-03T08:00:00+01:00",
+          "godzinaOd": "2000-01-03T08:00:00+01:00",
+          "godzinaDo": "2000-01-03T08:00:00+01:00",
+          "opisZajec": "SYNTHETIC",
+          "nauczyciel": "SYNTHETIC",
+          "dataOd": "2000-01-03T08:00:00+01:00",
+          "dataDo": "2000-01-03T08:00:00+01:00"
+        }
+      ],
+      "dziennikiSwietlicy": []
+    },
+    {
+      "oddzialy": [
+        {
+          "idPoraLekcji": 1,
+          "idLekcjaOddzial": 1,
+          "numerLekcji": 1,
+          "kategoriaFrekwencji": 1,
+          "data": "2000-01-03T08:00:00+01:00",
+          "godzinaOd": "2000-01-03T08:00:00+01:00",
+          "godzinaDo": "2000-01-03T08:00:00+01:00",
+          "opisZajec": "SYNTHETIC",
+          "nauczyciel": "SYNTHETIC",
+          "dataOd": "2000-01-03T08:00:00+01:00",
+          "dataDo": "2000-01-03T08:00:00+01:00"
+        },
+        {
+          "idPoraLekcji": 1,
+          "idLekcjaOddzial": 1,
+          "numerLekcji": 1,
+          "kategoriaFrekwencji": 1,
+          "data": "2000-01-03T08:00:00+01:00",
+          "godzinaOd": "2000-01-03T08:00:00+01:00",
+          "godzinaDo": "2000-01-03T08:00:00+01:00",
+          "opisZajec": "SYNTHETIC",
+          "nauczyciel": "SYNTHETIC",
+          "dataOd": "2000-01-03T08:00:00+01:00",
+          "dataDo": "2000-01-03T08:00:00+01:00"
+        },
+        {
+          "idPoraLekcji": 1,
+          "idLekcjaOddzial": 1,
+          "numerLekcji": 1,
+          "kategoriaFrekwencji": 1,
+          "data": "2000-01-03T08:00:00+01:00",
+          "godzinaOd": "2000-01-03T08:00:00+01:00",
+          "godzinaDo": "2000-01-03T08:00:00+01:00",
+          "opisZajec": "SYNTHETIC",
+          "nauczyciel": "SYNTHETIC",
+          "dataOd": "2000-01-03T08:00:00+01:00",
+          "dataDo": "2000-01-03T08:00:00+01:00"
+        }
+      ],
+      "dziennikiZajecInnych": [],
+      "dziennikiSwietlicy": []
+    },
+    {
+      "oddzialy": [
+        {
+          "idPoraLekcji": 1,
+          "idLekcjaOddzial": 1,
+          "numerLekcji": 1,
+          "kategoriaFrekwencji": 1,
+          "data": "2000-01-03T08:00:00+01:00",
+          "godzinaOd": "2000-01-03T08:00:00+01:00",
+          "godzinaDo": "2000-01-03T08:00:00+01:00",
+          "opisZajec": "SYNTHETIC",
+          "nauczyciel": "SYNTHETIC",
+          "dataOd": "2000-01-03T08:00:00+01:00",
+          "dataDo": "2000-01-03T08:00:00+01:00"
+        },
+        {
+          "idPoraLekcji": 1,
+          "idLekcjaOddzial": 1,
+          "numerLekcji": 1,
+          "kategoriaFrekwencji": 1,
+          "data": "2000-01-03T08:00:00+01:00",
+          "godzinaOd": "2000-01-03T08:00:00+01:00",
+          "godzinaDo": "2000-01-03T08:00:00+01:00",
+          "opisZajec": "SYNTHETIC",
+          "nauczyciel": "SYNTHETIC",
+          "dataOd": "2000-01-03T08:00:00+01:00",
+          "dataDo": "2000-01-03T08:00:00+01:00"
+        },
+        {
+          "idPoraLekcji": 1,
+          "idLekcjaOddzial": 1,
+          "numerLekcji": 1,
+          "kategoriaFrekwencji": 1,
+          "data": "2000-01-03T08:00:00+01:00",
+          "godzinaOd": "2000-01-03T08:00:00+01:00",
+          "godzinaDo": "2000-01-03T08:00:00+01:00",
+          "opisZajec": "SYNTHETIC",
+          "nauczyciel": "SYNTHETIC",
+          "dataOd": "2000-01-03T08:00:00+01:00",
+          "dataDo": "2000-01-03T08:00:00+01:00"
+        }
+      ],
+      "dziennikiZajecInnych": [
+        {
+          "kategoriaFrekwencji": 1,
+          "data": "2000-01-03T08:00:00+01:00",
+          "godzinaOd": "2000-01-03T08:00:00+01:00",
+          "godzinaDo": "2000-01-03T08:00:00+01:00",
+          "opisZajec": "SYNTHETIC",
+          "nauczyciel": "SYNTHETIC",
+          "dataOd": "2000-01-03T08:00:00+01:00",
+          "dataDo": "2000-01-03T08:00:00+01:00"
+        }
+      ],
+      "dziennikiSwietlicy": []
+    }
+  ]
+}

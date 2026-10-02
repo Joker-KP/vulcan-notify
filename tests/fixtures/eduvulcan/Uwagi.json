@@ -1,0 +1,30 @@
+{
+  "endpoint": "/api/Uwagi",
+  "source": "sanitized-live",
+  "responses": [
+    [
+      {
+        "data": "2000-01-03T08:00:00+01:00",
+        "kategoria": "SYNTHETIC",
+        "typ": 1,
+        "autor": "SYNTHETIC",
+        "liczbaPunktow": null,
+        "tresc": "SYNTHETIC",
+        "rodzaj": 1,
+        "id": 1
+      }
+    ],
+    [
+      {
+        "data": "2000-01-03T08:00:00+01:00",
+        "kategoria": "SYNTHETIC",
+        "typ": 1,
+        "autor": "SYNTHETIC",
+        "liczbaPunktow": null,
+        "tresc": "SYNTHETIC",
+        "rodzaj": 1,
+        "id": 1
+      }
+    ]
+  ]
+}

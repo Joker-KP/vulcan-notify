@@ -1,0 +1,7 @@
+{
+  "endpoint": "/api/Egzaminy",
+  "source": "sanitized-live",
+  "responses": [
+    []
+  ]
+}

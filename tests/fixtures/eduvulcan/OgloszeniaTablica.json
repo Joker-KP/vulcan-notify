@@ -1,0 +1,7 @@
+{
+  "endpoint": "/api/OgloszeniaTablica",
+  "source": "sanitized-live",
+  "responses": [
+    []
+  ]
+}

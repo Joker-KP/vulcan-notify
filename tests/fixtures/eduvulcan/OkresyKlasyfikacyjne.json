@@ -1,0 +1,34 @@
+{
+  "endpoint": "/api/OkresyKlasyfikacyjne",
+  "source": "sanitized-live",
+  "responses": [
+    [
+      {
+        "numerOkresu": 1,
+        "dataOd": "2000-01-03T08:00:00+01:00",
+        "dataDo": "2000-01-03T08:00:00+01:00",
+        "id": 1
+      },
+      {
+        "numerOkresu": 1,
+        "dataOd": "2000-01-03T08:00:00+01:00",
+        "dataDo": "2000-01-03T08:00:00+01:00",
+        "id": 1
+      }
+    ],
+    [
+      {
+        "numerOkresu": 1,
+        "dataOd": "2000-01-03T08:00:00+01:00",
+        "dataDo": "2000-01-03T08:00:00+01:00",
+        "id": 1
+      },
+      {
+        "numerOkresu": 1,
+        "dataOd": "2000-01-03T08:00:00+01:00",
+        "dataDo": "2000-01-03T08:00:00+01:00",
+        "id": 1
+      }
+    ]
+  ]
+}

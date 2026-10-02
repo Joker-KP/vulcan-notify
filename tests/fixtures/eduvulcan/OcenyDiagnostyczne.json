@@ -1,0 +1,7 @@
+{
+  "endpoint": "/api/OcenyDiagnostyczne",
+  "source": "sanitized-live",
+  "responses": [
+    []
+  ]
+}

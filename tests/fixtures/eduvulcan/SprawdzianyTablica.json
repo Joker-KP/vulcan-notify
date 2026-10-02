@@ -1,0 +1,14 @@
+{
+  "endpoint": "/api/SprawdzianyTablica",
+  "source": "synthetic-from-documentation",
+  "responses": [
+    [
+      {
+        "id": 1,
+        "data": "2000-01-03T00:00:00+01:00",
+        "przedmiot": "Example Subject",
+        "rodzaj": 1
+      }
+    ]
+  ]
+}

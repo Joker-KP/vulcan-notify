@@ -62,12 +62,17 @@ uv run vulcan-notify sync
 |---------|-------------|
 | `vulcan-notify auth` | Interactive browser login, saves session cookies |
 | `vulcan-notify test` | Test if saved session is still valid |
+| `vulcan-notify api-gather` | On-demand upstream OpenAPI gathering and sanitized fixture update |
+| `vulcan-notify api-check` | On-demand live check against the saved upstream contract |
 | `vulcan-notify sync` | Fetch latest data and show changes (default) |
 | `vulcan-notify calendar` | Force re-sync all exams/homework to macOS Calendar |
 | `vulcan-notify tui` | Interactive Textual browser for synced content (requires `uv sync --extra tui`) |
 | `vulcan-notify summarize [--type sync\|messages] [--days N]` | AI summary of recent changes or messages (requires `LLM_API_KEY`) |
 
 ## ⚙️ How it works <a name="how-it-works"></a>
+
+For upstream API verification and discovery, see the
+[OpenAPI contract guide](docs/eduvulcan/README.md). These jobs run only when invoked.
 
 End-to-end flow from the eduVulcan API down to a push notification on your phone and a tile on your Home Assistant dashboard:
 

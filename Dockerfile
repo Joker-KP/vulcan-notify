@@ -51,6 +51,7 @@ RUN chmod +x sync-loop.sh entrypoint-xvfb.sh
 
 COPY prompts.toml ./
 COPY src/ src/
+COPY docs/eduvulcan/ docs/eduvulcan/
 
 # Only the application installation needs to rerun when src/ changes.
 RUN uv sync \

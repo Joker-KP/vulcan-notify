@@ -1,0 +1,19 @@
+{
+  "endpoint": "/api/ZadanieDomoweSzczegoly",
+  "source": "synthetic-from-documentation",
+  "responses": [
+    {
+      "id": 1,
+      "typ": 4,
+      "data": "2000-01-03T00:00:00+01:00",
+      "przedmiotNazwa": "Example Subject",
+      "nauczycielImieNazwisko": "Example Teacher",
+      "opis": "Synthetic homework",
+      "zalaczniki": [],
+      "linki": [],
+      "status": 0,
+      "odpowiedzWymagana": false,
+      "odpowiedz": null
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "endpoint": "/api/ZgloszoneNieobecnosci",
+  "source": "sanitized-live",
+  "responses": [
+    [],
+    []
+  ]
+}

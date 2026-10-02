@@ -1,0 +1,7 @@
+{
+  "endpoint": "/api/DyzurniTablica",
+  "source": "sanitized-live",
+  "responses": [
+    []
+  ]
+}

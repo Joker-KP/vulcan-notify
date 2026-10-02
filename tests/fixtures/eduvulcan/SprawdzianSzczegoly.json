@@ -1,0 +1,14 @@
+{
+  "endpoint": "/api/SprawdzianSzczegoly",
+  "source": "synthetic-from-documentation",
+  "responses": [
+    {
+      "id": 1,
+      "typ": 1,
+      "data": "2000-01-03T00:00:00+01:00",
+      "przedmiotNazwa": "Example Subject",
+      "nauczycielImieNazwisko": "Example Teacher",
+      "opis": "Synthetic exam"
+    }
+  ]
+}

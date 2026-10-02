@@ -1,0 +1,7 @@
+{
+  "endpoint": "/api/OcenyTablica",
+  "source": "sanitized-live",
+  "responses": [
+    []
+  ]
+}
