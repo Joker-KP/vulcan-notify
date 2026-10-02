@@ -6,6 +6,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from vulcan_notify.client import SessionExpiredError
 from vulcan_notify.config import settings
@@ -73,6 +74,8 @@ class FullSyncResult:
     new_messages: list[Message] = field(default_factory=list)
     is_first_message_sync: bool = False
     message_failure: str | None = None
+    # Stable across repeated output delivery, distinct for each synchronization run.
+    notification_id: str = field(default_factory=lambda: uuid4().hex, repr=False, compare=False)
 
     @property
     def has_failures(self) -> bool:
@@ -404,7 +407,7 @@ async def sync_all(
             await db.complete_sync_run(
                 run_id, "failed", 0, 0, 1, "roster empty: no active students returned"
             )
-            return FullSyncResult(student_results=[])
+            return FullSyncResult(student_results=[], notification_id=f"sync:{run_id}")
 
         # Vulcan's current roster is the source of truth for which keys are live.
         # Do this before syncing so a mid-loop failure still leaves the flags right.
@@ -446,6 +449,7 @@ async def sync_all(
             new_messages=new_messages,
             is_first_message_sync=is_first_msg,
             message_failure=msg_failure,
+            notification_id=f"sync:{run_id}",
         )
     except SessionExpiredError as exc:
         await db.complete_sync_run(
@@ -455,6 +459,7 @@ async def sync_all(
             exc.partial_result if isinstance(exc, SyncSessionExpiredError) else FullSyncResult([])
         )
         partial.student_results = student_results + partial.student_results
+        partial.notification_id = f"sync:{run_id}"
         raise SyncSessionExpiredError(str(exc), partial) from exc
     except Exception as exc:
         await db.complete_sync_run(run_id, "failed", 0, items, errors + 1, str(exc))

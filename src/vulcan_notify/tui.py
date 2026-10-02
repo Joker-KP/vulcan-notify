@@ -20,7 +20,8 @@ from textual.widgets import (
 
 from vulcan_notify.config import settings
 from vulcan_notify.db import Database
-from vulcan_notify.display import _format_sender_short, _strip_html
+from vulcan_notify.display import _format_sender_short
+from vulcan_notify.text import strip_html
 
 ATTENDANCE_CATEGORIES: dict[int, str] = {
     1: "Present",
@@ -274,7 +275,7 @@ class MainScreen(Screen[None]):
                     r["student_name"] = student_name
                     content = str(r.get("content", "") or "")
                     if content:
-                        content = _strip_html(content)
+                        content = strip_html(content)
                     table.add_row(
                         str(r.get("date", ""))[:10],
                         student_name,
@@ -391,7 +392,7 @@ class MainScreen(Screen[None]):
             elif tab_name == "homework":
                 content = str(r.get("content", "") or "")
                 if content:
-                    content = _strip_html(content)
+                    content = strip_html(content)
                 table.add_row(
                     str(r.get("date", ""))[:10],
                     str(r.get("student_name", "")),
@@ -418,7 +419,7 @@ class MainScreen(Screen[None]):
         if tab_name == "messages":
             sender = str(row.get("sender", ""))
             content = row.get("content")
-            body = _strip_html(str(content)) if content and isinstance(content, str) else None
+            body = strip_html(str(content)) if content and isinstance(content, str) else None
             fields = [
                 ("From", sender),
                 ("Subject", str(row.get("subject", ""))),
@@ -466,7 +467,7 @@ class MainScreen(Screen[None]):
                 int(exam_type_int) if isinstance(exam_type_int, int) else 0, "Exam"
             )
             desc = row.get("description")
-            body = _strip_html(str(desc)) if desc and isinstance(desc, str) else None
+            body = strip_html(str(desc)) if desc and isinstance(desc, str) else None
             fields = [
                 ("Student", str(row.get("student_name", ""))),
                 ("Date", str(row.get("date", ""))[:10]),
@@ -478,7 +479,7 @@ class MainScreen(Screen[None]):
 
         elif tab_name == "homework":
             content = row.get("content")
-            body = _strip_html(str(content)) if content and isinstance(content, str) else None
+            body = strip_html(str(content)) if content and isinstance(content, str) else None
             fields = [
                 ("Student", str(row.get("student_name", ""))),
                 ("Date", str(row.get("date", ""))[:10]),

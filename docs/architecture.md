@@ -1,6 +1,6 @@
 # Architecture
 
-This document explains how `vulcan-notify` is put together: the sync pipeline, persistence, change detection, and the fan-out to notification channels (terminal, macOS Calendar, MQTT, HTTP/iCalendar).
+This document explains how `vulcan-notify` is put together: the sync pipeline, persistence, change detection, and the fan-out to notification channels (terminal, SMTP email, macOS Calendar, MQTT, HTTP/iCalendar).
 
 For deployment topology (Docker + Proxmox LXC + systemd), see [`deployment.md`](deployment.md). For the reverse-engineered upstream API, see [`eduvulcan-api.md`](eduvulcan-api.md).
 
@@ -66,7 +66,7 @@ The CLI always follows the same six-phase pipeline:
 | Fetch | `client.py` | `VulcanClient` methods | Pull students, grades (all periods), attendance (last N days), exams, homework (full body), messages, lesson schedule with substitutions. |
 | Diff | `differ.py` | `diff_*` | Produce `Change` objects by comparing fetched data to the DB. |
 | Persist | `db.py` | `Database.upsert_*` | Apply `ON CONFLICT ... DO UPDATE` upserts; soft-delete removed exams/homework. |
-| Publish | `display.py`, `calendar.py`, `mqtt.py` | Fan-out | Print to terminal, sync macOS Calendar events, enqueue + publish MQTT messages. |
+| Publish | `display.py`, `email.py`, `calendar.py`, `mqtt.py` | Fan-out | Print to terminal, queue + send SMTP digests, sync macOS Calendar events, enqueue + publish MQTT messages. |
 | Serve | `api.py` (separate process/command) | aiohttp app | Expose HTTP endpoints and iCalendar feeds over the same SQLite. |
 
 On first sync for a student, every item is treated as baseline: stored silently, no change events emitted. Only subsequent runs report diffs.
@@ -86,6 +86,7 @@ On first sync for a student, every item is treated as baseline: stored silently,
 | `db.py` | Async SQLite persistence via aiosqlite. All writes are `ON CONFLICT ... DO UPDATE`. | `Database` |
 | `display.py` | Terminal output with ANSI colors (auto-disabled when piped). | `format_result()` |
 | `calendar.py` | macOS Calendar integration via AppleScript. Dedup by stored UID; soft-deleted items remove events. | `sync_calendar()` |
+| `email.py` | Per-sync SMTP digest; optional existing AI summary replacement, per-recipient durable retries. | `format_summary()`, `queue_summary()`, `drain_email_outbox()`, `publish_email()` |
 | `mqtt.py` | Maps `Change` → topic + JSON payload; writes to the `mqtt_outbox` table; drains outbox to Mosquitto on every sync and publishes a retained heartbeat + LWT on `<prefix>/status`. | `topic_for()`, `build_payload()`, `build_status_payload()`, `drain_outbox()` |
 | `api.py` | aiohttp HTTP server (port 8585). Grade aggregates, homework/messages/schedule endpoints, iCalendar feed. | `build_app()` |
 | `ics.py` | Zero-dependency RFC 5545 iCalendar writer. | `build_calendar()` |
@@ -105,6 +106,7 @@ SQLite lives at `DB_PATH` (default `vulcan_notify.db`). Tables:
 | `messages` | `id` with `UNIQUE(api_global_key)` | `content` is backfilled in batches of `SYNC_MESSAGE_BACKFILL_BATCH` per run for legacy rows. |
 | `schedule` | `(student_key, date, time_from, subject)` | Per-lesson schedule including substitutions (`sub_teacher`, `sub_room`), cancellations (`annotation`), and extra lessons (`is_extra`). |
 | `mqtt_outbox` | `id` AUTOINCREMENT | Every MQTT publish is enqueued first; drained on each run. Broker outages survive restarts. |
+| `email_outbox` | `delivery_key` | Digest per sync-run/recipient; pending envelopes persist across restarts. Successful rows retain deduplication metadata while clearing private content. |
 | `sync_state` | `key` | Generic KV. Holds `last_sync:<student>` (has this student ever synced — drives first-sync suppression) and `last_success:<student>:<section>` (freshness, written only after a confirmed fetch). The two are deliberately separate. |
 | `sync_runs` | `id` AUTOINCREMENT | History of runs: `completed`, `degraded` (a section failed), `failed`, or `interrupted` (abandoned mid-run, reconciled on the next start). Pruned past `SYNC_HISTORY_KEEP_DAYS`. |
 | `sync_sections` | `id` AUTOINCREMENT | Per-section, per-student outcome for each run, with item counts and error detail. Without it a partial outage — grades broken, everything else fine — is invisible. |
@@ -129,13 +131,31 @@ First sync for a student writes a `sync_state` marker and suppresses all changes
 
 Primary, always on. Groups output by student, then data type. ANSI colors are auto-disabled when stdout is not a TTY, so piping to a log file stays clean. This is the shape meant for cron (`vulcan-notify sync >> sync.log`).
 
+### Email (`email.py` + `email_outbox`)
+
+Optional (`EMAIL_ENABLED=true`). The CLI passes each completed or interrupted
+`FullSyncResult` to the email adapter before other optional outputs. Baseline events
+are suppressed independently for students and messages. A plain digest is committed
+before optional AI preparation; `EMAIL_AI_SUMMARY=true` and `LLM_API_KEY` enable the
+existing summarizer's default prompt. AI failures fall back to the plain digest.
+Message bodies require `EMAIL_INCLUDE_MESSAGE_BODIES=true`.
+
+SMTP uses certificate-verified STARTTLS by default, with implicit TLS and plain
+relay modes available. Blocking operations run in a worker thread. Delivery is
+recorded per recipient; failures remain queued, and subsequent syncs or
+`email-retry` retry the stored body. Failure does not prevent MQTT or Calendar output.
+Stable `Message-ID` headers are preserved on retries, but ambiguous SMTP acceptance
+can still cause duplicates. Entity writes and email enqueue are separate commits;
+a crash between them can lose a notification. A single delivery owner is required.
+See [email configuration and limitations](email.md).
+
 ### macOS Calendar (`calendar.py`)
 
 Optional. Driven by `CALENDAR_MAP` (JSON dict: student name → macOS calendar name). For each new/updated exam and homework, AppleScript creates an all-day event with a reminder alarm (`CALENDAR_REMINDER_HOURS`). The macOS-assigned UID is stored back in the DB so subsequent syncs update in-place and soft-deletes remove the event. iCloud handles propagation to iPhone/iPad.
 
 ### MQTT (`mqtt.py` + `mqtt_outbox`)
 
-Optional (`MQTT_ENABLED=true`). Every `Change` is enqueued in `mqtt_outbox` inside the same transaction that persists the entity. A separate drain step publishes to Mosquitto; failures stay in the outbox and are retried on the next run. This gives at-least-once delivery without requiring the broker to be up at sync time.
+Optional (`MQTT_ENABLED=true`). Every `Change` is enqueued in `mqtt_outbox` after entity persistence, using a separate commit. A drain step publishes to Mosquitto; failures stay in the outbox and are retried on the next run. A crash before enqueue can lose an event, and change publication does not explicitly use acknowledged QoS 1; end-to-end at-least-once delivery is not guaranteed.
 
 **Topic scheme:** `<MQTT_TOPIC_PREFIX>/<student-slug>/<segment>/<change_type>`
 

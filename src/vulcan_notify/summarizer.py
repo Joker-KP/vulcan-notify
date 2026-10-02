@@ -56,8 +56,9 @@ async def summarize(
         content = response.choices[0].message.content
         return content if content else None
 
-    except Exception:
-        log.exception("Failed to generate AI summary")
+    except Exception as exc:
+        # Provider errors can contain private prompts or authentication details.
+        log.warning("Failed to generate AI summary (%s)", type(exc).__name__)
         return None
 
 

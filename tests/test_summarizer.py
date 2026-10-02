@@ -13,11 +13,11 @@ def _settings(tmp_path: Path, *, api_key: str | None = "test-key") -> Settings:
     """Create Settings with a temp prompts file."""
     prompts = tmp_path / "prompts.toml"
     prompts.write_text(
-        '[default]\n'
+        "[default]\n"
         'system = "You summarize school updates."\n'
         'prompt = "Summarize: {sync_output}"\n'
-        '\n'
-        '[weekly]\n'
+        "\n"
+        "[weekly]\n"
         'system = "You write weekly reports."\n'
         'prompt = "Weekly report: {sync_output}"\n'
     )
@@ -90,14 +90,18 @@ async def test_strips_ansi_before_sending(
 async def test_returns_none_on_api_error(
     mock_openai_cls: MagicMock,
     tmp_path: Path,
+    caplog,
 ) -> None:
     mock_client = AsyncMock()
     mock_openai_cls.return_value = mock_client
-    mock_client.chat.completions.create.side_effect = RuntimeError("API down")
+    mock_client.chat.completions.create.side_effect = RuntimeError("private prompt and secret key")
 
     s = _settings(tmp_path)
     result = await summarize("output", s)
     assert result is None
+    assert "RuntimeError" in caplog.text
+    assert "private prompt" not in caplog.text
+    assert "secret key" not in caplog.text
 
 
 @patch(_PATCH_TARGET)

@@ -41,7 +41,7 @@ SQLite current + historical state
 Change detection
    |
    +--> terminal / logs
-   +--> email (planned)
+   +--> email (SMTP digest, optional AI summary)
    +--> MQTT
    +--> HTTP API
    +--> iCalendar / calendar integration
@@ -134,6 +134,9 @@ Important modules include, or may include depending on the current branch:
 
 - `src/vulcan_notify/mqtt.py`
   - MQTT publication and a persistent retry outbox, with delivery limitations described in section 6.
+
+- `src/vulcan_notify/email.py`
+  - Per-sync SMTP digest, optional AI replacement and a persistent per-recipient outbox.
 
 - `src/vulcan_notify/api.py`
   - HTTP API, currently expected on port `8585`.
@@ -245,7 +248,7 @@ Current output status:
 | HTTP API | Implemented | Reads local SQLite state in the separate `vulcan-api` service; liveness at `/api/alive`, freshness at `/api/health` (`?soft=1` forces HTTP 200). |
 | iCalendar feed | Implemented | Lesson schedule at `/calendar/{student}.ics`; currently excludes exams and homework. |
 | macOS Calendar | Implemented, optional, macOS only | Exams/homework via AppleScript, enabled by `CALENDAR_MAP`. |
-| Email | Planned | No email adapter or transport settings in the current application. |
+| Email | Implemented, optional | Per-sync SMTP digest of detected student changes and new messages; optional AI replacement and persistent retries. |
 | ntfy | Deployment-only | Used by `deploy/vulcan-deploy.sh`; no adapter for synchronized school changes. |
 
 ### Terminal / logs
@@ -254,11 +257,11 @@ Useful for development, diagnostics, cron/container logs and manual synchronizat
 
 ### Email
 
-Email is a planned notification channel, particularly for content that is poorly represented by the standard eduVULCAN notifications. Do not claim email delivery support until an adapter, configuration and tests exist.
+`email.py` prepares a plain digest of the current `FullSyncResult` when `EMAIL_ENABLED=true`, including partial results before session recovery. Baselines and unchanged runs create no email. The digest is committed to `email_outbox` before optional AI preparation or SMTP delivery. `EMAIL_AI_SUMMARY=true` also requires `LLM_API_KEY`; AI failure falls back to the plain body. Message bodies require `EMAIL_INCLUDE_MESSAGE_BODIES=true`, which also controls their inclusion in AI input.
 
-Message bodies and other sensitive content must be handled deliberately.
+Delivery is tracked per sync-run/recipient; retries reuse the stored body and Message-ID without repeating AI. Successful records clear private envelope/body fields and retain deduplication metadata. SMTP errors retain queued messages without blocking other outputs. Syncs drain the queue, and explicit `email-retry` works without upstream authentication. Quiet-hour MQTT heartbeat does not drain email.
 
-Avoid duplicate emails when repeated synchronization sees the same upstream state.
+Entity persistence and email enqueue have separate commits; a crash in between can lose an unqueued notification. Ambiguous SMTP acceptance can cause duplicate delivery. Do not claim exactly-once or guaranteed inbox delivery. Use a single sync/delivery owner. See `docs/email.md` for settings and behavior.
 
 ### MQTT
 
@@ -681,6 +684,12 @@ Direct environment readers do not load `.env` themselves. Compose uses `env_file
 | `MQTT_TOPIC_PREFIX`, `MQTT_STATUS_SUFFIX` | `Settings` | `school`, `status`. |
 | `CALENDAR_MAP` | `Settings` | Empty map disables macOS Calendar integration. |
 | `LLM_API_KEY` | `Settings` | Unset; AI summaries are optional. |
+| `EMAIL_ENABLED`, `EMAIL_AI_SUMMARY`, `EMAIL_INCLUDE_MESSAGE_BODIES` | `Settings` | All `false`; email, AI replacement and message content require explicit opt-in. |
+| `SMTP_HOST`, `EMAIL_FROM`, `EMAIL_TO` | `Settings` | Empty; required for enabled email. Sender accepts a bare address or `Name <address>`; SMTP uses only the address. Recipients use a JSON array of bare addresses. |
+| `SMTP_PORT`, `SMTP_SECURITY` | `Settings` | `587`, `starttls`; implicit TLS (`ssl`) and plain relay (`none`) supported. |
+| `SMTP_USERNAME`, `SMTP_PASSWORD` | `Settings` | Unset; optional credentials, configured together. |
+| `EMAIL_SUBJECT_PREFIX` | `Settings` | `eduVULCAN`. |
+| `SMTP_TIMEOUT_SECONDS`, `EMAIL_AI_TIMEOUT_SECONDS` | `Settings` | Both `30`; socket-operation and AI-preparation timeouts. |
 | `POLL_INTERVAL` | `sync-loop.sh`; also declared in `Settings` | `1800` seconds in both readers. |
 | `QUIET_HOURS_START`, `QUIET_HOURS_END` | `sync-loop.sh` and `Settings` | `0`, `5`; equal values disable quiet hours. |
 | `QUIET_HOURS_TZ` | `sync-loop.sh` and `Settings` | `Europe/Warsaw`; container timestamps remain UTC. |
@@ -696,7 +705,7 @@ Direct environment readers do not load `.env` themselves. Compose uses `env_file
 | `VULCAN_CAPTCHA_DETECT_TIMEOUT_SECONDS` | `auth.py`, direct environment | `5`. |
 | `VULCAN_CAPTCHA_COMPLETE_TIMEOUT_SECONDS` | `auth.py`, direct environment | `60`. |
 
-The variables read directly by `auth.py` above are not currently declared as `Settings` fields. When changing configuration, check `.env.example` against `Settings` and verify `.env` parsing with sanitized values; `Settings` ignores extra `.env` keys so auth/startup settings do not prevent CLI startup. Direct auth readers still require exported variables outside Compose. SMTP/email transport settings do not exist yet.
+The variables read directly by `auth.py` above are not currently declared as `Settings` fields. When changing configuration, check `.env.example` against `Settings` and verify `.env` parsing with sanitized values; `Settings` ignores extra `.env` keys so auth/startup settings do not prevent CLI startup. Direct auth readers still require exported variables outside Compose. SMTP/email configuration is documented in `docs/email.md`; invalid enabled configuration fails validation without echoing input values.
 
 Do not hard-code user-specific values.
 
@@ -709,7 +718,7 @@ Possible configuration areas include:
 - synchronization windows,
 - message filtering,
 - MQTT broker and credentials,
-- future email transport/settings when an adapter is implemented,
+- SMTP email transport and digest settings,
 - calendar mappings,
 - HTTP/API configuration,
 - logging,

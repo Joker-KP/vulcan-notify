@@ -166,6 +166,7 @@ async def test_sync_all_multiple_students(db: Database) -> None:
     assert len(full.student_results) == 2
     assert full.student_results[0].student.name == "Jan"
     assert full.student_results[1].student.name == "Anna"
+    assert full.notification_id == "sync:1"
 
 
 async def test_sync_all_no_students(db: Database) -> None:
@@ -217,7 +218,9 @@ async def test_reauthentication_carries_changes_persisted_before_expiry(db: Data
     with pytest.raises(SyncSessionExpiredError) as failure:
         await sync_all(client, db)
     partial = failure.value.partial_result
+    assert partial.notification_id == "sync:2"
     assert len(partial.student_results[0].new_grades) == 1
     assert len(await db.get_grades_for_student(STUDENT_A.key)) == 1
     retry = await sync_all(_make_mock_client(grades=[GRADE]), db)
+    assert retry.notification_id == "sync:3"
     assert retry.student_results[0].new_grades == []

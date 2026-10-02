@@ -166,6 +166,21 @@ CREATE TABLE IF NOT EXISTS mqtt_outbox (
     last_error TEXT
 );
 
+-- Successful rows retain only delivery identity/metadata; private content is cleared.
+CREATE TABLE IF NOT EXISTS email_outbox (
+    delivery_key TEXT PRIMARY KEY,
+    sender TEXT,
+    recipient TEXT,
+    subject TEXT,
+    body TEXT,
+    message_id TEXT NOT NULL,
+    date_header TEXT NOT NULL,
+    enqueued_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    sent_at TIMESTAMP,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT
+);
+
 CREATE TABLE IF NOT EXISTS sync_state (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
@@ -641,6 +656,63 @@ class Database:
             f"UPDATE mqtt_outbox SET attempts = attempts + 1, last_error = ? "
             f"WHERE id IN ({placeholders})",
             [error, *ids],
+        )
+
+    # ── Email outbox ────────────────────────────────────────────────
+
+    async def enqueue_email(
+        self,
+        delivery_key: str,
+        sender: str,
+        recipient: str,
+        subject: str,
+        body: str,
+        message_id: str,
+        date_header: str,
+    ) -> bool:
+        cursor = await self.db.execute(
+            "INSERT OR IGNORE INTO email_outbox "
+            "(delivery_key, sender, recipient, subject, body, message_id, date_header) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (delivery_key, sender, recipient, subject, body, message_id, date_header),
+        )
+        return cursor.rowcount == 1
+
+    async def update_email_body(self, delivery_key: str, body: str) -> None:
+        await self.db.execute(
+            "UPDATE email_outbox SET body = ? WHERE delivery_key = ? AND sent_at IS NULL",
+            (body, delivery_key),
+        )
+
+    async def list_email_outbox(self) -> list[dict[str, str]]:
+        cursor = await self.db.execute(
+            "SELECT delivery_key, sender, recipient, subject, body, message_id, date_header "
+            "FROM email_outbox WHERE sent_at IS NULL ORDER BY enqueued_at, rowid"
+        )
+        columns = [
+            "delivery_key",
+            "sender",
+            "recipient",
+            "subject",
+            "body",
+            "message_id",
+            "date_header",
+        ]
+        return [dict(zip(columns, row, strict=True)) for row in await cursor.fetchall()]
+
+    async def mark_email_sent(self, delivery_key: str) -> None:
+        await self.db.execute(
+            "UPDATE email_outbox SET sent_at = CURRENT_TIMESTAMP, sender = NULL, "
+            "recipient = NULL, subject = NULL, body = NULL, last_error = NULL "
+            "WHERE delivery_key = ?",
+            (delivery_key,),
+        )
+
+    async def mark_email_failure(self, delivery_key: str, error_type: str) -> None:
+        await self.db.execute(
+            "UPDATE email_outbox SET attempts = attempts + 1, last_error = ? "
+            "WHERE delivery_key = ? AND sent_at IS NULL",
+            (error_type, delivery_key),
         )
 
     # ── Schedule ─────────────────────────────────────────────────────

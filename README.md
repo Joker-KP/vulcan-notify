@@ -3,7 +3,7 @@
 > [!TIP]
 > ✨ ***Push notifications, calendars, and dashboards from a school e-journal that refuses to give them to you.***
 
-CLI tool that syncs data from the eduVulcan school e-journal to a local SQLite database, detects changes between runs, and fans them out to a terminal, macOS Calendar, an MQTT broker, and an HTTP/iCalendar API.
+CLI tool that syncs data from the eduVulcan school e-journal to a local SQLite database, detects changes between runs, and fans them out to a terminal, SMTP email, macOS Calendar, an MQTT broker, and an HTTP/iCalendar API.
 
 Solves the problem of eduVulcan paywalling push notifications behind a subscription, while the web version (which is legally required to remain free) has no notification support. Also exposes a local HTTP + MQTT surface so Home Assistant (or anything else) can react to school events in real time.
 
@@ -26,6 +26,7 @@ Supports multiple students under one parent account.
 - **Terminal output** - colored when interactive, plain when piped
 - **macOS Calendar** - exams and homework as all-day events with reminders (iCloud syncs to iOS)
 - **MQTT events** - every detected change published to Mosquitto (with a persistent outbox for retries)
+- **Email digests** - detected changes sent over SMTP, with persistent retries and optional AI summary replacement ([setup](docs/email.md))
 - **HTTP API** - grade aggregates, homework, messages, and schedule over aiohttp on port 8585
 - **iCalendar feed** - per-student `.ics` feed for subscribing from iOS/macOS Calendar, Google Calendar, or Home Assistant
 - **AI summaries** - optional digest of recent changes or messages via any OpenAI-compatible API
@@ -65,6 +66,7 @@ uv run vulcan-notify sync
 | `vulcan-notify api-gather` | On-demand upstream OpenAPI gathering and sanitized fixture update |
 | `vulcan-notify api-check` | On-demand live check against the saved upstream contract |
 | `vulcan-notify sync` | Fetch latest data and show changes (default) |
+| `vulcan-notify email-retry` | Retry queued SMTP digests without contacting eduVULCAN |
 | `vulcan-notify calendar` | Force re-sync all exams/homework to macOS Calendar |
 | `vulcan-notify tui` | Interactive Textual browser for synced content (requires `uv sync --extra tui`) |
 | `vulcan-notify summarize [--type sync\|messages] [--days N]` | AI summary of recent changes or messages (requires `LLM_API_KEY`) |
@@ -80,7 +82,7 @@ End-to-end flow from the eduVulcan API down to a push notification on your phone
 %%{init: {'theme':'base','flowchart':{'curve':'basis','nodeSpacing':50,'rankSpacing':60}}}%%
 flowchart TB
     accTitle: vulcan-notify end-to-end flow
-    accDescr: A scheduled sync pulls grades, attendance, exams, homework, messages, and schedule from eduVulcan. Changes are diffed against SQLite and fanned out to the terminal, macOS Calendar, MQTT, and an HTTP/iCalendar API. Home Assistant consumes MQTT events and the HTTP API to drive a school dashboard and push notifications. Both iCloud Calendar and HA push converge on the parent's phone.
+    accDescr: A scheduled sync pulls grades, attendance, exams, homework, messages, and schedule from eduVulcan. Changes are diffed against SQLite and fanned out to the terminal, SMTP email, macOS Calendar, MQTT, and an HTTP/iCalendar API. Home Assistant consumes MQTT events and the HTTP API to drive a school dashboard and push notifications. Calendar, email and HA push converge on the parent's phone.
 
     Vulcan([uczen.eduvulcan.pl])
 
@@ -96,6 +98,7 @@ flowchart TB
         Fanout --> CalSync[calendar sync]
         Fanout --> Outbox[(MQTT outbox)]
         API[api · aiohttp :8585] --> DB
+        EmailOutbox[(Email outbox)]
     end
 
     subgraph HA[Home Assistant]
@@ -115,11 +118,14 @@ flowchart TB
     API -->|/calendar/<name>.ics| iCloud
     iCloud --> Phone
     Push --> Phone
+    Fanout --> EmailOutbox
+    EmailOutbox -->|SMTP digest · optional AI| Inbox[Parent email inbox]
+    Inbox --> Phone
 
     classDef storage fill:#ecfdf5,stroke:#16a34a,color:#064e3b;
     classDef external fill:#fef3c7,stroke:#d97706,color:#78350f;
     classDef actor fill:#eef2ff,stroke:#4f46e5,color:#312e81;
-    class DB,Outbox,Mosq,iCloud storage;
+    class DB,Outbox,EmailOutbox,Mosq,iCloud storage;
     class Vulcan external;
     class Phone actor;
 
@@ -134,7 +140,7 @@ flowchart TB
 2. **Fetch** - The tool calls the eduVulcan web API directly (using saved cookies) to pull grades (all periods), attendance (last 90 days), exams, homework with full body, messages, and the lesson schedule including substitutions.
 3. **Diff** - Each item is compared against the local SQLite database. New or changed items are reported; exams and homework that disappear from the API are soft-deleted.
 4. **Persist** - All upserts are idempotent (`INSERT OR REPLACE`). Each run is recorded in a `sync_runs` table.
-5. **Publish** - Changes fan out in parallel: printed to the terminal, written to macOS Calendar (if configured), enqueued in the MQTT outbox and drained to Mosquitto (if configured). The outbox survives broker outages.
+5. **Publish** - Changes are printed to the terminal, summarized for SMTP email (optionally using AI), written to macOS Calendar, and published to MQTT when those channels are configured. Email and MQTT have separate persistent retry outboxes.
 6. **Serve** (separate command, long-running) - `vulcan-notify api` (via Docker or systemd service) exposes the HTTP + iCalendar endpoints backed by the same SQLite file.
 
 On first sync, all existing data is stored without reporting changes (baseline). Only subsequent syncs show what's new.
@@ -209,6 +215,12 @@ All settings are via environment variables or `.env` file:
 | `MQTT_USERNAME` | (none) | Optional MQTT auth |
 | `MQTT_PASSWORD` | (none) | Optional MQTT auth |
 | `MQTT_TOPIC_PREFIX` | `school` | Topic namespace root |
+| `EMAIL_ENABLED` | `false` | Enable SMTP digests; [full configuration and retry behavior](docs/email.md) |
+| `SMTP_HOST`, `EMAIL_FROM`, `EMAIL_TO` | (empty) | Required email server, sender, and JSON recipient list |
+| `SMTP_PORT`, `SMTP_SECURITY` | `587`, `starttls` | SMTP port and TLS mode (`starttls`, `ssl`, `none`) |
+| `SMTP_USERNAME`, `SMTP_PASSWORD` | (none) | Optional SMTP credentials |
+| `EMAIL_AI_SUMMARY` | `false` | Replace email body with existing AI summary; also requires `LLM_API_KEY` |
+| `EMAIL_INCLUDE_MESSAGE_BODIES` | `false` | Include message bodies in email and its optional AI input |
 | `NTFY_TOPIC` | `vulcan-notify` | ntfy.sh topic (if used) |
 | `NTFY_SERVER` | `https://ntfy.sh` | ntfy server base URL |
 | `LLM_BASE_URL` | `https://api.cerebras.ai/v1` | OpenAI-compatible API base URL for AI summaries |
@@ -219,5 +231,6 @@ All settings are via environment variables or `.env` file:
 ## 📚 Documentation <a name="documentation"></a>
 
 - [`docs/architecture.md`](docs/architecture.md) - internal architecture, pipeline, database schema, MQTT payloads, endpoint reference
+- [`docs/email.md`](docs/email.md) - SMTP digests, optional AI replacement, configuration and retries
 - [`docs/deployment.md`](docs/deployment.md) - Docker + Proxmox LXC + systemd setup
 - [`docs/eduvulcan-api.md`](docs/eduvulcan-api.md) - reverse-engineered eduVulcan web API reference

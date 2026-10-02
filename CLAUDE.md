@@ -59,6 +59,8 @@ The tool follows a linear pipeline: **Auth -> Client -> Sync -> Diff -> Display*
 
 - `display.py` - Formats `SyncResult` for terminal output with ANSI colors (auto-disabled when piped). Groups by student, then by data type.
 
+- `email.py` - Optional per-sync SMTP digest with persistent per-recipient retries. AI replacement reuses the existing summarizer when explicitly enabled; message bodies are excluded by default. See `docs/email.md` for configuration and delivery limits.
+
 - `db.py` - `Database` class wrapping aiosqlite. Normalized tables: students, grades, attendance, exams, homework, messages, sync_state. Entity writes use ON CONFLICT DO UPDATE for idempotent upserts. Per-section outcomes and confirmed-fetch timestamps drive freshness checks.
 
 - `config.py` - `pydantic-settings` `Settings` singleton loaded from `.env`.

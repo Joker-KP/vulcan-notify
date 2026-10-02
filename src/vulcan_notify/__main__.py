@@ -18,6 +18,7 @@ from vulcan_notify.client import SessionExpiredError, VulcanClient
 from vulcan_notify.config import settings
 from vulcan_notify.db import Database
 from vulcan_notify.display import BOLD, RESET, format_compact_sync, format_full_sync
+from vulcan_notify.email import drain_email_outbox, publish_email
 from vulcan_notify.mqtt import drain_outbox, publish_changes
 from vulcan_notify.summarizer import format_changes_for_llm, summarize
 from vulcan_notify.sync import FullSyncResult, SyncSessionExpiredError, sync_all
@@ -144,6 +145,22 @@ async def cmd_heartbeat() -> None:
         await db.close()
 
 
+async def cmd_email_retry() -> None:
+    """Retry email delivery without contacting eduVULCAN or regenerating summaries."""
+    if not settings.email_enabled:
+        print("Email is disabled. Set EMAIL_ENABLED=true and configure SMTP in .env.")
+        sys.exit(1)
+    db = Database(settings.db_path)
+    await db.connect()
+    try:
+        delivered, pending = await drain_email_outbox(db)
+        print(f"Email digests: SMTP accepted={delivered}, pending={pending}")
+        if pending:
+            sys.exit(1)
+    finally:
+        await db.close()
+
+
 async def cmd_sync() -> None:
     """Fetch latest data and show changes since last sync."""
     session = await _ensure_session()
@@ -165,6 +182,7 @@ async def cmd_sync() -> None:
             sys.exit(1)
 
         _print_result(result)
+        await publish_email(result, db)
         await _sync_calendar(db)
         await publish_changes(result, db)
         if result.has_failures:
@@ -175,6 +193,7 @@ async def cmd_sync() -> None:
         # Deliver their changes now so they are not lost from the retried diff.
         if isinstance(exc, SyncSessionExpiredError):
             _print_result(exc.partial_result)
+            await publish_email(exc.partial_result, db)
             await _sync_calendar(db)
             await publish_changes(exc.partial_result, db)
         # Try auto-reauth once if it fails mid-sync
@@ -188,6 +207,7 @@ async def cmd_sync() -> None:
                 result = await sync_all(client, db)
             except SyncSessionExpiredError as retry_exc:
                 _print_result(retry_exc.partial_result)
+                await publish_email(retry_exc.partial_result, db)
                 await _sync_calendar(db)
                 await publish_changes(retry_exc.partial_result, db)
                 print("Session still expired after recovery. Run 'vulcan-notify auth'.")
@@ -196,6 +216,7 @@ async def cmd_sync() -> None:
                 print("No students found after session recovery.")
                 sys.exit(1)
             _print_result(result)
+            await publish_email(result, db)
             await _sync_calendar(db)
             await publish_changes(result, db)
             if result.has_failures:
@@ -256,7 +277,9 @@ async def cmd_tui() -> None:
     """Launch interactive TUI for browsing synced data."""
     try:
         from vulcan_notify.tui import run_tui
-    except ImportError:
+    except ModuleNotFoundError as exc:
+        if exc.name != "textual":
+            raise
         print("Textual not installed. Run: uv sync --extra tui")
         sys.exit(1)
     await run_tui()
@@ -343,6 +366,8 @@ def main() -> None:
             asyncio.run(cmd_sync())
         case "heartbeat":
             asyncio.run(cmd_heartbeat())
+        case "email-retry":
+            asyncio.run(cmd_email_retry())
         case "calendar":
             asyncio.run(cmd_calendar())
         case "tui":
@@ -363,7 +388,7 @@ def main() -> None:
         case _:
             print(
                 "Usage: vulcan-notify "
-                "[auth|test|api-gather|api-check|sync|heartbeat|calendar|tui|summarize]"
+                "[auth|test|api-gather|api-check|sync|heartbeat|email-retry|calendar|tui|summarize]"
             )
             print("  auth      - Interactive login and save session")
             print("  test      - Test if saved session is valid")
@@ -371,6 +396,7 @@ def main() -> None:
             print("  api-check  - Check live upstream responses against the saved contract")
             print("  sync      - Fetch latest data and show changes (default)")
             print("  heartbeat - Publish the retained MQTT heartbeat only, no sync")
+            print("  email-retry - Retry queued SMTP digests without an upstream sync")
             print("  calendar  - Force re-sync all events to macOS Calendar")
             print("  tui       - Interactive message browser")
             print("  summarize - AI summary of recent changes or messages")
