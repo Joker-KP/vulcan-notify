@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
+from aiohttp.test_utils import make_mocked_request
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -501,6 +503,35 @@ async def test_subject_averages_skips_diagnostics(seeded_diag_db: Path) -> None:
     assert math["average"] == 4.5
 
 
+@pytest.mark.parametrize(
+    ("status", "query", "expected"),
+    [
+        ("ok", "", 200),
+        ("degraded", "", 200),
+        ("stale", "", 503),
+        ("failed", "", 503),
+        # ?soft=1 is the variant HA reads. Its REST sensor discards the body on
+        # any non-2xx, which would blind the dashboard at exactly the moment the
+        # payload starts being worth reading.
+        ("stale", "soft=1", 200),
+        ("failed", "soft=true", 200),
+        ("stale", "soft=0", 503),
+    ],
+)
+async def test_health_status_code(
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    query: str,
+    expected: int,
+) -> None:
+    monkeypatch.setattr(api_mod, "_get_health", lambda: {"status": status})
+    path = f"/api/health?{query}" if query else "/api/health"
+    response = await api_mod.handle_health(make_mocked_request("GET", path))
+    assert response.status == expected
+    # The body is identical either way; only the status code differs.
+    assert json.loads(response.text)["status"] == status
+
+
 def test_month_list_year_mode() -> None:
     out = api_mod._month_list(2025, months=6)
     assert out == [f"2025-{m:02d}" for m in range(1, 13)]
@@ -510,3 +541,24 @@ def test_month_list_relative_mode() -> None:
     out = api_mod._month_list(None, months=3)
     assert len(out) == 3
     assert out == sorted(out)
+
+
+async def test_calendar_freshness_is_scoped_to_its_student(seeded_exams_db: Path) -> None:
+    database = Database(seeded_exams_db)
+    await database.connect()
+    run_id = await database.create_sync_run()
+    await database.record_section(run_id, "schedule", "ok", student_key="S1")
+    await database.complete_sync_run(run_id, "completed", 2, 0, 0)
+    await database.close()
+
+    assert api_mod._get_health()["sections"]["schedule"]["stale"] is True
+    assert api_mod._get_health("Yarema")["sections"]["schedule"]["stale"] is False
+    assert api_mod._get_health("Solomiia")["sections"]["schedule"]["stale"] is True
+    fresh = await api_mod.handle_calendar(
+        make_mocked_request("GET", "/calendar/Yarema.ics", match_info={"student": "Yarema"})
+    )
+    stale = await api_mod.handle_calendar(
+        make_mocked_request("GET", "/calendar/Solomiia.ics", match_info={"student": "Solomiia"})
+    )
+    assert b"School sync" not in fresh.body
+    assert b"School sync" in stale.body

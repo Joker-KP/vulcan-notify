@@ -3,18 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
 import logging
 import os
 import platform
 import ssl
 import subprocess
-import fcntl
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import Any
-from urllib.parse import urljoin, urlparse, urlunparse
+from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse, urlunparse
 
 import aiohttp
 from playwright.async_api import (
@@ -24,6 +24,8 @@ from playwright.async_api import (
     async_playwright,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -103,8 +105,7 @@ def _get_login_delay_seconds() -> float:
 
     except ValueError:
         logger.warning(
-            "Invalid VULCAN_LOGIN_DELAY_SECONDS=%r; "
-            "using 2 seconds",
+            "Invalid VULCAN_LOGIN_DELAY_SECONDS=%r; using 2 seconds",
             raw,
         )
 
@@ -139,6 +140,7 @@ def _get_captcha_complete_timeout_seconds() -> float:
     except ValueError:
         return 60.0
 
+
 # ---------------------------------------------------------------------------
 # Credentials
 # ---------------------------------------------------------------------------
@@ -170,11 +172,7 @@ def get_keychain_credentials() -> tuple[str, str] | None:
 
         for line in result.stdout.splitlines():
             if '"acct"' in line and "=" in line:
-                account = (
-                    line.split("=", 1)[1]
-                    .strip()
-                    .strip('"')
-                )
+                account = line.split("=", 1)[1].strip().strip('"')
                 break
 
         if not account:
@@ -220,11 +218,7 @@ def _safe_url(url: str) -> str:
 
         parts = path.split("/")
 
-        if (
-            parsed.hostname == STUDENT_HOST
-            and len(parts) >= 4
-            and parts[2].lower() == "app"
-        ):
+        if parsed.hostname == STUDENT_HOST and len(parts) >= 4 and parts[2].lower() == "app":
             parts[3] = "<redacted>"
             path = "/".join(parts)
 
@@ -249,10 +243,7 @@ def _is_student_dashboard_url(
     try:
         parsed = urlparse(url)
 
-        return (
-            parsed.hostname == STUDENT_HOST
-            and "/app" in parsed.path.lower()
-        )
+        return parsed.hostname == STUDENT_HOST and "/app" in parsed.path.lower()
 
     except Exception:
         return False
@@ -267,11 +258,7 @@ def _tenant_from_dashboard_url(
         if parsed.hostname != STUDENT_HOST:
             return ""
 
-        parts = [
-            p
-            for p in parsed.path.split("/")
-            if p
-        ]
+        parts = [p for p in parsed.path.split("/") if p]
 
         return parts[0] if parts else ""
 
@@ -280,7 +267,7 @@ def _tenant_from_dashboard_url(
 
 
 @contextmanager
-def _browser_profile_lock(timeout: float = 30.0):
+def _browser_profile_lock(timeout: float = 30.0) -> Iterator[None]:
     lock_path = Path(
         os.getenv(
             "VULCAN_BROWSER_LOCK_FILE",
@@ -293,43 +280,23 @@ def _browser_profile_lock(timeout: float = 30.0):
         exist_ok=True,
     )
 
-    handle = open(
-        lock_path,
-        "a+",
-    )
-
-    deadline = time.monotonic() + timeout
-
-    while True:
+    with lock_path.open("a+") as handle:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError as exc:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        "Chromium profile is currently being used by another vulcan-notify process"
+                    ) from exc
+                time.sleep(0.25)
         try:
-            fcntl.flock(
-                handle.fileno(),
-                fcntl.LOCK_EX | fcntl.LOCK_NB,
-            )
-            break
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
-        except BlockingIOError:
-            if time.monotonic() >= deadline:
-                handle.close()
-
-                raise RuntimeError(
-                    "Chromium profile is currently being used "
-                    "by another vulcan-notify process"
-                )
-
-            time.sleep(0.25)
-
-    try:
-        yield
-
-    finally:
-        fcntl.flock(
-            handle.fileno(),
-            fcntl.LOCK_UN,
-        )
-
-        handle.close()
-        
 
 def _cleanup_chromium_singleton_locks() -> None:
     profile_dir = _browser_profile_dir()
@@ -356,7 +323,7 @@ def _cleanup_chromium_singleton_locks() -> None:
                 path,
                 exc_info=True,
             )
-            
+
 
 # ---------------------------------------------------------------------------
 # Diagnostics
@@ -387,9 +354,7 @@ async def _save_screenshot(
         )
 
     except Exception:
-        logger.exception(
-            "Unable to save screenshot"
-        )
+        logger.exception("Unable to save screenshot")
 
 
 async def _save_html(
@@ -416,9 +381,7 @@ async def _save_html(
         )
 
     except Exception:
-        logger.exception(
-            "Unable to save HTML"
-        )
+        logger.exception("Unable to save HTML")
 
 
 async def _log_page_text(
@@ -427,15 +390,9 @@ async def _log_page_text(
     limit: int = 2000,
 ) -> None:
     try:
-        text = await page.locator(
-            "body"
-        ).inner_text()
+        text = await page.locator("body").inner_text()
 
-        text = " | ".join(
-            x.strip()
-            for x in text.splitlines()
-            if x.strip()
-        )
+        text = " | ".join(x.strip() for x in text.splitlines() if x.strip())
 
         logger.info(
             "%s: %s",
@@ -444,9 +401,7 @@ async def _log_page_text(
         )
 
     except Exception:
-        logger.exception(
-            "Unable to read page text"
-        )
+        logger.exception("Unable to read page text")
 
 
 # ---------------------------------------------------------------------------
@@ -468,10 +423,7 @@ async def _launch_browser_context(
         exist_ok=True,
     )
 
-    if force_headless is None:
-        headless = _browser_headless()
-    else:
-        headless = force_headless
+    headless = _browser_headless() if force_headless is None else force_headless
 
     logger.info(
         "Browser: persistent profile=%s headless=%s",
@@ -509,11 +461,7 @@ async def _seed_context_from_session(
         return
 
     try:
-        data = json.loads(
-            session_path.read_text(
-                encoding="utf-8"
-            )
-        )
+        data = json.loads(session_path.read_text(encoding="utf-8"))
 
         cookies = data.get(
             "cookies",
@@ -523,9 +471,7 @@ async def _seed_context_from_session(
         if not cookies:
             return
 
-        await context.add_cookies(
-            cookies
-        )
+        await context.add_cookies(cookies)
 
         logger.info(
             "Browser: imported %d cookie(s) from existing session",
@@ -547,9 +493,7 @@ def _get_page(
     if context.pages:
         return context.pages[0]
 
-    raise RuntimeError(
-        "Persistent browser context did not create a page"
-    )
+    raise RuntimeError("Persistent browser context did not create a page")
 
 
 # ---------------------------------------------------------------------------
@@ -567,14 +511,10 @@ def _attach_navigation_tracking(
     def handle_navigation(frame: Any) -> None:
         url = frame.url
 
-        if not _is_student_dashboard_url(
-            url
-        ):
+        if not _is_student_dashboard_url(url):
             return
 
-        if not dashboard_holder.get(
-            "url"
-        ):
+        if not dashboard_holder.get("url"):
             logger.info(
                 "Student dashboard detected: %s",
                 _safe_url(url),
@@ -590,12 +530,8 @@ def _attach_navigation_tracking(
             handle_navigation,
         )
 
-        if _is_student_dashboard_url(
-            page.url
-        ):
-            dashboard_holder["url"] = (
-                page.url
-            )
+        if _is_student_dashboard_url(page.url):
+            dashboard_holder["url"] = page.url
 
             login_complete.set()
 
@@ -612,9 +548,7 @@ async def _find_student_page(
     context: BrowserContext,
 ) -> Page | None:
     for page in context.pages:
-        if _is_student_dashboard_url(
-            page.url
-        ):
+        if _is_student_dashboard_url(page.url):
             return page
 
     return None
@@ -636,9 +570,7 @@ async def _accept_cookie_banner(
     """
 
     try:
-        wrapper = page.locator(
-            "#respect-privacy-wrapper"
-        )
+        wrapper = page.locator("#respect-privacy-wrapper")
 
         if not await wrapper.count():
             return
@@ -649,14 +581,10 @@ async def _accept_cookie_banner(
     except Exception:
         return
 
-    logger.info(
-        "Browser: privacy dialog detected"
-    )
+    logger.info("Browser: privacy dialog detected")
 
     try:
-        frame = page.frame_locator(
-            "#respect-privacy-frame"
-        )
+        frame = page.frame_locator("#respect-privacy-frame")
 
         for text in (
             "Akceptuję",
@@ -666,22 +594,16 @@ async def _accept_cookie_banner(
             "OK",
             "Zamknij",
         ):
-            button = frame.locator(
-                f'button:has-text("{text}")'
-            ).first
+            button = frame.locator(f'button:has-text("{text}")').first
 
             try:
                 await button.click(
                     timeout=3000,
                 )
 
-                logger.info(
-                    "Browser: privacy dialog accepted"
-                )
+                logger.info("Browser: privacy dialog accepted")
 
-                await asyncio.sleep(
-                    0.5
-                )
+                await asyncio.sleep(0.5)
 
                 return
 
@@ -691,10 +613,7 @@ async def _accept_cookie_banner(
     except Exception:
         pass
 
-    logger.warning(
-        "Browser: privacy dialog was visible but no known "
-        "accept button was found"
-    )
+    logger.warning("Browser: privacy dialog was visible but no known accept button was found")
 
 
 # ---------------------------------------------------------------------------
@@ -713,21 +632,14 @@ async def _wait_for_captcha(
         None when no CAPTCHA was presented.
     """
 
-    detect_timeout = (
-        _get_captcha_detect_timeout_seconds()
-    )
+    detect_timeout = _get_captcha_detect_timeout_seconds()
 
-    complete_timeout = (
-        _get_captcha_complete_timeout_seconds()
-    )
+    complete_timeout = _get_captcha_complete_timeout_seconds()
 
-    captcha = page.locator(
-        "#captcha"
-    )
+    captcha = page.locator("#captcha")
 
     logger.info(
-        "Auto-login: checking for anti-bot challenge "
-        "(detect timeout %.1fs)",
+        "Auto-login: checking for anti-bot challenge (detect timeout %.1fs)",
         detect_timeout,
     )
 
@@ -738,32 +650,23 @@ async def _wait_for_captcha(
     try:
         await captcha.wait_for(
             state="attached",
-            timeout=int(
-                detect_timeout * 1000
-            ),
+            timeout=int(detect_timeout * 1000),
         )
 
     except Exception:
-        logger.info(
-            "Auto-login: no anti-bot challenge detected; continuing"
-        )
+        logger.info("Auto-login: no anti-bot challenge detected; continuing")
 
         return None
 
     # It may exist in DOM but not actually be active.
     try:
         if not await captcha.is_visible():
-            logger.info(
-                "Auto-login: anti-bot element present but not visible; "
-                "continuing"
-            )
+            logger.info("Auto-login: anti-bot element present but not visible; continuing")
 
             return None
 
     except Exception:
-        logger.info(
-            "Auto-login: anti-bot element not active; continuing"
-        )
+        logger.info("Auto-login: anti-bot element not active; continuing")
 
         return None
 
@@ -772,19 +675,14 @@ async def _wait_for_captcha(
     # ---------------------------------------------------------------
 
     logger.info(
-        "Auto-login: anti-bot challenge detected; "
-        "waiting up to %.1fs for completion",
+        "Auto-login: anti-bot challenge detected; waiting up to %.1fs for completion",
         complete_timeout,
     )
 
     try:
-        await page.locator(
-            "#captcha-success-wrapper.active"
-        ).wait_for(
+        await page.locator("#captcha-success-wrapper.active").wait_for(
             state="visible",
-            timeout=int(
-                complete_timeout * 1000
-            ),
+            timeout=int(complete_timeout * 1000),
         )
 
         await page.wait_for_function(
@@ -806,10 +704,7 @@ async def _wait_for_captcha(
         )
 
     except Exception as exc:
-        logger.error(
-            "Auto-login: anti-bot challenge was detected "
-            "but did not complete"
-        )
+        logger.error("Auto-login: anti-bot challenge was detected but did not complete")
 
         await _save_screenshot(
             page,
@@ -823,178 +718,66 @@ async def _wait_for_captcha(
             "antibot-error",
         )
 
-        raise RuntimeError(
-            "eduVULCAN anti-bot challenge was present "
-            "but did not complete"
-        ) from exc
+        raise RuntimeError("eduVULCAN anti-bot challenge was present but did not complete") from exc
 
     # ---------------------------------------------------------------
     # 3. Read challenge metadata for diagnostics.
     # ---------------------------------------------------------------
 
     try:
-        response = await page.locator(
-            "#captcha-response"
-        ).input_value()
+        response = await page.locator("#captcha-response").input_value()
 
     except Exception:
         response = ""
 
     try:
-        challenge = await page.locator(
-            "#captcha .captcha-wrapper"
-        ).get_attribute(
-            "data-challenge"
-        )
+        challenge = await page.locator("#captcha .captcha-wrapper").get_attribute("data-challenge")
 
     except Exception:
         challenge = None
 
     logger.info(
-        "Auto-login: anti-bot completed; "
-        "challenge=%s response-length=%d",
-        challenge,
+        "Auto-login: anti-bot completed; response-length=%d",
         len(response),
     )
 
     return challenge
+
 
 # ---------------------------------------------------------------------------
 # Student profile
 # ---------------------------------------------------------------------------
 
 
-async def _open_student_profile(
-    page: Page,
-) -> bool:
-    """Open configured a.panel-access__profile entry."""
-
-    student_hint = (
-        os.getenv(
-            "VULCAN_STUDENT",
-            "",
-        ).strip()
-        or None
-    )
-
-    profiles = page.locator(
-        "a.panel-access__profile"
-    )
-
-    try:
-        count = await profiles.count()
-
-    except Exception:
-        return False
-
-    logger.info(
-        "Browser: found %d journal profile(s)",
-        count,
-    )
-
-    if count == 0:
-        return False
-
-    selected = None
-    selected_text = ""
-
-    if student_hint:
-        hint = student_hint.lower()
-
-        logger.info(
-            "Browser: preferred student=%r",
-            student_hint,
-        )
-
-        for index in range(count):
-            profile = profiles.nth(
-                index
-            )
-
+async def _open_student_profile(page: Page) -> bool:
+    """Dismiss picker overlays and enter the first available journal profile."""
+    for selector in (".vdpo-tutorial-tooltip__close", ".vdpo-journal-shortcut__close"):
+        overlay = page.locator(selector).first
+        if await overlay.count():
             try:
-                text = (
-                    await profile.inner_text()
-                ).strip()
-
+                await overlay.click(timeout=2000)
             except Exception:
-                continue
+                logger.debug("Browser: could not dismiss profile-picker overlay")
 
-            logger.info(
-                "Browser: available profile=%r",
-                text,
-            )
-
-            if hint in text.lower():
-                selected = profile
-                selected_text = text
-                break
-
-        if selected is None:
-            logger.error(
-                "Browser: profile matching %r not found",
-                student_hint,
-            )
-
-            return False
-
-    elif count == 1:
-        selected = profiles.first
-
-        try:
-            selected_text = (
-                await selected.inner_text()
-            ).strip()
-
-        except Exception:
-            selected_text = "<unknown>"
-
-    else:
-        logger.error(
-            "Browser: multiple profiles found; "
-            "set VULCAN_STUDENT"
-        )
-
-        return False
-
-    href = await selected.get_attribute(
-        "href"
-    )
-
-    if not href:
-        return False
-
-    target = urljoin(
-        page.url,
-        href,
-    )
-
-    logger.info(
-        "Browser: opening journal profile %r via %s",
-        selected_text,
-        _safe_url(target),
-    )
-
-    try:
-        await page.goto(
-            target,
-            wait_until="domcontentloaded",
-            timeout=30000,
-        )
-
-        return True
-
-    except Exception:
-        # Redirect chains can interrupt page.goto() while still reaching
-        # the student application.
+    profiles = page.locator('a[href*="/dziennik?"]')
+    if not await profiles.count():
+        # Retain compatibility with the previous picker markup.
+        profiles = page.locator("a.panel-access__profile")
+    if not await profiles.count():
         logger.warning(
-            "Browser: journal handoff navigation interrupted; "
-            "current URL=%s",
-            _safe_url(page.url),
+            "Browser: no journal profiles available; check account activation "
+            "at https://eduvulcan.pl/konto/dostepy"
         )
+        return False
 
-        return (
-            STUDENT_HOST in page.url
-        )
+    logger.info("Browser: opening first available journal profile")
+    try:
+        await profiles.first.click(timeout=30000)
+        return True
+    except Exception:
+        # Redirect chains can interrupt the click while reaching the application.
+        logger.warning("Browser: journal handoff interrupted; current URL=%s", _safe_url(page.url))
+        return urlparse(page.url).hostname == STUDENT_HOST
 
 
 # ---------------------------------------------------------------------------
@@ -1013,9 +796,7 @@ async def _try_reuse_browser_session(
     selected journal and regenerate session.json.
     """
 
-    logger.info(
-        "Auto-login: trying persistent eduVULCAN browser session"
-    )
+    logger.info("Auto-login: trying persistent eduVULCAN browser session")
 
     try:
         await page.goto(
@@ -1025,59 +806,25 @@ async def _try_reuse_browser_session(
         )
 
     except Exception:
-        logger.info(
-            "Auto-login: persistent portal navigation failed"
-        )
+        logger.info("Auto-login: persistent portal navigation failed")
 
         return False
 
-    await asyncio.sleep(
-        1
-    )
+    await asyncio.sleep(1)
 
     if login_complete.is_set():
-        logger.info(
-            "Auto-login: persistent browser session reached "
-            "student application directly"
-        )
+        logger.info("Auto-login: persistent browser session reached student application directly")
 
         return True
 
-    parsed = urlparse(
-        page.url
-    )
+    parsed = urlparse(page.url)
 
-    if (
-        parsed.hostname == "eduvulcan.pl"
-        and "/logowanie" in parsed.path.lower()
-    ):
-        logger.info(
-            "Auto-login: persistent portal session requires login"
-        )
+    if parsed.hostname == "eduvulcan.pl" and "/logowanie" in parsed.path.lower():
+        logger.info("Auto-login: persistent portal session requires login")
 
         return False
 
-    profiles = page.locator(
-        "a.panel-access__profile"
-    )
-
-    try:
-        count = await profiles.count()
-
-    except Exception:
-        count = 0
-
-    if count == 0:
-        logger.info(
-            "Auto-login: no journal profiles available in "
-            "persistent portal session"
-        )
-
-        return False
-
-    if not await _open_student_profile(
-        page
-    ):
+    if not await _open_student_profile(page):
         return False
 
     if not login_complete.is_set():
@@ -1090,10 +837,7 @@ async def _try_reuse_browser_session(
         except TimeoutError:
             return False
 
-    logger.info(
-        "Auto-login: persistent browser session successfully "
-        "restored student access"
-    )
+    logger.info("Auto-login: persistent browser session successfully restored student access")
 
     return True
 
@@ -1111,16 +855,12 @@ async def _visit_messages_application(
     if not tenant:
         return
 
-    page = await _find_student_page(
-        context
-    )
+    page = await _find_student_page(context)
 
     if page is None:
         page = fallback_page
 
-    logger.info(
-        "Auth: establishing messages session"
-    )
+    logger.info("Auth: establishing messages session")
 
     try:
         await page.goto(
@@ -1129,18 +869,13 @@ async def _visit_messages_application(
             timeout=30000,
         )
 
-        await asyncio.sleep(
-            2
-        )
+        await asyncio.sleep(2)
 
-        logger.info(
-            "Auth: messages session established"
-        )
+        logger.info("Auth: messages session established")
 
     except Exception:
         logger.warning(
-            "Auth: messages application navigation "
-            "did not fully complete",
+            "Auth: messages application navigation did not fully complete",
             exc_info=True,
         )
 
@@ -1156,14 +891,10 @@ async def _save_current_session(
     session_path: Path,
     dashboard_url: str,
 ) -> dict[str, Any]:
-    tenant = _tenant_from_dashboard_url(
-        dashboard_url
-    )
+    tenant = _tenant_from_dashboard_url(dashboard_url)
 
     if not tenant:
-        raise RuntimeError(
-            "Could not determine eduVULCAN tenant"
-        )
+        raise RuntimeError("Could not determine eduVULCAN tenant")
 
     await _visit_messages_application(
         context,
@@ -1176,9 +907,7 @@ async def _save_current_session(
     session_data: dict[str, Any] = {
         "cookies": cookies,
         "tenant": tenant,
-        "base_url": (
-            f"https://{STUDENT_HOST}/{tenant}"
-        ),
+        "base_url": (f"https://{STUDENT_HOST}/{tenant}"),
         "dashboard_url": dashboard_url,
     }
 
@@ -1197,8 +926,7 @@ async def _save_current_session(
     )
 
     logger.info(
-        "Auth: session saved to %s "
-        "(tenant=%s, cookies=%d)",
+        "Auth: session saved to %s (tenant=%s, cookies=%d)",
         session_path,
         tenant,
         len(cookies),
@@ -1244,9 +972,7 @@ async def login_and_save_session(
                     session_path,
                 )
 
-                page = _get_page(
-                    context
-                )
+                page = _get_page(context)
 
                 # First try to use the currently valid session.json /
                 # persistent browser profile without asking for login.
@@ -1254,9 +980,7 @@ async def login_and_save_session(
                     page,
                     login_complete,
                 ):
-                    dashboard_url = dashboard_holder[
-                        "url"
-                    ]
+                    dashboard_url = dashboard_holder["url"]
 
                     return await _save_current_session(
                         context,
@@ -1270,18 +994,11 @@ async def login_and_save_session(
                     wait_until="domcontentloaded",
                 )
 
-                await _accept_cookie_banner(
-                    page
-                )
+                await _accept_cookie_banner(page)
 
-                print(
-                    "[auth] Browser opened."
-                )
+                print("[auth] Browser opened.")
 
-                print(
-                    "[auth] Log in normally, then open the student's "
-                    "Dziennik."
-                )
+                print("[auth] Log in normally, then open the student's Dziennik.")
 
                 try:
                     await asyncio.wait_for(
@@ -1290,17 +1007,11 @@ async def login_and_save_session(
                     )
 
                 except TimeoutError as exc:
-                    raise TimeoutError(
-                        "Login timed out after 5 minutes"
-                    ) from exc
+                    raise TimeoutError("Login timed out after 5 minutes") from exc
 
-                dashboard_url = dashboard_holder[
-                    "url"
-                ]
+                dashboard_url = dashboard_holder["url"]
 
-                await asyncio.sleep(
-                    1
-                )
+                await asyncio.sleep(1)
 
                 return await _save_current_session(
                     context,
@@ -1332,9 +1043,7 @@ async def auto_login(
       4. Only if that fails, perform normal login/password flow.
     """
 
-    diagnostics_dir = (
-        session_path.parent
-    )
+    diagnostics_dir = session_path.parent
 
     login_complete = asyncio.Event()
 
@@ -1346,9 +1055,7 @@ async def auto_login(
         _cleanup_chromium_singleton_locks()
 
         async with async_playwright() as playwright:
-            context = await _launch_browser_context(
-                playwright
-            )
+            context = await _launch_browser_context(playwright)
 
             try:
                 _attach_navigation_tracking(
@@ -1365,9 +1072,7 @@ async def auto_login(
                     session_path,
                 )
 
-                page = _get_page(
-                    context
-                )
+                page = _get_page(context)
 
                 # -----------------------------------------------------------
                 # 1. Try persistent profile first.
@@ -1377,9 +1082,7 @@ async def auto_login(
                     page,
                     login_complete,
                 ):
-                    dashboard_url = dashboard_holder[
-                        "url"
-                    ]
+                    dashboard_url = dashboard_holder["url"]
 
                     return await _save_current_session(
                         context,
@@ -1393,8 +1096,7 @@ async def auto_login(
                 # -----------------------------------------------------------
 
                 logger.info(
-                    "Auto-login: persistent portal session unavailable; "
-                    "performing full login"
+                    "Auto-login: persistent portal session unavailable; performing full login"
                 )
 
                 await page.goto(
@@ -1403,22 +1105,14 @@ async def auto_login(
                     timeout=30000,
                 )
 
-                await _accept_cookie_banner(
-                    page
-                )
+                await _accept_cookie_banner(page)
 
                 # Username.
-                login_field = page.locator(
-                    "#UserName"
-                )
+                login_field = page.locator("#UserName")
 
                 if not await login_field.count():
                     login_field = page.locator(
-                        (
-                            'input[type="text"], '
-                            'input[name="UserName"], '
-                            'input[type="email"]'
-                        )
+                        'input[type="text"], input[name="UserName"], input[type="email"]'
                     ).first
 
                 await login_field.wait_for(
@@ -1426,108 +1120,75 @@ async def auto_login(
                     timeout=10000,
                 )
 
-                await login_field.fill(
-                    login
-                )
+                await login_field.fill(login)
 
-                next_button = page.locator(
-                    "#btNext"
-                )
+                next_button = page.locator("#btNext")
 
                 if not await next_button.count():
-                    next_button = page.locator(
-                        'button:has-text("Dalej")'
-                    ).first
+                    next_button = page.locator('button:has-text("Dalej")').first
 
                 await next_button.click(
                     timeout=10000,
                 )
 
                 # Password.
-                password_field = page.locator(
-                    "#Password"
-                )
+                password_field = page.locator("#Password")
 
                 if not await password_field.count():
-                    password_field = page.locator(
-                        'input[type="password"]'
-                    ).first
+                    password_field = page.locator('input[type="password"]').first
 
                 await password_field.wait_for(
                     state="visible",
                     timeout=15000,
                 )
 
-                await password_field.fill(
-                    password
+                await password_field.fill(password)
+
+                await _wait_for_captcha(
+                    page,
+                    diagnostics_dir,
                 )
 
-                challenge_before = (
-                    await _wait_for_captcha(
-                        page,
-                        diagnostics_dir,
-                    )
-                )
-
-                delay = (
-                    _get_login_delay_seconds()
-                )
+                delay = _get_login_delay_seconds()
 
                 if delay > 0:
                     logger.info(
-                        "Auto-login: waiting %.1f seconds "
-                        "before submitting login",
+                        "Auto-login: waiting %.1f seconds before submitting login",
                         delay,
                     )
 
-                    await asyncio.sleep(
-                        delay
-                    )
+                    await asyncio.sleep(delay)
 
-                login_button = page.locator(
-                    "#btLogOn"
-                )
+                login_button = page.locator("#btLogOn")
 
                 if not await login_button.count():
-                    login_button = page.locator(
-                        'button:has-text("Zaloguj")'
-                    ).first
+                    login_button = page.locator('button:has-text("Zaloguj")').first
 
                 await login_button.wait_for(
                     state="visible",
                     timeout=10000,
                 )
 
-                logger.info(
-                    "Auto-login: submitting login form"
-                )
+                logger.info("Auto-login: submitting login form")
 
                 try:
                     async with page.expect_response(
                         lambda response: (
-                            response.request.method.upper()
-                            == "POST"
-                            and "/logowanie"
-                            in response.url.lower()
+                            response.request.method.upper() == "POST"
+                            and "/logowanie" in response.url.lower()
                         ),
                         timeout=15000,
                     ) as response_info:
-
                         await login_button.click(
                             timeout=10000,
                         )
 
-                    login_response = (
-                        await response_info.value
-                    )
+                    login_response = await response_info.value
 
                     logger.info(
-                        "Auto-login: login POST response "
-                        "status=%d url=%s",
+                        "Auto-login: login POST response status=%d url=%s",
                         login_response.status,
-                        _safe_url(
-                            login_response.url
-                        ),
+                        _safe_url(login_response.url),
                     )
 
                 except Exception as exc:
@@ -1537,48 +1198,19 @@ async def auto_login(
                         "login-post-error",
                     )
 
-                    raise RuntimeError(
-                        "No login POST response observed"
-                    ) from exc
+                    raise RuntimeError("No login POST response observed") from exc
 
-                try:
+                with suppress(Exception):
                     await page.wait_for_load_state(
                         "domcontentloaded",
                         timeout=15000,
                     )
 
-                except Exception:
-                    pass
-
-                await asyncio.sleep(
-                    1
-                )
+                await asyncio.sleep(1)
 
                 # Server rejected full login.
-                if "/logowanie" in urlparse(
-                    page.url
-                ).path.lower():
-
-                    challenge_after = None
-
-                    try:
-                        challenge_after = (
-                            await page.locator(
-                                "#captcha .captcha-wrapper"
-                            ).get_attribute(
-                                "data-challenge"
-                            )
-                        )
-
-                    except Exception:
-                        pass
-
-                    logger.error(
-                        "Auto-login: server returned login page "
-                        "(challenge before=%s after=%s)",
-                        challenge_before,
-                        challenge_after,
-                    )
+                if "/logowanie" in urlparse(page.url).path.lower():
+                    logger.error("Auto-login: server returned login page")
 
                     await _log_page_text(
                         page,
@@ -1591,20 +1223,15 @@ async def auto_login(
                         "login-post-rejected",
                     )
 
-                    raise RuntimeError(
-                        "eduVULCAN rejected the automated "
-                        "credential login"
-                    )
+                    raise RuntimeError("eduVULCAN rejected the automated credential login")
 
                 logger.info(
                     "Auto-login: credentials accepted; URL=%s",
-                    _safe_url(
-                        page.url
-                    ),
+                    _safe_url(page.url),
                 )
 
                 # -----------------------------------------------------------
-                # 3. Enter configured student journal.
+                # 3. Enter first available student journal.
                 # -----------------------------------------------------------
 
                 if not login_complete.is_set():
@@ -1614,24 +1241,19 @@ async def auto_login(
                         timeout=30000,
                     )
 
-                    await asyncio.sleep(
-                        1
+                    await asyncio.sleep(1)
+
+                if not login_complete.is_set() and not await _open_student_profile(page):
+                    await _save_screenshot(
+                        page,
+                        diagnostics_dir,
+                        "journal-profile-error",
                     )
 
-                if not login_complete.is_set():
-                    if not await _open_student_profile(
-                        page
-                    ):
-                        await _save_screenshot(
-                            page,
-                            diagnostics_dir,
-                            "journal-profile-error",
-                        )
-
-                        raise RuntimeError(
-                            "Could not find configured "
-                            "journal profile"
-                        )
+                    raise RuntimeError(
+                        "Could not open a journal profile; run "
+                        "vulcan-notify auth for interactive recovery"
+                    )
 
                 if not login_complete.is_set():
                     try:
@@ -1647,14 +1269,9 @@ async def auto_login(
                             "student-redirect-error",
                         )
 
-                        raise TimeoutError(
-                            "Timed out waiting for "
-                            "uczen.eduvulcan.pl"
-                        ) from exc
+                        raise TimeoutError("Timed out waiting for uczen.eduvulcan.pl") from exc
 
-                dashboard_url = dashboard_holder[
-                    "url"
-                ]
+                dashboard_url = dashboard_holder["url"]
 
                 return await _save_current_session(
                     context,
@@ -1679,29 +1296,20 @@ def load_session(
 ) -> dict[str, Any]:
     if not session_path.exists():
         raise FileNotFoundError(
-            f"No session file at {session_path}. "
-            "Run 'vulcan-notify auth' first."
+            f"No session file at {session_path}. Run 'vulcan-notify auth' first."
         )
 
-    return json.loads(
-        session_path.read_text(
-            encoding="utf-8"
-        )
-    )
+    data: dict[str, Any] = json.loads(session_path.read_text(encoding="utf-8"))
+    return data
 
 
 def cookies_for_url(
     session_data: dict[str, Any],
     url: str,
 ) -> dict[str, str]:
-    parsed = urlparse(
-        url
-    )
+    parsed = urlparse(url)
 
-    host = (
-        parsed.hostname
-        or ""
-    ).lower()
+    host = (parsed.hostname or "").lower()
 
     matching: dict[
         str,
@@ -1724,17 +1332,8 @@ def cookies_for_url(
         if not domain:
             continue
 
-        if (
-            host == domain
-            or host.endswith(
-                "." + domain
-            )
-        ):
-            matching[
-                cookie["name"]
-            ] = cookie[
-                "value"
-            ]
+        if host == domain or host.endswith("." + domain):
+            matching[cookie["name"]] = cookie["value"]
 
     return matching
 
@@ -1747,9 +1346,7 @@ def cookies_for_url(
 def _make_ssl_context() -> ssl.SSLContext:
     import certifi
 
-    return ssl.create_default_context(
-        cafile=certifi.where()
-    )
+    return ssl.create_default_context(cafile=certifi.where())
 
 
 async def test_session(
@@ -1757,13 +1354,9 @@ async def test_session(
 ) -> bool:
     """Test the short-lived API session."""
 
-    base_url = session_data[
-        "base_url"
-    ]
+    base_url = session_data["base_url"]
 
-    url = (
-        f"{base_url}/api/Context"
-    )
+    url = f"{base_url}/api/Context"
 
     cookie_header = "; ".join(
         f"{k}={v}"
@@ -1783,70 +1376,51 @@ async def test_session(
             "Chrome/131.0.0.0 "
             "Safari/537.36"
         ),
-        "Accept": (
-            "application/json, "
-            "text/plain, */*"
-        ),
-        "Accept-Language": (
-            "pl-PL,pl;q=0.9,"
-            "en-US;q=0.8,en;q=0.7"
-        ),
+        "Accept": ("application/json, text/plain, */*"),
+        "Accept-Language": ("pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7"),
     }
 
-    ssl_context = (
-        _make_ssl_context()
-    )
+    ssl_context = _make_ssl_context()
 
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
+        async with (
+            aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30, connect=10)) as session,
+            session.get(
                 url,
                 ssl=ssl_context,
                 headers=headers,
                 allow_redirects=True,
-            ) as response:
+            ) as response,
+        ):
+            text = await response.text()
 
-                text = (
-                    await response.text()
-                )
+            content_type = response.headers.get(
+                "content-type",
+                "",
+            )
 
-                content_type = (
-                    response.headers.get(
-                        "content-type",
-                        "",
-                    )
-                )
+            logger.debug(
+                "Session test: status=%d content-type=%s len=%d",
+                response.status,
+                content_type,
+                len(text),
+            )
 
-                logger.debug(
-                    "Session test: status=%d "
-                    "content-type=%s len=%d",
-                    response.status,
-                    content_type,
-                    len(text),
-                )
+            if response.status != 200:
+                return False
 
-                if response.status != 200:
-                    return False
+            if "text/html" in content_type.lower():
+                return False
 
-                if (
-                    "text/html"
-                    in content_type.lower()
-                ):
-                    return False
+            try:
+                json.loads(text)
 
-                try:
-                    json.loads(
-                        text
-                    )
+                return True
 
-                    return True
-
-                except json.JSONDecodeError:
-                    return False
+            except json.JSONDecodeError:
+                return False
 
     except Exception:
-        logger.exception(
-            "Session validation failed"
-        )
+        logger.exception("Session validation failed")
 
         return False

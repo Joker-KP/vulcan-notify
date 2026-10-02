@@ -68,6 +68,8 @@ def _make_mock_client(
     client.get_dashboard = AsyncMock(return_value=DashboardData(unread_messages=5))
     client.get_messages = AsyncMock(return_value=[])
     client.get_message_detail = AsyncMock(return_value=None)
+    client.get_exam_detail = AsyncMock(return_value=None)
+    client.get_homework_detail = AsyncMock(return_value=None)
     client.close = AsyncMock()
     return client
 
@@ -201,3 +203,21 @@ async def test_sync_messages_backfills_legacy_content(db: Database) -> None:
     cursor = await db.db.execute("SELECT content FROM messages WHERE id = 9001")
     row = await cursor.fetchone()
     assert row[0] == "<p>Backfilled body.</p>"
+
+
+async def test_reauthentication_carries_changes_persisted_before_expiry(db: Database) -> None:
+    import pytest
+
+    from vulcan_notify.client import SessionExpiredError
+    from vulcan_notify.sync import SyncSessionExpiredError
+
+    await sync_all(_make_mock_client(), db)
+    client = _make_mock_client(grades=[GRADE])
+    client.get_attendance.side_effect = SessionExpiredError("expired")
+    with pytest.raises(SyncSessionExpiredError) as failure:
+        await sync_all(client, db)
+    partial = failure.value.partial_result
+    assert len(partial.student_results[0].new_grades) == 1
+    assert len(await db.get_grades_for_student(STUDENT_A.key)) == 1
+    retry = await sync_all(_make_mock_client(grades=[GRADE]), db)
+    assert retry.student_results[0].new_grades == []

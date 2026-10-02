@@ -125,7 +125,7 @@ flowchart TB
     linkStyle 12,13 stroke:#9333ea,stroke-width:1.5px,stroke-dasharray: 4 3
 ```
 
-1. **Auth** - Playwright opens a browser for you to log into eduvulcan.pl. After login, session cookies are saved locally. If login credentials are provided, expired sessions are renewed headlessly on subsequent runs.
+1. **Auth** - Playwright opens a browser for you to log into eduvulcan.pl. After login, session cookies are saved locally. Subsequent syncs validate cookies over HTTP. With credentials available, expired sessions first try persistent-browser recovery, then credential login.
 2. **Fetch** - The tool calls the eduVulcan web API directly (using saved cookies) to pull grades (all periods), attendance (last 90 days), exams, homework with full body, messages, and the lesson schedule including substitutions.
 3. **Diff** - Each item is compared against the local SQLite database. New or changed items are reported; exams and homework that disappear from the API are soft-deleted.
 4. **Persist** - All upserts are idempotent (`INSERT OR REPLACE`). Each run is recorded in a `sync_runs` table.
@@ -163,7 +163,7 @@ VULCAN_LOGIN=your.email@example.com
 VULCAN_PASSWORD=your_password
 ```
 
-When credentials are available, `vulcan-notify sync` detects expired sessions and re-authenticates headlessly via Playwright - no manual browser interaction needed.
+When credentials are available, `vulcan-notify sync` detects expired sessions, imports saved cookies into persistent Chromium and attempts browser-session recovery before credential login. Docker provides Xvfb for headed recovery by default; `VULCAN_BROWSER_HEADLESS=true` opts into headless mode. If automatic recovery fails, stop `vulcan-sync` and run `docker compose --profile auth up vulcan-auth` for manual headed authentication through noVNC, then restart the worker. All services share the persistent `/app/data` volume.
 
 ## 📅 Calendar integration <a name="calendar-integration"></a>
 
@@ -194,6 +194,7 @@ All settings are via environment variables or `.env` file:
 | `POLL_INTERVAL` | `1800` | Seconds between polls when run as a service |
 | `QUIET_HOURS_START` | `0` | Hour (0-23) to start quiet window, sync paused |
 | `QUIET_HOURS_END` | `5` | Hour (0-23) to end quiet window, sync resumes |
+| `QUIET_HOURS_TZ` | `Europe/Warsaw` | Zone the quiet window is read in. Not the container clock, which stays UTC |
 | `MESSAGE_SENDER_WHITELIST` | (empty) | Comma-separated sender names to filter messages |
 | `CALENDAR_MAP` | (empty) | JSON dict mapping student names to macOS calendar names |
 | `CALENDAR_REMINDER_HOURS` | `24` | Hours before event for calendar alarm |
@@ -207,7 +208,7 @@ All settings are via environment variables or `.env` file:
 | `NTFY_SERVER` | `https://ntfy.sh` | ntfy server base URL |
 | `LLM_BASE_URL` | `https://api.cerebras.ai/v1` | OpenAI-compatible API base URL for AI summaries |
 | `LLM_API_KEY` | (none) | API key for AI summaries (disabled if unset) |
-| `LLM_MODEL` | `qwen-3-235b-a22b-instruct-2507` | Model name for AI summaries |
+| `LLM_MODEL` | `gpt-oss-120b` | Model name for AI summaries |
 | `LOG_LEVEL` | `INFO` | Logging level |
 
 ## 📚 Documentation <a name="documentation"></a>

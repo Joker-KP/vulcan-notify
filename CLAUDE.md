@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-CLI tool that syncs data from the eduVulcan school e-journal (grades, attendance, exams, homework, messages) to a local SQLite database and detects changes between syncs. Uses cookie-based auth via Playwright browser login.
+CLI tool that syncs data from the eduVulcan school e-journal (grades, attendance, exams, homework, messages) to a local SQLite database and detects changes between syncs. Uses HTTP cookie validation and persistent Chromium recovery before credential login. Manual headed authentication is available through the explicit `vulcan-auth` Compose profile. Read `AGENTS.md` for current local Docker/auth behavior.
 
 ## Sibling repos (cross-repo work is common)
 
@@ -47,7 +47,7 @@ uv run mypy src/
 
 The tool follows a linear pipeline: **Auth -> Client -> Sync -> Diff -> Display**.
 
-- `auth.py` - Playwright-based browser login. Saves session cookies to `session.json` after user logs into eduvulcan.pl. Also provides `cookies_for_url()` and `_make_ssl_context()` used by the client.
+- `auth.py` - Persistent Playwright Chromium under `/app/data/chromium-profile`, guarded by a shared profile lock. Imports `session.json` cookies, tries browser reuse before credentials and saves refreshed session state. Interactive auth always forces headed mode; automatic selection opens the first journal profile. Also provides `cookies_for_url()` and `_make_ssl_context()` used by the client.
 
 - `client.py` - `VulcanClient` wraps aiohttp for the uczen.eduvulcan.pl JSON API. Handles cookie auth, SSL (certifi), and session expiry detection (HTML response = expired). Returns typed dataclasses from `models.py`.
 
@@ -59,7 +59,7 @@ The tool follows a linear pipeline: **Auth -> Client -> Sync -> Diff -> Display*
 
 - `display.py` - Formats `SyncResult` for terminal output with ANSI colors (auto-disabled when piped). Groups by student, then by data type.
 
-- `db.py` - `Database` class wrapping aiosqlite. Normalized tables: students, grades, attendance, exams, homework, messages, sync_state. All writes use INSERT OR REPLACE for idempotent upserts.
+- `db.py` - `Database` class wrapping aiosqlite. Normalized tables: students, grades, attendance, exams, homework, messages, sync_state. Entity writes use ON CONFLICT DO UPDATE for idempotent upserts. Per-section outcomes and confirmed-fetch timestamps drive freshness checks.
 
 - `config.py` - `pydantic-settings` `Settings` singleton loaded from `.env`.
 
@@ -81,3 +81,7 @@ The tool follows a linear pipeline: **Auth -> Client -> Sync -> Diff -> Display*
 ## API reference
 
 See `docs/eduvulcan-api.md` for the reverse-engineered eduVulcan web API documentation.
+
+## Docker startup
+
+`vulcan-api` serves port 8585 independently. `vulcan-sync` runs `sync-loop.sh` through `entrypoint-xvfb.sh`; the wrapper forwards its supplied command. `vulcan-auth` is an explicit GUI service with noVNC at loopback port 6080. All share `./data:/app/data`. The image uses CMD and has no ENTRYPOINT; `entrypoint.sh` was removed. Quiet hours use Europe/Warsaw separately from the UTC database clock. Stop the worker during manual auth or a one-off sync.

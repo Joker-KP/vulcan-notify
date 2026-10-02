@@ -6,8 +6,6 @@ import logging
 import sys
 from typing import Any
 
-logger = logging.getLogger(__name__)
-
 from vulcan_notify.auth import (
     auto_login,
     get_keychain_credentials,
@@ -20,9 +18,11 @@ from vulcan_notify.client import SessionExpiredError, VulcanClient
 from vulcan_notify.config import settings
 from vulcan_notify.db import Database
 from vulcan_notify.display import BOLD, RESET, format_compact_sync, format_full_sync
-from vulcan_notify.mqtt import publish_changes
+from vulcan_notify.mqtt import drain_outbox, publish_changes
 from vulcan_notify.summarizer import format_changes_for_llm, summarize
-from vulcan_notify.sync import sync_all
+from vulcan_notify.sync import FullSyncResult, SyncSessionExpiredError, sync_all
+
+logger = logging.getLogger(__name__)
 
 
 def setup_logging() -> None:
@@ -55,6 +55,19 @@ def _get_credentials() -> tuple[str, str] | None:
     return get_keychain_credentials()
 
 
+async def _recover_session(login: str, password: str) -> dict[str, Any]:
+    """Attempt automatic recovery, leaving interactive login to an explicit command."""
+    try:
+        return await auto_login(settings.session_file, login, password)
+    except Exception as exc:
+        logger.error(
+            "Automatic authentication failed (%s); manual login required", type(exc).__name__
+        )
+        print("Run 'vulcan-notify auth' for interactive recovery.")
+        print("Docker: stop vulcan-sync, then docker compose --profile auth up vulcan-auth.")
+        sys.exit(1)
+
+
 async def _ensure_session() -> dict[str, Any]:
     """Load session, auto-reauth if expired and credentials are available."""
     try:
@@ -69,7 +82,7 @@ async def _ensure_session() -> dict[str, Any]:
     creds = _get_credentials()
     if creds:
         logger.info("Session expired, auto-logging in...")
-        return await auto_login(settings.session_file, creds[0], creds[1])
+        return await _recover_session(creds[0], creds[1])
 
     if session is None:
         print("No session file. Run 'vulcan-notify auth' to authenticate.")
@@ -112,6 +125,25 @@ async def _sync_calendar(db: Database) -> None:
     _print_calendar_result(cal_result)
 
 
+async def cmd_heartbeat() -> None:
+    """Publish the retained MQTT heartbeat without syncing.
+
+    Called by sync-loop.sh once per poll interval while it is parked in quiet hours.
+    The HA sensor on `school/status` carries `expire_after: 2400`, so five silent
+    hours dropped the entity to `unavailable` and wiped its attributes -- the
+    dashboard tile then had no timestamp at all and read "never synced" rather than
+    "5h ago". Ticking here keeps the entity alive and honest: still connected, no new
+    data expected yet.
+    """
+    db = Database(settings.db_path)
+    await db.connect()
+    try:
+        ok, pending = await drain_outbox(db)
+        print(f"heartbeat published (delivered={ok}, pending={pending})")
+    finally:
+        await db.close()
+
+
 async def cmd_sync() -> None:
     """Fetch latest data and show changes since last sync."""
     session = await _ensure_session()
@@ -119,7 +151,7 @@ async def cmd_sync() -> None:
     db = Database(settings.db_path)
     await db.connect()
 
-    def _print_result(result):  # type: ignore[no-untyped-def]
+    def _print_result(result: FullSyncResult) -> None:
         if sys.stdout.isatty():
             print(format_full_sync(result, settings.message_sender_whitelist))
         else:
@@ -135,19 +167,39 @@ async def cmd_sync() -> None:
         _print_result(result)
         await _sync_calendar(db)
         await publish_changes(result, db)
+        if result.has_failures:
+            sys.exit(1)
 
-    except SessionExpiredError:
+    except SessionExpiredError as exc:
+        # A retry compares against rows already committed by successful sections.
+        # Deliver their changes now so they are not lost from the retried diff.
+        if isinstance(exc, SyncSessionExpiredError):
+            _print_result(exc.partial_result)
+            await _sync_calendar(db)
+            await publish_changes(exc.partial_result, db)
         # Try auto-reauth once if it fails mid-sync
         creds = _get_credentials()
         if creds:
             logger.info("Session expired mid-sync, re-authenticating...")
             await client.close()
-            session = await auto_login(settings.session_file, creds[0], creds[1])
+            session = await _recover_session(creds[0], creds[1])
             client = VulcanClient(session)
-            result = await sync_all(client, db)
+            try:
+                result = await sync_all(client, db)
+            except SyncSessionExpiredError as retry_exc:
+                _print_result(retry_exc.partial_result)
+                await _sync_calendar(db)
+                await publish_changes(retry_exc.partial_result, db)
+                print("Session still expired after recovery. Run 'vulcan-notify auth'.")
+                sys.exit(1)
+            if not result.student_results:
+                print("No students found after session recovery.")
+                sys.exit(1)
             _print_result(result)
             await _sync_calendar(db)
             await publish_changes(result, db)
+            if result.has_failures:
+                sys.exit(1)
         else:
             print("Session expired. Run 'vulcan-notify auth' to re-authenticate.")
             print(
@@ -285,6 +337,8 @@ def main() -> None:
             asyncio.run(cmd_test())
         case "sync":
             asyncio.run(cmd_sync())
+        case "heartbeat":
+            asyncio.run(cmd_heartbeat())
         case "calendar":
             asyncio.run(cmd_calendar())
         case "tui":
@@ -303,10 +357,11 @@ def main() -> None:
                 sys.exit(1)
             asyncio.run(cmd_summarize(summary_type=summary_type, days=days))
         case _:
-            print("Usage: vulcan-notify [auth|test|sync|calendar|tui|summarize]")
+            print("Usage: vulcan-notify [auth|test|sync|heartbeat|calendar|tui|summarize]")
             print("  auth      - Interactive login and save session")
             print("  test      - Test if saved session is valid")
             print("  sync      - Fetch latest data and show changes (default)")
+            print("  heartbeat - Publish the retained MQTT heartbeat only, no sync")
             print("  calendar  - Force re-sync all events to macOS Calendar")
             print("  tui       - Interactive message browser")
             print("  summarize - AI summary of recent changes or messages")

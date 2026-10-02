@@ -46,11 +46,8 @@ RUN mkdir -p \
     /app/data \
     /app/data/chromium-profile
 
-COPY entrypoint-xvfb.sh ./
-RUN chmod +x entrypoint-xvfb.sh
-
-COPY entrypoint.sh ./
-RUN chmod +x entrypoint.sh
+COPY sync-loop.sh entrypoint-xvfb.sh ./
+RUN chmod +x sync-loop.sh entrypoint-xvfb.sh
 
 COPY prompts.toml ./
 COPY src/ src/
@@ -60,4 +57,6 @@ RUN uv sync \
     --frozen \
     --no-dev
 
-ENTRYPOINT ["./entrypoint.sh"]
+# Compose supplies separate API and worker commands; the standalone image runs
+# the worker with headed Chromium recovery available under Xvfb.
+CMD ["./entrypoint-xvfb.sh", "./sync-loop.sh"]

@@ -44,6 +44,9 @@ if [ ! -S "/tmp/.X11-unix/X${DISPLAY_NUM}" ]; then
     exit 1
 fi
 
-echo "[xvfb] Starting vulcan-notify entrypoint"
+if [ "$#" -eq 0 ]; then
+    set -- ./sync-loop.sh
+fi
 
-exec ./entrypoint.sh "$@"
+echo "[xvfb] Starting supplied command"
+exec "$@"

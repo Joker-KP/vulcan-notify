@@ -88,22 +88,35 @@ source. With the Docker build cache available, changes under `src/` reuse those
 layers and rerun only the source copy and application installation. Changes to
 `pyproject.toml` or `uv.lock` invalidate the dependency and browser layers.
 
-The first sync will auto-login via headless Chromium using your credentials and save the session to `data/session.json`. Subsequent syncs reuse the session until it expires, then re-authenticate automatically.
+Synchronization first validates `data/session.json` over HTTP. With credentials configured, an expired or missing session starts persistent Chromium under Xvfb, imports stored cookies and tries to restore browser access before entering credentials. Browser recovery is headed by default; set `VULCAN_BROWSER_HEADLESS=true` to opt into headless recovery. Automatic profile selection opens the first available journal; synchronization then covers all students returned by the API.
 
-## 4. Tailscale (recommended)
+The Chromium profile, its lock file, session and database remain under the shared `./data:/app/data` bind mount. Rebuilding the image does not replace these files. The API runs independently from the sync worker; normal HTTP synchronization does not start a browser.
 
-Install Tailscale inside the LXC for direct SSH access from your Mac:
+If automatic recovery fails, authenticate manually:
 
 ```bash
-curl -fsSL https://tailscale.com/install.sh | sh
-tailscale up --hostname tools
+docker compose stop vulcan-sync
+docker compose --profile auth up vulcan-auth
+# Once authentication finishes:
+docker compose up -d vulcan-sync
 ```
 
-The LXC is now reachable at `tools.dwelf-forel.ts.net`. Set up SSH key auth:
+Open `http://127.0.0.1:6080/vnc.html` locally, or use an SSH tunnel to that loopback port on the Docker host. The auth service starts Xvfb, Openbox, x11vnc and noVNC; interactive auth always forces headed Chromium and reuses the same profile/session. Normal sync never launches interactive auth automatically.
+
+Quiet hours use `QUIET_HOURS_TZ=Europe/Warsaw` while container/database time remains UTC. Windows crossing midnight are supported; equal start/end disables the window. `/api/health` excludes these pauses from freshness age and reports stale until the first confirmed fetch populates the new section timestamps. The default `SYNC_HISTORY_KEEP_DAYS=90` prunes sync-run/section diagnostics, preserving school data and baseline markers.
+
+## 4. Remote access
+
+LXC 103 is **not** a tailnet node and does not run Tailscale. It is reached through the PVE host, which is one, using `pct exec`. The `tools.dwelf-forel.ts.net` name older notes refer to never resolved — do not try to reach the LXC directly.
+
+Set up SSH key auth to the PVE host instead:
 
 ```bash
 # From your Mac
-ssh-copy-id root@tools.dwelf-forel.ts.net
+ssh-copy-id root@pve.dwelf-forel.ts.net
+
+# Then reach the LXC through it
+ssh root@pve.dwelf-forel.ts.net "pct exec 103 -- sh -lc 'cd /opt/vulcan-notify && docker compose ps'"
 ```
 
 ## 5. GitHub deploy key
@@ -119,26 +132,35 @@ Add the public key as a read-only deploy key at `github.com/kintecus/vulcan-noti
 
 ## 6. Management
 
+Two normal services and one explicit auth service run off one image (see `docker-compose.yml`): **`vulcan-api`** serves port 8585, **`vulcan-sync`** runs the poll loop. There is no `vulcan-notify` service any more — it was split on 2026-09-15 so each process gets its own restart supervision.
+
 ```bash
-# View logs
-docker compose logs --tail 50
+# View logs — pick the container, the two are very different in volume
+docker compose logs --tail 50 vulcan-sync   # sync activity
+docker compose logs --tail 50 vulcan-api    # HTTP server
 
 # Restart (e.g., after .env changes)
 docker compose restart
 
 # Update to latest
-git pull && docker compose up -d --build
+git pull && docker compose up -d --build --remove-orphans
 
-# Run a one-off sync
-docker compose exec vulcan-notify uv run vulcan-notify sync
+# Avoid overlapping sync jobs when running a one-off sync
+docker compose stop vulcan-sync
+docker compose run --rm vulcan-sync uv run vulcan-notify sync
+docker compose up -d vulcan-sync
 
 # Check session validity
-docker compose exec vulcan-notify uv run vulcan-notify test
+docker compose run --rm vulcan-sync uv run vulcan-notify test
 ```
+
+`--remove-orphans` matters when migrating from the old single-service layout: without it a leftover container from the pre-split layout keeps port 8585 bound and the new API cannot start.
 
 ## 7. Auto-deploy (CI/CD)
 
-A systemd timer on the LXC polls GitHub every 5 minutes and rebuilds the container if main has new commits. Deploy notifications are sent via ntfy.sh.
+**Pushing to `main` deploys.** A systemd timer on the LXC polls `origin/main` every 5 minutes and rebuilds if there are new commits, so a push reaches production within ~5 minutes with no action from you. There is no GitHub Actions workflow — this timer is the whole CI/CD path. Deploy notifications go to ntfy.sh.
+
+`vulcan-deploy.sh` builds the image before recreating the container and rolls `HEAD` back on a build failure, so a broken build never takes the service down and never leaves the timer dormant on undeployed code.
 
 ### Install the systemd units
 
@@ -160,7 +182,7 @@ systemctl start vulcan-deploy.service
 journalctl -u vulcan-deploy --no-pager -n 20
 ```
 
-### Instant deploy from your Mac
+### Skipping the 5-minute wait
 
 Push to GitHub, then:
 
@@ -168,7 +190,7 @@ Push to GitHub, then:
 ./deploy.sh
 ```
 
-This SSHs to the tools LXC and runs pull + rebuild. Override the host with `TOOLS_HOST=<host> ./deploy.sh`.
+This only shortcuts the timer's polling interval; it is not the sole deploy path. It SSHes to the **PVE host** and `pct exec`s into LXC 103 to run pull + rebuild, because the LXC itself is not reachable over the tailnet. Override with `PVE_HOST=<host> ./deploy.sh`.
 
 ## 8. Monitoring
 
@@ -177,10 +199,13 @@ This SSHs to the tools LXC and runs pull + rebuild. Override the host with `TOOL
 journalctl -u vulcan-deploy --no-pager -n 50
 
 # Container status
-ssh root@tools.dwelf-forel.ts.net "cd /opt/vulcan-notify && docker compose ps"
+ssh root@pve.dwelf-forel.ts.net "pct exec 103 -- sh -lc 'cd /opt/vulcan-notify && docker compose ps'"
 
 # Recent sync logs
-ssh root@tools.dwelf-forel.ts.net "cd /opt/vulcan-notify && docker compose logs --tail 30"
+ssh root@pve.dwelf-forel.ts.net "pct exec 103 -- sh -lc 'cd /opt/vulcan-notify && docker compose logs --tail 30 vulcan-sync'"
+
+# Is the data actually current? (503 = stale; ?soft=1 for the same body as 200)
+ssh root@pve.dwelf-forel.ts.net "pct exec 103 -- curl -s http://localhost:8585/api/health" | jq '.status, .stale_sections'
 ```
 
 ## 9. DNS fix for LXC

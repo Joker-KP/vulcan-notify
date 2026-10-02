@@ -242,7 +242,7 @@ Current output status:
 | --- | --- | --- |
 | Terminal / logs | Implemented | Synchronization results and diagnostics. |
 | MQTT | Implemented, optional | Detected student changes and new messages; persistent retry outbox. |
-| HTTP API | Implemented | Reads local SQLite state; started alongside the sync loop by the Docker entrypoint. |
+| HTTP API | Implemented | Reads local SQLite state in the separate `vulcan-api` service; liveness at `/api/alive`, freshness at `/api/health` (`?soft=1` forces HTTP 200). |
 | iCalendar feed | Implemented | Lesson schedule at `/calendar/{student}.ics`; currently excludes exams and homework. |
 | macOS Calendar | Implemented, optional, macOS only | Exams/homework via AppleScript, enabled by `CALENDAR_MAP`. |
 | Email | Planned | No email adapter or transport settings in the current application. |
@@ -284,7 +284,7 @@ Current deployment expects the service on port `8585`.
 
 ### iCalendar / calendar
 
-`ics.py` currently generates a feed of lesson schedules, including substitution information, through the HTTP API. It does not generate exam or homework feeds.
+`ics.py` generates a lesson schedule feed with substitution information, refresh hints and a warning event when that student's schedule is stale. It does not generate exam or homework feeds. Event stamps use row `last_seen`, which advances on each successful upsert; it is not an actual modification timestamp.
 
 `calendar.py` separately synchronizes exams and homework to macOS Calendar using `osascript`. It stores macOS event UIDs in SQLite for subsequent updates and deletion. This integration requires macOS and should remain disabled in Linux Docker deployments (`CALENDAR_MAP` empty).
 
@@ -376,11 +376,15 @@ The authentication implementation may navigate through eduVULCAN's access/profil
 
 Do not assume there is exactly one student/profile.
 
-`VULCAN_STUDENT` is a case-insensitive substring hint for selecting a journal profile on the access page. Without a hint, automatic selection requires exactly one profile; multiple profiles cause selection to fail. With a hint, the first matching profile is selected.
+Automatic authentication opens the first available journal profile, following upstream behavior. Picker overlays are dismissed before selection, and both the current `/dziennik?` links and previous profile markup are supported. `VULCAN_STUDENT` selection rules have been removed; that variable no longer selects a profile.
 
-This is an authentication entry-profile selector, not a synchronization filter. `sync_all()` synchronizes all students returned by `client.get_students()` after authentication. Do not assume this setting restricts synchronization to one student.
+The entry profile is not a synchronization filter. `sync_all()` synchronizes all students returned by `client.get_students()` after authentication.
 
-Never silently switch to a different student because the expected one was not found.
+### Authentication failures
+
+`test_session()` has a 30-second total and 10-second connection timeout. A failed validation returns false without replacing session.json. Mid-sync `SessionExpiredError` propagates to the CLI for one credential-backed recovery attempt. Partial results carry already persisted changes to the CLI for output delivery before retry, so a fresh diff does not silently discard them. A degraded sync exits nonzero after publishing successful changes; the loop counts it as a failure. HTML server failures are retried as fetch failures, rather than interpreted as expired sessions.
+
+Automatic recovery failures print instructions for manual authentication without launching a GUI. Interactive recovery remains explicit: stop `vulcan-sync`, run `docker compose --profile auth up vulcan-auth`, then restart `vulcan-sync`. The API can continue serving stored state during this process. Do not automatically launch interactive authentication from normal sync.
 
 ### Authentication logging
 
@@ -432,12 +436,13 @@ The current Dockerfile includes:
 
 The startup paths are:
 
-- Compose `vulcan-notify`: overrides the image entrypoint with `entrypoint-xvfb.sh`, which starts Xvfb, waits for its socket, then executes `entrypoint.sh`.
-- `entrypoint.sh`: starts `uv run python -m vulcan_notify.api` in the background and runs a sequential sync/sleep loop with quiet hours.
-- The image alone: `Dockerfile` still declares `ENTRYPOINT ["./entrypoint.sh"]`; starting the image without Compose does not automatically start Xvfb.
-- Compose `vulcan-auth`: an explicit service in profile `auth`, with its own GUI startup script and `uv run vulcan-notify auth` command.
+- Compose `vulcan-api`: directly runs `uv run python -m vulcan_notify.api`, publishing port 8585. Its healthcheck uses `/api/alive`; data freshness is a separate concern.
+- Compose `vulcan-sync`: uses `entrypoint-xvfb.sh` to start Xvfb and wait for its socket, then executes the supplied `./sync-loop.sh` command.
+- `sync-loop.sh`: runs a sequential sync/sleep loop with quiet hours and MQTT heartbeat/outbox draining during long quiet pauses. It does not launch the API.
+- The image alone: has no `ENTRYPOINT`; `CMD ["./entrypoint-xvfb.sh", "./sync-loop.sh"]` supplies Xvfb for headed browser recovery. Override the command to run the API directly.
+- Compose `vulcan-auth`: an explicit service in profile `auth`, with its own GUI startup script and `uv run vulcan-notify auth` command. Compose shell variables in that script must use `$$` to defer expansion until container startup.
 
-The entrypoint remains the normal container startup boundary.
+All three services share `./data:/app/data`. Both browser services use `/app/data/chromium-profile` and `/app/data/chromium-profile.lock`; do not change one without the other. `entrypoint.sh` has been removed. The wrapper must forward its command instead of recreating the previous combined API/sync process.
 
 Do not move runtime dependencies to the host merely to simplify the Dockerfile.
 
@@ -462,7 +467,7 @@ The current Compose service uses `DISPLAY=:99`. Its wrapper starts:
 Xvfb :99 -screen 0 1440x900x24 -ac +extension RANDR
 ```
 
-The normal service makes Xvfb available for headed Chromium recovery; it does not start Openbox or noVNC. The separate `vulcan-auth` service starts those graphical components on its own display `:99` and shares the same `./data:/app/data` volume.
+The `vulcan-sync` service makes Xvfb available for headed Chromium recovery; it does not start Openbox or noVNC. The separate `vulcan-auth` service starts those graphical components on its own display `:99` and shares the same `./data:/app/data` volume.
 
 Start interactive authentication explicitly:
 
@@ -470,7 +475,7 @@ Start interactive authentication explicitly:
 docker compose --profile auth up vulcan-auth
 ```
 
-noVNC is published at `127.0.0.1:6080`; open `http://127.0.0.1:6080/vnc.html` locally or through an SSH tunnel. Both services reuse `/app/data/session.json` and `/app/data/chromium-profile`.
+noVNC is published at `127.0.0.1:6080`; open `http://127.0.0.1:6080/vnc.html` locally or through an SSH tunnel. Both browser services reuse `/app/data/session.json` and `/app/data/chromium-profile`.
 
 When changing Docker startup behavior, preserve both:
 
@@ -632,9 +637,11 @@ Running the same synchronization twice against unchanged upstream data should no
 
 The service is designed for periodic synchronization.
 
-The Docker `entrypoint.sh` controls scheduling: run sync, wait `POLL_INTERVAL` seconds (default `1800`), then repeat. This is a delay after completion, not a fixed start-to-start interval. `Settings.poll_interval` separately defaults to `300`, but does not drive this service loop.
+The Docker `sync-loop.sh` controls scheduling: run sync, wait `POLL_INTERVAL` seconds (default `1800`), then repeat. This is a delay after completion, not a fixed start-to-start interval. `Settings.poll_interval` also defaults to `1800`; the shell reads the process environment independently of `Settings`.
 
-Quiet hours default to `QUIET_HOURS_START=0` and `QUIET_HOURS_END=5`. The shell evaluates them using the container's system timezone. Neither the Dockerfile nor Compose currently configures `Europe/Warsaw`; verify the effective timezone before relying on local-time scheduling. The current comparison supports a same-day window (`START < END`), not a window crossing midnight.
+Quiet hours default to `QUIET_HOURS_START=0`, `QUIET_HOURS_END=5` and `QUIET_HOURS_TZ=Europe/Warsaw`. Equal start/end disables the pause; windows crossing midnight are supported. Keep scheduler and `freshness.py` semantics aligned. The container clock remains UTC because stored naive timestamps are interpreted as UTC; only the quiet window uses the household timezone.
+
+Successful fetches stamp `last_success:<student>:<section>`; messages use account-level `last_success::messages`. Freshness excludes scheduled quiet hours and defaults to `STALE_AFTER_SECONDS=3600`. A section failure is recorded without advancing its timestamp. Missing timestamps remain stale until a successful sync; do not backfill them from attempted-sync markers. `sync_sections` stores outcomes and `sync_runs` distinguishes completed, degraded, failed and interrupted runs. `SYNC_HISTORY_KEEP_DAYS=90` prunes run/section history, preserving entity data and baseline markers.
 
 Treat these values as configuration, not hard-coded product behavior.
 
@@ -657,7 +664,7 @@ Configuration comes from three current sources:
 
 1. `config.py`: `pydantic-settings` loads application settings from environment variables and `.env`.
 2. `auth.py` and the API entry point: selected variables are read directly from the process environment using `os.getenv()` / `os.environ`.
-3. `entrypoint.sh`, `entrypoint-xvfb.sh` and Compose: scheduling, display and deployment settings.
+3. `sync-loop.sh`, `entrypoint-xvfb.sh` and Compose: scheduling, display and deployment settings.
 
 Direct environment readers do not load `.env` themselves. Compose uses `env_file: .env` to populate the container environment; do not assume the same behavior for a standalone CLI invocation.
 
@@ -674,11 +681,13 @@ Direct environment readers do not load `.env` themselves. Compose uses `env_file
 | `MQTT_TOPIC_PREFIX`, `MQTT_STATUS_SUFFIX` | `Settings` | `school`, `status`. |
 | `CALENDAR_MAP` | `Settings` | Empty map disables macOS Calendar integration. |
 | `LLM_API_KEY` | `Settings` | Unset; AI summaries are optional. |
-| `POLL_INTERVAL` | `entrypoint.sh`; also declared in `Settings` | Service loop: `1800` seconds. Settings field: `300`, unused by the loop. |
-| `QUIET_HOURS_START`, `QUIET_HOURS_END` | `entrypoint.sh` | `0`, `5`, in the container's system timezone. |
-| `API_PORT` | `entrypoint.sh` and API entry point | `8585`; Compose publishes a fixed `8585:8585` mapping. |
+| `POLL_INTERVAL` | `sync-loop.sh`; also declared in `Settings` | `1800` seconds in both readers. |
+| `QUIET_HOURS_START`, `QUIET_HOURS_END` | `sync-loop.sh` and `Settings` | `0`, `5`; equal values disable quiet hours. |
+| `QUIET_HOURS_TZ` | `sync-loop.sh` and `Settings` | `Europe/Warsaw`; container timestamps remain UTC. |
+| `STALE_AFTER_SECONDS` | `Settings` | `3600`; excludes scheduled quiet hours. |
+| `SYNC_HISTORY_KEEP_DAYS` | `Settings` | `90`; retention for run and section history. |
+| `API_PORT` | API entry point | `8585`; Compose publishes a fixed `8585:8585` mapping. |
 | `DISPLAY` | `entrypoint-xvfb.sh` / Compose | `:99`. |
-| `VULCAN_STUDENT` | `auth.py`, direct environment | Empty; entry-profile hint, not a sync filter. |
 | `VULCAN_BROWSER_HEADLESS` | `auth.py`, direct environment | `false`; interactive `auth` forces headed mode. |
 | `VULCAN_BROWSER_PROFILE_DIR` | `auth.py`, direct environment | `/app/data/chromium-profile`. |
 | `VULCAN_BROWSER_LOCK_FILE` | `auth.py`, direct environment | `/app/data/chromium-profile.lock`. |
@@ -687,7 +696,7 @@ Direct environment readers do not load `.env` themselves. Compose uses `env_file
 | `VULCAN_CAPTCHA_DETECT_TIMEOUT_SECONDS` | `auth.py`, direct environment | `5`. |
 | `VULCAN_CAPTCHA_COMPLETE_TIMEOUT_SECONDS` | `auth.py`, direct environment | `60`. |
 
-The variables read directly by `auth.py` above are not currently declared as `Settings` fields. When changing configuration, check `.env.example` against `Settings` and verify `.env` parsing with sanitized values; do not assume unknown `.env` keys are accepted. SMTP/email transport settings do not exist yet.
+The variables read directly by `auth.py` above are not currently declared as `Settings` fields. When changing configuration, check `.env.example` against `Settings` and verify `.env` parsing with sanitized values; `Settings` ignores extra `.env` keys so auth/startup settings do not prevent CLI startup. Direct auth readers still require exported variables outside Compose. SMTP/email transport settings do not exist yet.
 
 Do not hard-code user-specific values.
 

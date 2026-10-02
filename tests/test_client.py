@@ -172,9 +172,7 @@ async def test_get_grades(session_data: dict, student: Student) -> None:
     assert grades[0].weight == 2
 
 
-async def test_get_grades_null_category_coalesced(
-    session_data: dict, student: Student
-) -> None:
+async def test_get_grades_null_category_coalesced(session_data: dict, student: Student) -> None:
     """Vulcan sometimes returns an explicit null for kategoriaKolumny/nazwaKolumny/wpis.
 
     dict.get(key, default) returns None (not the default) on an explicit null, and
@@ -298,3 +296,26 @@ async def test_get_attendance(session_data: dict, student: Student) -> None:
     assert len(entries) == 1
     assert entries[0].category == 2
     assert entries[0].subject == "Przyroda"
+
+
+@pytest.mark.parametrize("status", [500, 503, 429])
+async def test_html_server_fault_retries_without_triggering_auth(session_data, monkeypatch, status):
+    from vulcan_notify.client import VulcanFetchError
+
+    client = VulcanClient(session_data)
+    client._http = _mock_session(_mock_response(None, status=status, content_type="text/html"))
+    monkeypatch.setattr(client, "_jitter", AsyncMock())
+    monkeypatch.setattr("vulcan_notify.client.asyncio.sleep", AsyncMock())
+    with pytest.raises(VulcanFetchError):
+        await client.get_students()
+    assert client._http.get.call_count == 3
+
+
+async def test_null_schedule_response_cannot_cancel_stored_lessons(session_data, monkeypatch):
+    from vulcan_notify.client import VulcanFetchError
+
+    client = VulcanClient(session_data)
+    client._http = _mock_session(_mock_response(None))
+    monkeypatch.setattr(client, "_jitter", AsyncMock())
+    with pytest.raises(VulcanFetchError, match="null"):
+        await client._request("/api/PlanZajec")

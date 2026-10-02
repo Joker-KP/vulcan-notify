@@ -35,7 +35,7 @@ node "Home Assistant" as ha
 actor "Browser /\niOS Calendar" as browser
 actor "Terminal /\ncron" as cron
 
-auth --> vulcan : interactive + headless login
+auth --> vulcan : persistent browser + explicit interactive login
 client --> vulcan : HTTPS + cookies
 sync --> client
 sync --> differ
@@ -62,10 +62,10 @@ The CLI always follows the same six-phase pipeline:
 
 | Phase | Module | Entry point | Role |
 |-------|--------|-------------|------|
-| Auth | `auth.py` | `get_session()` | Load cookies; open Playwright for interactive login on first run or after expiry. Fall back to headless re-auth if credentials are available. |
+| Auth | `auth.py`, `__main__.py` | `_ensure_session()` | Validate stored cookies through HTTP; with credentials, reuse persistent Chromium before credential login. Interactive headed recovery is explicit via `vulcan-auth`. |
 | Fetch | `client.py` | `VulcanClient` methods | Pull students, grades (all periods), attendance (last N days), exams, homework (full body), messages, lesson schedule with substitutions. |
 | Diff | `differ.py` | `diff_*` | Produce `Change` objects by comparing fetched data to the DB. |
-| Persist | `db.py` | `Database.upsert_*` | Apply `INSERT OR REPLACE` upserts; soft-delete removed exams/homework. |
+| Persist | `db.py` | `Database.upsert_*` | Apply `ON CONFLICT ... DO UPDATE` upserts; soft-delete removed exams/homework. |
 | Publish | `display.py`, `calendar.py`, `mqtt.py` | Fan-out | Print to terminal, sync macOS Calendar events, enqueue + publish MQTT messages. |
 | Serve | `api.py` (separate process/command) | aiohttp app | Expose HTTP endpoints and iCalendar feeds over the same SQLite. |
 
@@ -77,12 +77,12 @@ On first sync for a student, every item is treated as baseline: stored silently,
 |------|----------------|-------------|
 | `__main__.py` | CLI entry. Dispatches subcommands: `auth`, `test`, `sync`, `calendar`, `tui`, `summarize`. | `main()` |
 | `config.py` | `pydantic-settings` singleton loaded from `.env` + env vars. | `Settings`, `settings` |
-| `auth.py` | Playwright browser + headless login; cookie jar persistence; macOS Keychain fallback. | `get_session()`, `cookies_for_url()` |
+| `auth.py` | Persistent Chromium recovery before credentials; explicit headed interactive login; macOS Keychain fallback. | `auto_login()`, `login_and_save_session()`, `cookies_for_url()` |
 | `client.py` | aiohttp wrapper over the eduVulcan web API. Detects HTML responses as expired-session sentinel. | `VulcanClient` |
 | `models.py` | Dataclasses for API responses: `Student`, `Grade`, `AttendanceEntry`, `Exam`, `Homework`, `Message`, `Lesson`. | — |
 | `sync.py` | Orchestrates one full sync run per student; writes a `sync_runs` row; fans out to channels. | `sync_all()`, `SyncResult` |
 | `differ.py` | Detects new/updated/deleted items. Returns `Change` dataclasses. | `diff_grades`, `diff_attendance`, `diff_exams`, `diff_homework`, `diff_messages`, `diff_schedule` |
-| `db.py` | Async SQLite persistence via aiosqlite. All writes are `INSERT OR REPLACE`. | `Database` |
+| `db.py` | Async SQLite persistence via aiosqlite. All writes are `ON CONFLICT ... DO UPDATE`. | `Database` |
 | `display.py` | Terminal output with ANSI colors (auto-disabled when piped). | `format_result()` |
 | `calendar.py` | macOS Calendar integration via AppleScript. Dedup by stored UID; soft-deleted items remove events. | `sync_calendar()` |
 | `mqtt.py` | Maps `Change` → topic + JSON payload; writes to the `mqtt_outbox` table; drains outbox to Mosquitto on every sync and publishes a retained heartbeat + LWT on `<prefix>/status`. | `topic_for()`, `build_payload()`, `build_status_payload()`, `drain_outbox()` |
@@ -104,8 +104,9 @@ SQLite lives at `DB_PATH` (default `vulcan_notify.db`). Tables:
 | `messages` | `id` with `UNIQUE(api_global_key)` | `content` is backfilled in batches of `SYNC_MESSAGE_BACKFILL_BATCH` per run for legacy rows. |
 | `schedule` | `(student_key, date, time_from, subject)` | Per-lesson schedule including substitutions (`sub_teacher`, `sub_room`), cancellations (`annotation`), and extra lessons (`is_extra`). |
 | `mqtt_outbox` | `id` AUTOINCREMENT | Every MQTT publish is enqueued first; drained on each run. Broker outages survive restarts. |
-| `sync_state` | `key` | Generic KV for per-run state (e.g., cursors, first-sync flags). |
-| `sync_runs` | `id` AUTOINCREMENT | History of runs with status, counts, and error detail. |
+| `sync_state` | `key` | Generic KV. Holds `last_sync:<student>` (has this student ever synced — drives first-sync suppression) and `last_success:<student>:<section>` (freshness, written only after a confirmed fetch). The two are deliberately separate. |
+| `sync_runs` | `id` AUTOINCREMENT | History of runs: `completed`, `degraded` (a section failed), `failed`, or `interrupted` (abandoned mid-run, reconciled on the next start). Pruned past `SYNC_HISTORY_KEEP_DAYS`. |
+| `sync_sections` | `id` AUTOINCREMENT | Per-section, per-student outcome for each run, with item counts and error detail. Without it a partial outage — grades broken, everything else fine — is invisible. |
 
 The full entity diagram (students + primary entities) is in the [README](../README.md#database-schema).
 
@@ -229,35 +230,94 @@ end legend
 
 ### HTTP API (`api.py`)
 
-Optional, long-running. Starts an aiohttp server on port 8585 that reads from the same SQLite. Not started by `sync` — run it as a separate process (e.g., a second container or systemd service). Endpoints:
+Long-running aiohttp server on port 8585, reading the same SQLite the sync writes. It runs as its own container (`vulcan-api`) alongside the sync loop (`vulcan-sync`) — see `docker-compose.yml`. Endpoints:
 
 | Route | Purpose |
 |-------|---------|
-| `GET /api/health` | Liveness probe. |
-| `GET /api/grades?student=&days=` | Weighted rolling average. |
-| `GET /api/grades/average` | Aggregate current-period average. |
-| `GET /api/grades/monthly?year=&months=` | Per-month averages. |
-| `GET /api/grades/by-subject?student=` | Per-subject averages. |
+| `GET /api/alive` | Pure liveness. 200 whenever the process is serving. |
+| `GET /api/health` | Data freshness. **503 when stale or failed.** `?soft=1` forces 200. |
+| `GET /api/grades?n=` | Latest N grades plus diagnostics, per student. |
+| `GET /api/grades/average?student=&window=&period=` | Weighted rolling average. |
+| `GET /api/grades/monthly?student=&year=&months=` | Per-month averages. |
+| `GET /api/grades/by-subject?student=&period=` | Per-subject averages. |
+| `GET /api/grades/summary?student=&period=` | Term final/proposed grades. |
 | `GET /api/homework?n=` | Recent homework. |
+| `GET /api/exams?student=&days=` | Upcoming exams. |
 | `GET /api/messages?n=` | Recent messages (with content once backfilled). |
-| `GET /api/schedule?student=&date_from=&date_to=` | Lesson schedule including substitutions/cancellations. |
+| `GET /api/schedule?student=&only_substitutions=&days=` | Lesson schedule including substitutions/cancellations. |
 | `GET /calendar/<student>.ics` | Per-student iCalendar feed (see below). |
 
 All responses are JSON except the ICS feed.
 
+#### Freshness (`_meta`)
+
+Every data endpoint carries a top-level `_meta` block alongside the payload:
+
+```json
+{"_meta": {"status": "ok", "stale": false, "age_seconds": 412, "sections": {"...": {}}},
+ "Yarema Senyuk": {"...": "unchanged"}}
+```
+
+Additive rather than an envelope, so existing consumers keep working — Home Assistant's
+REST sensors scope `json_attributes_path` to a student key and never see it.
+
+`status` derives from `last_success:<student>:<section>` keys in `sync_state`, which
+`sync.py` writes **only after a confirmed fetch**. That is the distinction the whole
+design turns on: a section that failed cannot look fresh, and a fetch that legitimately
+returned zero rows is distinguishable from no fetch at all. Values are `ok`, `degraded`
+(a section failed but data is still recent), `stale` (a section missed its window), and
+`failed` (nothing has succeeded). The window is `STALE_AFTER_SECONDS`, default 3600 —
+two poll intervals, so one late sync is tolerated and two are not.
+
+**Age is measured with quiet hours subtracted** (`freshness.py`). `sync-loop.sh` pauses
+for five hours a night, which is far longer than `STALE_AFTER_SECONDS`, so comparing raw
+wall-clock age against the threshold reported every healthy night as an outage — 47 false
+Telegram alerts on 2026-09-15 before this was fixed. The endpoint reports real wall age
+(an alert quoting an age nobody can check against a clock is worse than no alert) but
+decides staleness on age minus the *scheduled* pause. A loop that wedged at 20:00 still
+ages past the threshold before midnight, so real failures are not forgiven; only the
+pause the loop was told to take is. `/api/health` also returns a `quiet_hours` block so
+an idle-but-green service explains itself.
+
+The window is evaluated in `QUIET_HOURS_TZ`, not the container clock. The clock stays UTC
+deliberately: every timestamp in the database is a naive `datetime.now()`, so moving it
+would reinterpret every existing row and produce a phantom age jump on the first health
+check after deploy.
+
+Errors are structured rather than tracebacks: a bad query param is a 400, a locked or
+missing database is a 503.
+
 ### iCalendar feed (`ics.py`)
+
+Freshness for student-filtered endpoints and calendar warnings uses that student's active keys; account health still uses the stalest active student.
 
 `GET /calendar/<student>.ics` returns an RFC 5545 feed of the student's lesson schedule. Zero external deps — hand-rolled so it builds in any minimal container. Point a calendar client (iOS, macOS Calendar subscribe, Google Calendar "from URL", Thunderbird) at the URL for a self-updating timetable that reflects substitutions and cancellations.
 
+Three properties matter for a feed nobody actively checks:
+
+- **`DTSTAMP` comes from the row's `last_seen`**, which advances on successful upserts, rather than the request time. This stabilizes repeated feed requests between syncs; it does not track actual field modification time.
+- **`X-PUBLISHED-TTL` / `REFRESH-INTERVAL` hints** are emitted, because Apple Calendar's
+  "Auto" refresh is opaque and can sit on a changed timetable for hours.
+- **A stale feed says so.** When the schedule section goes stale the feed gains one
+  all-day event, `⚠️ School sync stale since <date>`, with a UID stable per student so it
+  replaces itself and disappears on recovery. Otherwise a frozen feed keeps serving last
+  week's timetable and looks authoritative.
+
+A lesson with an unparseable timestamp is skipped and logged; it used to raise and take
+the entire feed down with it.
+
 ### ntfy (optional)
 
-`NTFY_TOPIC` / `NTFY_SERVER` can be configured to push notifications via ntfy.sh. Useful when you want phone push without Home Assistant.
+`NTFY_TOPIC` / `NTFY_SERVER` are used by `deploy/vulcan-deploy.sh` to report deploy
+success and failure. **The application itself sends no ntfy notifications** — runtime
+alerting is `/api/health` returning 503, which `pve-healthcheck` on the PVE host polls
+and forwards to Telegram.
 
 ## Auth & session management
 
 1. `vulcan-notify auth` opens a real Chromium window via Playwright. After the user logs in, cookies are serialized to `SESSION_FILE` (`session.json`).
 2. Every subsequent run loads the cookie jar and hits the API directly — no browser needed.
-3. If the client detects an HTML response (eduVulcan's expired-session sentinel) and credentials are available (from `.env` or the macOS Keychain service `vulcan-notify`), it runs headless Playwright to re-auth, then retries. Fully unattended on a home server.
+3. If the client detects an HTML response (eduVulcan's expired-session sentinel) and credentials are available (from `.env` or the macOS Keychain service `vulcan-notify`), it restores persistent Chromium, imports stored cookies, tries browser reuse and then credential login, before retrying once. Docker supplies Xvfb for headed recovery; manual authentication remains explicit through the `vulcan-auth` profile.
 4. SSL uses certifi's bundled root store so it works inside minimal containers.
 
 ## Home Assistant integration
@@ -271,7 +331,7 @@ The iCalendar feed is orthogonal — it's meant to be consumed directly by calen
 
 ## Deployment topology
 
-Production runs on a Proxmox LXC (Ubuntu 24.04) as a Docker container with headless Chromium for auto-reauth. Two systemd timers on the host handle CI/CD (poll GitHub, rebuild on new commits) and daily backups of the SQLite file. The MQTT broker runs inside the Home Assistant OS VM on the same Proxmox node. Full details: [`deployment.md`](deployment.md).
+Production runs on a Proxmox LXC (Ubuntu 24.04) as separate Docker API and sync services, with persistent Chromium under Xvfb for automatic recovery and an explicit noVNC auth service. Two systemd timers on the host handle CI/CD (poll GitHub, rebuild on new commits) and daily backups of the SQLite file. The MQTT broker runs inside the Home Assistant OS VM on the same Proxmox node. Full details: [`deployment.md`](deployment.md).
 
 ```plantuml
 @startuml
