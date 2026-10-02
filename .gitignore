@@ -8,13 +8,25 @@ build/
 *.egg
 
 .venv/
+venv/
 .env
+.env.*
+!.env.example
 credential.json
 session.json
+*.session.json
 *.db
+
+data/
+data/chromium-profile/
 
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
 
 .DS_Store
+
+playwright-report/
+test-results/
+
+*.log

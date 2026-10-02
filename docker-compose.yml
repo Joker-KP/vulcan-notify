@@ -1,13 +1,150 @@
 services:
+
   vulcan-notify:
     container_name: vulcan-notify
-    build: .
+
+    build:
+      context: .
+
     restart: unless-stopped
-    env_file: .env
+
+    env_file:
+      - .env
+
     volumes:
       - ./data:/app/data
+
     ports:
       - "8585:8585"
+
     environment:
-      - DB_PATH=/app/data/vulcan_notify.db
-      - SESSION_FILE=/app/data/session.json
+      DISPLAY: ":99"
+      DB_PATH: /app/data/vulcan_notify.db
+      SESSION_FILE: /app/data/session.json
+
+      VULCAN_BROWSER_PROFILE_DIR: /app/data/chromium-profile
+      VULCAN_BROWSER_HEADLESS: "${VULCAN_BROWSER_HEADLESS:-false}"
+      VULCAN_BROWSER_SLOW_MO_MS: "${VULCAN_BROWSER_SLOW_MO_MS:-0}"
+
+    # Even though Chromium is only started if re-auth is required,
+    # keep a virtual X display available for headed mode.
+    entrypoint:
+      - ./entrypoint-xvfb.sh
+
+
+  # Manual authentication / diagnostic browser.
+  #
+  # Start only explicitly:
+  #
+  # docker compose --profile auth up vulcan-auth
+  #
+  vulcan-auth:
+    container_name: vulcan-auth
+
+    build:
+      context: .
+
+    profiles:
+      - auth
+
+    restart: "no"
+
+    env_file:
+      - .env
+
+    environment:
+      DISPLAY: ":99"
+
+      DB_PATH: /app/data/vulcan_notify.db
+      SESSION_FILE: /app/data/session.json
+
+      VULCAN_BROWSER_PROFILE_DIR: /app/data/chromium-profile
+      VULCAN_BROWSER_HEADLESS: "false"
+
+    volumes:
+      - ./data:/app/data
+
+    ports:
+      - "127.0.0.1:6080:6080"
+
+    entrypoint:
+      - /bin/bash
+      - -lc
+      - |
+        set -euo pipefail
+
+        export DISPLAY=:99
+
+        echo "[auth-gui] DISPLAY=$DISPLAY"
+        echo "[auth-gui] Starting Xvfb..."
+
+        rm -f /tmp/.X99-lock || true
+
+        Xvfb :99 \
+          -screen 0 1440x900x24 \
+          -ac \
+          +extension RANDR \
+          >/tmp/xvfb.log 2>&1 &
+
+        # Do not rely only on sleep; wait until the X11 socket exists.
+        for i in $(seq 1 20); do
+          if [ -S /tmp/.X11-unix/X99 ]; then
+            echo "[auth-gui] X server ready."
+            break
+          fi
+
+          sleep 0.5
+        done
+
+        if [ ! -S /tmp/.X11-unix/X99 ]; then
+          echo "[auth-gui] ERROR: Xvfb did not create X11 socket."
+          cat /tmp/xvfb.log || true
+          exit 1
+        fi
+
+        echo "[auth-gui] Starting Openbox..."
+
+        openbox \
+          >/tmp/openbox.log 2>&1 &
+
+        sleep 1
+
+        echo "[auth-gui] Starting x11vnc..."
+
+        x11vnc \
+          -display :99 \
+          -forever \
+          -shared \
+          -nopw \
+          -listen 127.0.0.1 \
+          -rfbport 5900 \
+          >/tmp/x11vnc.log 2>&1 &
+
+        sleep 1
+
+        echo "[auth-gui] Starting noVNC..."
+
+        websockify \
+          --web=/usr/share/novnc \
+          6080 \
+          127.0.0.1:5900 \
+          >/tmp/novnc.log 2>&1 &
+
+        sleep 1
+
+        echo
+        echo "====================================================="
+        echo " eduVULCAN persistent authentication browser"
+        echo
+        echo " DISPLAY=$DISPLAY"
+        echo " Profile: $VULCAN_BROWSER_PROFILE_DIR"
+        echo
+        echo " SSH tunnel:"
+        echo "   ssh -L 6080:127.0.0.1:6080 USER@VPS"
+        echo
+        echo " Browser:"
+        echo "   http://127.0.0.1:6080/vnc.html"
+        echo "====================================================="
+        echo
+
+        exec uv run vulcan-notify auth

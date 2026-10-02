@@ -83,6 +83,11 @@ docker compose up -d --build
 docker compose logs -f
 ```
 
+The Dockerfile installs Python dependencies and Chromium before copying application
+source. With the Docker build cache available, changes under `src/` reuse those
+layers and rerun only the source copy and application installation. Changes to
+`pyproject.toml` or `uv.lock` invalidate the dependency and browser layers.
+
 The first sync will auto-login via headless Chromium using your credentials and save the session to `data/session.json`. Subsequent syncs reuse the session until it expires, then re-authenticate automatically.
 
 ## 4. Tailscale (recommended)
