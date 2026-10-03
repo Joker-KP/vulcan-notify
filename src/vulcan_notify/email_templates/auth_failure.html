@@ -1,0 +1,20 @@
+<section style="margin:20px 0;padding:16px;border:1px solid #fecaca;border-left:4px solid #dc2626;border-radius:6px">
+  <h2 style="margin:0 0 16px;color:#b91c1c;font-size:20px">Nie udało się ustanowić sesji</h2>
+  <p style="margin:0 0 12px">$reason</p>
+  <p style="margin:0;color:#475569">Wykryto: $detected_at</p>
+  <p style="margin:12px 0 0">Bez prawidłowej sesji synchronizacja nie może pobierać nowych danych. Zapisane dane pozostają dostępne w API, ale mogą być nieaktualne.</p>
+</section>
+<section style="margin:20px 0;padding:16px;border:1px solid #bfdbfe;border-left:4px solid #2563eb;border-radius:6px">
+  <h2 style="margin:0 0 16px;color:#1d4ed8;font-size:20px">Jak odnowić sesję w Dockerze</h2>
+  <p>Na hoście uruchamiającym usługę przejdź do katalogu z <code>docker-compose.yml</code> i wykonaj poniższe kroki:</p>
+  <ol style="padding-left:24px">
+    <li style="margin:12px 0">Zatrzymaj synchronizację, aby zwolnić profil Chromium:<br><code>docker compose stop vulcan-sync</code></li>
+    <li style="margin:12px 0">Uruchom przeglądarkę do logowania interaktywnego. Pozostaw terminal otwarty:<br><code>docker compose --profile auth up vulcan-auth</code></li>
+    <li style="margin:12px 0">Otwórz <a href="http://127.0.0.1:6080/vnc.html" style="color:#2563eb">http://127.0.0.1:6080/vnc.html</a> na tym hoście. Jeśli usługa działa na zdalnym serwerze, najpierw uruchom na swoim komputerze tunel SSH, zastępując <code>USER@HOST</code> swoim użytkownikiem i adresem serwera:<br><code>ssh -N -L 6080:127.0.0.1:6080 USER@HOST</code><br>Następnie otwórz ten sam adres w lokalnej przeglądarce.</li>
+    <li style="margin:12px 0">W noVNC połącz się z pulpitem, zaloguj się do eduVULCAN i otwórz Dziennik dowolnego ucznia. W razie potrzeby zaakceptuj cookies i ukończ CAPTCHA. Na zalogowanie masz 5 minut; po przekroczeniu czasu uruchom usługę <code>vulcan-auth</code> ponownie.</li>
+    <li style="margin:12px 0">Poczekaj na potwierdzenie zapisu sesji w terminalu i zakończenie procesu logowania. Stan zostanie zapisany w <code>/app/data/session.json</code> oraz trwałym profilu <code>/app/data/chromium-profile</code>, współdzielonych przez wolumen <code>./data:/app/data</code>.</li>
+    <li style="margin:12px 0">Zakończ usługę logowania i wznów synchronizację:<br><code>docker compose --profile auth stop vulcan-auth</code><br><code>docker compose start vulcan-sync</code><br>Sprawdź jej wynik:<br><code>docker compose logs --tail=100 vulcan-sync</code></li>
+  </ol>
+  <p>Nie usuwaj istniejącego profilu Chromium ani pliku sesji. Jeśli zapis nadal się nie udaje, sprawdź uprawnienia i wolne miejsce w katalogu <code>./data</code> oraz komunikaty w logach. Przy problemach z dostępnością eduVULCAN spróbuj ponownie później.</p>
+  <p>Poza Dockerem zatrzymaj cykliczną synchronizację i uruchom <code>uv run vulcan-notify auth</code> w środowisku z przeglądarką graficzną, używając tej samej konfiguracji <code>SESSION_FILE</code> i profilu Chromium.</p>
+</section>

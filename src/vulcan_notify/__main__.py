@@ -18,7 +18,13 @@ from vulcan_notify.client import SessionExpiredError, VulcanClient
 from vulcan_notify.config import settings
 from vulcan_notify.db import Database
 from vulcan_notify.display import BOLD, RESET, format_compact_sync, format_full_sync
-from vulcan_notify.email import drain_email_outbox, publish_email
+from vulcan_notify.email import (
+    AuthFailureReason,
+    clear_auth_failure,
+    drain_email_outbox,
+    publish_auth_failure,
+    publish_email,
+)
 from vulcan_notify.mqtt import drain_outbox, publish_changes
 from vulcan_notify.summarizer import format_changes_for_llm, summarize
 from vulcan_notify.sync import FullSyncResult, SyncSessionExpiredError, sync_all
@@ -36,7 +42,31 @@ def setup_logging() -> None:
 
 async def cmd_auth() -> None:
     """Interactive auth flow - browser login and save session cookies."""
-    await login_and_save_session(settings.session_file)
+    try:
+        await login_and_save_session(settings.session_file)
+    except Exception as exc:
+        logger.error("Interactive authentication failed (%s)", type(exc).__name__)
+        await _email_auth_status("interactive_failed")
+        sys.exit(1)
+    await _email_auth_status()
+
+
+async def _email_auth_status(reason: AuthFailureReason | None = None) -> None:
+    """Authentication can fail before the sync database has been opened."""
+    if not settings.email_enabled:
+        return
+    db = Database(settings.db_path)
+    try:
+        try:
+            await db.connect()
+            if reason is None:
+                await clear_auth_failure(db)
+            else:
+                await publish_auth_failure(db, reason)
+        finally:
+            await db.close()
+    except Exception as exc:
+        logger.warning("Email authentication status failed (%s)", type(exc).__name__)
 
 
 async def cmd_test() -> None:
@@ -70,6 +100,7 @@ async def _recover_session(login: str, password: str) -> dict[str, Any]:
         )
         print("Run 'vulcan-notify auth' for interactive recovery.")
         print("Docker: stop vulcan-sync, then docker compose --profile auth up vulcan-auth.")
+        await _email_auth_status("recovery_failed")
         sys.exit(1)
 
 
@@ -79,8 +110,10 @@ async def _ensure_session() -> dict[str, Any]:
         session = load_session(settings.session_file)
     except FileNotFoundError:
         session = None
-    except InvalidSessionError:
-        logger.warning("Saved session is invalid; authentication required")
+    except (InvalidSessionError, OSError) as exc:
+        logger.warning(
+            "Saved session is unavailable (%s); authentication required", type(exc).__name__
+        )
         session = None
 
     if session and await test_session(session):
@@ -100,6 +133,7 @@ async def _ensure_session() -> dict[str, Any]:
         "Tip: set VULCAN_LOGIN/VULCAN_PASSWORD in .env, "
         "or store in macOS Keychain (service: vulcan-notify)."
     )
+    await _email_auth_status("credentials_missing")
     sys.exit(1)
 
 
@@ -183,6 +217,7 @@ async def cmd_sync() -> None:
 
     try:
         result = await sync_all(client, db)
+        await clear_auth_failure(db)
 
         if not result.student_results:
             print("No students found.")
@@ -212,13 +247,16 @@ async def cmd_sync() -> None:
             client = VulcanClient(session)
             try:
                 result = await sync_all(client, db)
-            except SyncSessionExpiredError as retry_exc:
-                _print_result(retry_exc.partial_result)
-                await publish_email(retry_exc.partial_result, db)
-                await _sync_calendar(db)
-                await publish_changes(retry_exc.partial_result, db)
+            except SessionExpiredError as retry_exc:
+                if isinstance(retry_exc, SyncSessionExpiredError):
+                    _print_result(retry_exc.partial_result)
+                    await publish_email(retry_exc.partial_result, db)
+                    await _sync_calendar(db)
+                    await publish_changes(retry_exc.partial_result, db)
                 print("Session still expired after recovery. Run 'vulcan-notify auth'.")
+                await publish_auth_failure(db, "session_expired")
                 sys.exit(1)
+            await clear_auth_failure(db)
             if not result.student_results:
                 print("No students found after session recovery.")
                 sys.exit(1)
@@ -234,6 +272,7 @@ async def cmd_sync() -> None:
                 "Tip: set VULCAN_LOGIN/VULCAN_PASSWORD in .env, "
                 "or store in macOS Keychain (service: vulcan-notify)."
             )
+            await publish_auth_failure(db, "credentials_missing")
             sys.exit(1)
     finally:
         await client.close()

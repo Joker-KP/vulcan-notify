@@ -12,7 +12,8 @@ from datetime import UTC, datetime
 from email.message import EmailMessage
 from email.utils import format_datetime, make_msgid
 from html import escape
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
+from uuid import uuid4
 
 from vulcan_notify.config import parse_email_sender, settings
 from vulcan_notify.email_digest import render_summary
@@ -29,6 +30,79 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 _WEEKDAYS_PL = ("poniedziałek", "wtorek", "środa", "czwartek", "piątek", "sobota", "niedziela")
+AUTH_FAILURE_STATE = "email:auth_failure"
+AuthFailureReason = Literal[
+    "recovery_failed", "credentials_missing", "session_expired", "interactive_failed"
+]
+_AUTH_FAILURE_REASONS: dict[AuthFailureReason, str] = {
+    "recovery_failed": (
+        "Zapisana sesja jest niedostępna lub nieważna. Automatyczne odzyskanie dostępu "
+        "z użyciem trwałego profilu Chromium i skonfigurowanych danych logowania "
+        "nie zakończyło się utworzeniem nowej sesji."
+    ),
+    "credentials_missing": (
+        "Zapisana sesja jest niedostępna lub nieważna. Brak danych VULCAN_LOGIN / "
+        "VULCAN_PASSWORD uniemożliwia automatyczne odzyskanie dostępu; "
+        "profil Chromium nie był uruchamiany."
+    ),
+    "session_expired": (
+        "Sesja ponownie wygasła podczas synchronizacji po próbie automatycznego "
+        "odzyskania dostępu. Potrzebne jest logowanie interaktywne."
+    ),
+    "interactive_failed": (
+        "Logowanie interaktywne nie zakończyło się zapisaniem nowej sesji. "
+        "Sprawdź dostęp do eduVULCAN oraz możliwość zapisu plików sesji."
+    ),
+}
+
+
+def format_auth_failure(reason: AuthFailureReason, config: Settings) -> tuple[str, str]:
+    """Recovery instructions in the shared layout, without raw authentication errors."""
+    html = render_email(
+        "Wymagane logowanie do eduVULCAN",
+        render_template(
+            "auth_failure",
+            reason=escape(_AUTH_FAILURE_REASONS[reason]),
+            detected_at=escape(_format_message_date(datetime.now(UTC).isoformat(), config)),
+        ),
+    )
+    return message_text(html), html
+
+
+async def queue_auth_failure(db: Database, reason: AuthFailureReason) -> None:
+    """One alert per recipient and outage, persisted across sync process restarts."""
+    if not settings.email_enabled:
+        return
+    identity = await db.get_state(AUTH_FAILURE_STATE) or f"auth_failure:{uuid4().hex}"
+    body, html = format_auth_failure(reason, settings)
+    subject = f"{settings.email_subject_prefix} Błąd logowania — wymagana nowa sesja".strip()
+    await _queue_email(db, identity, subject, body, html)
+    await db.set_state(AUTH_FAILURE_STATE, identity)
+    # Enqueue and the outage marker must survive or roll back together.
+    await db.commit()
+
+
+async def clear_auth_failure(db: Database) -> None:
+    """Re-arm the alert after authentication succeeds; preserve queued retries."""
+    if not settings.email_enabled:
+        return
+    try:
+        if await db.get_state(AUTH_FAILURE_STATE):
+            await db.set_state(AUTH_FAILURE_STATE, "")
+            await db.commit()
+    except Exception as exc:
+        log.warning("Email authentication alert reset failed (%s)", type(exc).__name__)
+
+
+async def publish_auth_failure(db: Database, reason: AuthFailureReason) -> None:
+    """Queue and retry authentication alerts even when no sync result is available."""
+    if not settings.email_enabled:
+        return
+    try:
+        await queue_auth_failure(db, reason)
+        await drain_email_outbox(db)
+    except Exception as exc:
+        log.warning("Email authentication alert failed (%s)", type(exc).__name__)
 
 
 def format_summary(result: FullSyncResult) -> tuple[str, int]:

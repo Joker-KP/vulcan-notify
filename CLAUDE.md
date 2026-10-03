@@ -61,6 +61,8 @@ The tool follows a linear pipeline: **Auth -> Client -> Sync -> Diff -> Display*
 
 - Session writes are atomic and mode 0600. Invalid session files use the existing recovery policy without exposing file contents. Calendar transient failures preserve stored UIDs for retry; `CALENDAR_TIMEOUT_SECONDS` bounds AppleScript and kills/reaps timed-out or cancelled processes.
 
+- Exhausted/missing authentication and explicit interactive auth failures notify through the existing email outbox when `EMAIL_ENABLED=true`. `auth_failure.html` shares the email layout and includes noVNC/SSH recovery instructions. The persisted `email:auth_failure` outage marker suppresses duplicate alerts across restarts and resets after completed non-expired syncs or successful interactive auth. No raw authentication errors, secrets or AI are included.
+
 - `differ.py` - Compares fetched API data against stored database rows. `diff_grades()` detects new/updated grades by column_id. `diff_attendance()` detects new records by (date, lesson_number). Returns `Change` dataclasses.
 
 - `display.py` - Formats `SyncResult` for terminal output with ANSI colors (auto-disabled when piped). Groups by student, then by data type.

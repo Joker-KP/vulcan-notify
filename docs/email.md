@@ -1,4 +1,4 @@
-# Email change digests
+# Email notifications and change digests
 
 With `EMAIL_ENABLED=true`, each sync prepares one HTML digest of detected student
 changes. Each student has separate sections, in this order: **Oceny**,
@@ -161,6 +161,40 @@ Baseline synchronization and runs without new changes create no digest. Enabling
 email on an existing installation starts with the next detected changes, without
 sending historical records. Partial/degraded runs send the changes they successfully
 detected; session-expiry recovery delivers those changes before retrying the sync.
+
+## Authentication failure alerts
+
+With the same `EMAIL_ENABLED=true` and validated SMTP configuration, the CLI
+sends `<EMAIL_SUBJECT_PREFIX> Błąd logowania — wymagana nowa sesja` when a saved
+session is unavailable/expired and automatic recovery fails, including failure
+to save the new session. `auto_login()` still tries persistent Chromium reuse
+before credential login. An expired session during synchronization also notifies
+when recovery fails or its one retried sync still reports an expired session.
+Without configured eduVULCAN credentials, the alert explains that browser
+recovery was not attempted. Explicit interactive `auth` failures also notify;
+cancelling the command does not create an alert. The diagnostic `test` command
+does not send alerts.
+
+`auth_failure.html` shares `layout.html` with the other notifications; its text
+alternative is derived from the same HTML. It includes the detection time in `TZ`,
+the effect on synchronization, noVNC commands, an SSH tunnel example, opening
+the student's Dziennik, the five-minute login timeout, expected session/profile
+paths, and restarting the sync worker. It also explains permissions/disk checks
+for failed session writes and the non-Docker `auth` command. It includes no raw
+exception text, credentials, cookies, student data or AI processing. Digest
+group filters and message-body settings do not affect these alerts.
+
+The outbox and `sync_state["email:auth_failure"]` are committed together, using
+one outage identity and per-recipient deduplication. Repeated failed syncs and
+process/container restarts retry pending deliveries without generating another
+alert for recipients already notified. Successful interactive authentication or
+a sync that completes without session expiry clears the outage marker, allowing
+the next authentication outage to notify again. Queued alerts retain their original
+detection time/content even if access has since recovered; `email-retry` can send
+them without upstream authentication. Failed SMTP or database operations are
+logged by exception type and do not replace the authentication failure exit status.
+No schema migration or additional configuration is required. Run one delivery
+owner, as with the other email notifications.
 
 ## Test notification with synthetic data
 

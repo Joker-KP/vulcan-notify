@@ -11,6 +11,12 @@ from vulcan_notify import __main__ as cli
 from vulcan_notify import auth
 
 
+@pytest.fixture(autouse=True)
+def disable_live_email(monkeypatch):
+    # Authentication unit tests must never use the developer's SMTP configuration.
+    monkeypatch.setattr(cli.settings, "email_enabled", False)
+
+
 async def test_profile_picker_selects_first_and_dismisses_overlays(monkeypatch):
     monkeypatch.setenv("VULCAN_STUDENT", "old preference")
     page = MagicMock()

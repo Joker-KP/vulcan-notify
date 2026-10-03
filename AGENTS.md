@@ -405,6 +405,8 @@ The entry profile is not a synchronization filter. `sync_all()` synchronizes all
 
 Automatic recovery failures print instructions for manual authentication without launching a GUI. Interactive recovery remains explicit: stop `vulcan-sync`, run `docker compose --profile auth up vulcan-auth`, then restart `vulcan-sync`. The API can continue serving stored state during this process. Do not automatically launch interactive authentication from normal sync.
 
+With `EMAIL_ENABLED=true`, the CLI also queues a styled authentication failure email with noVNC/SSH recovery instructions when recovery is exhausted, credentials are missing, a recovered session expires again, or explicit interactive auth fails. `email:auth_failure` in `sync_state` and the existing per-recipient outbox suppress repeat alerts across process restarts; completed non-expired syncs and successful interactive auth re-arm the alert. SMTP failures remain queued, including when upstream login fails. Alerts contain no raw errors/secrets and use no AI. See `docs/email.md`.
+
 ### Authentication logging
 
 Log authentication state at a high level only.

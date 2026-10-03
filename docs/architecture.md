@@ -158,6 +158,13 @@ comes from the client's authenticated base URL and URL-encoded student key.
 `EMAIL_AI_SUMMARY=true` and `LLM_API_KEY` enable the existing summarizer's default
 prompt; its output appears above the groups without removing facts or links.
 AI failures keep the original grouped digest.
+The CLI also calls the email adapter on exhausted authentication failures,
+including before a sync database/result exists. `auth_failure.html` uses the
+same layout and a derived text alternative with noVNC recovery instructions.
+An outage UUID in `sync_state["email:auth_failure"]` is committed with the
+per-recipient outbox records to suppress repeat alerts across restarts. Completed
+non-expired syncs and successful explicit authentication reset the outage marker.
+Pending retries are retained; no AI or upstream school content is used.
 `EMAIL_DIGEST_GROUPS` filters categories before rendering and AI preparation;
 omitted switches default to enabled. Only included changes count toward the
 subject, and one change has no count suffix. An empty filtered digest queues

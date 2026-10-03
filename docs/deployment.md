@@ -94,6 +94,11 @@ The Chromium profile, its lock file, session and database remain under the share
 
 If automatic recovery fails, authenticate manually:
 
+With `EMAIL_ENABLED=true` and configured SMTP, an exhausted authentication attempt
+also queues an email with these noVNC recovery steps (and an SSH tunnel example).
+Repeated failures notify once per outage/recipient; failed SMTP delivery is retried
+on later attempts or with `email-retry`. See [email.md](email.md#authentication-failure-alerts).
+
 ```bash
 docker compose stop vulcan-sync
 docker compose --profile auth up vulcan-auth
