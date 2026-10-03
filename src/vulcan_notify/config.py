@@ -96,6 +96,7 @@ class Settings(BaseSettings):
 
     # Sync
     sync_attendance_days: int = 90  # how far back to sync attendance
+    sync_completed_lessons_days: int = Field(default=90, ge=0)
     sync_message_backfill_batch: int = 10  # messages to backfill per cycle
     sync_history_keep_days: int = 90  # sync_runs / sync_sections retention
 
@@ -122,6 +123,9 @@ class Settings(BaseSettings):
     llm_api_key: str | None = None
     llm_model: str = "gpt-oss-120b"
     prompts_file: Path = Path("prompts.toml")
+    # Optional stored lesson-topic context for change summaries (CLI and email).
+    llm_include_lessons: bool = False
+    llm_lessons_days: int = Field(default=7, ge=1)
 
     # SMTP digests (optional). Lists in .env use JSON, e.g. EMAIL_TO=["you@example.org"].
     email_enabled: bool = False

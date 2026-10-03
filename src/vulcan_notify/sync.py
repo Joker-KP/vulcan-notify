@@ -13,6 +13,7 @@ from vulcan_notify.config import settings
 from vulcan_notify.differ import (
     Change,
     diff_attendance,
+    diff_completed_lessons,
     diff_exams,
     diff_grades,
     diff_homework,
@@ -57,6 +58,8 @@ class SyncResult:
     new_remarks: list[Change] = field(default_factory=list)
     is_first_remarks_sync: bool = False
     portal_url: str | None = None
+    completed_lesson_changes: list[Change] = field(default_factory=list)
+    is_first_completed_lessons_sync: bool = False
 
     @property
     def has_failures(self) -> bool:
@@ -71,6 +74,7 @@ class SyncResult:
             or self.new_homework
             or self.new_substitutions
             or self.new_remarks
+            or self.completed_lesson_changes
         )
 
     @property
@@ -82,6 +86,7 @@ class SyncResult:
             + self.new_homework
             + self.new_substitutions
             + self.new_remarks
+            + self.completed_lesson_changes
         )
 
 
@@ -355,6 +360,29 @@ async def sync_student(
         await section_ok("remarks", len(remarks))
     except Exception as exc:
         await section_failed("remarks", exc)
+
+    # New categories baseline independently, including upgrades of existing databases.
+    try:
+        marker = f"last_sync:{student.key}:completed_lessons"
+        result.is_first_completed_lessons_sync = await db.get_state(marker) is None
+        now = datetime.now(settings.timezone)
+        date_from, date_to = _api_date_window(now, settings.sync_completed_lessons_days, 0)
+        completed = await client.get_completed_lessons(student, date_from, date_to)
+        changes = (
+            []
+            if result.is_first_completed_lessons_sync
+            else await diff_completed_lessons(student, completed, db)
+        )
+        for completed_lesson in completed:
+            await db.upsert_completed_lesson(student.key, completed_lesson)
+        await db.mark_missing_completed_lessons(
+            student.key, {lesson.id for lesson in completed}, date_from, date_to
+        )
+        await section_ok("completed_lessons", len(completed))
+        result.completed_lesson_changes = changes
+    except Exception as exc:
+        await db.db.rollback()
+        await section_failed("completed_lessons", exc)
 
     # Flush remaining writes; recording section outcomes commits each section.
     await db.commit()

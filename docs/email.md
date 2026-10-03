@@ -14,6 +14,10 @@ First-sync baselines, inbox messages and praise/notes do not count toward this t
 For one included change, the subject is simply `[eduVulcan] Oceny` (or the
 corresponding group), without a count suffix.
 
+Completed lessons (`RealizacjaZajec13`, `status=1`) do not trigger email
+notifications or form digest groups, subjects or counts. Their stored topics can
+optionally provide historical context for the AI summary, as described below.
+
 ### Choosing digest groups
 
 `EMAIL_DIGEST_GROUPS` is a JSON object of individual on/off switches. Omitted keys
@@ -297,6 +301,8 @@ settings unset for a relay that does not require authentication.
 | `TZ` | `Europe/Warsaw` | Shared runtime/display timezone; dates use `YYYY-MM-DD HH:MM (dzień tygodnia)`. `QUIET_HOURS_TZ` remains a legacy fallback. |
 | `EMAIL_INCLUDE_MESSAGE_BODIES` | `false` | Include formatted HTML content and a readable text alternative; attachment files are never sent. |
 | `EMAIL_AI_SUMMARY` | `false` | Add an AI summary above the change groups when `LLM_API_KEY` is also set. |
+| `LLM_INCLUDE_LESSONS` | `false` | Include stored lesson topics as AI context for students with included digest changes. Also applies to CLI change summaries. |
+| `LLM_LESSONS_DAYS` | `7` | Positive number of local calendar days including today for lesson-topic context. |
 | `EMAIL_AI_TIMEOUT_SECONDS` | `30` | Maximum time allowed for AI preparation before using the grouped digest alone. |
 
 The terminal's `MESSAGE_SENDER_WHITELIST` does not filter email: every detected
@@ -333,6 +339,44 @@ timeouts and empty AI responses all leave the grouped digest intact.
 Successful AI output adds a summary above the groups in both MIME alternatives;
 all change details, headings and links remain. AI output is escaped as text in HTML.
 The subject retains the detected groups and event count.
+
+To also summarize what the students have been learning, enable:
+
+```dotenv
+LLM_INCLUDE_LESSONS=true
+LLM_LESSONS_DAYS=7
+```
+
+The AI receives stored lesson topics from SQLite for students with included changes
+in this digest. The range uses the **lesson date**, from midnight six days ago
+through the current instant for the default seven days, in `TZ`. Future lessons,
+soft-deleted rows, retired profiles and blank topics are excluded. The range is
+independent of `SYNC_COMPLETED_LESSONS_DAYS`; AI sees only history already fetched,
+so choose a synchronization window large enough to cover the desired period.
+The default prompt groups topics by student and subject, combines related topics
+and omits routine activities such as lunch, commuting and breaks. This selection
+is performed by the model and can be customized in `[default]` in `prompts.toml`.
+It describes recorded topics, without assuming skills or learning outcomes.
+
+Topics are additional AI context, rather than notification events. Baselines,
+unchanged runs, lesson-only changes and digests with all groups disabled still
+create no digest and make no AI request. Only the generated overview is included
+above the usual digest groups; raw lesson-topic rows are not added to the email.
+Retries reuse the saved summary and do not query lessons or AI again. Leaving
+`LLM_INCLUDE_LESSONS=false` retains the change-only AI input.
+
+A separate summary of topics can be generated explicitly without a new sync:
+
+```bash
+uv run vulcan-notify summarize --type lessons
+uv run vulcan-notify summarize --type lessons --days 14
+```
+
+This requires `LLM_API_KEY`, uses the `[lessons]` prompt profile and
+defaults to `LLM_LESSONS_DAYS`. It works independently of email and the
+context switch, reading active students' stored topics. CLI `--type sync` uses
+`LLM_INCLUDE_LESSONS` and `LLM_LESSONS_DAYS` for optional topic
+context; its `--days` continues to set the separate change-history range.
 
 ## Delivery and retries
 

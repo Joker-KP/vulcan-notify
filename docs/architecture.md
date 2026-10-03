@@ -105,6 +105,7 @@ SQLite lives at `DB_PATH` (default `vulcan_notify.db`). Tables:
 | `exams`, `homework` | `id` | `deleted_at` for soft-delete; `calendar_uid` for macOS Calendar dedup. |
 | `messages` | `id` with `UNIQUE(api_global_key)` | `content` is backfilled in batches of `SYNC_MESSAGE_BACKFILL_BATCH` per run for legacy rows. |
 | `remarks` | `(student_key, id)` | Praise and behavior notes, original content, category, author, numeric type/kind, optional points and student view URL; first/last seen and soft deletion. Created additively on startup. |
+| `completed_lessons` | `(student_key, id)` | Completed lesson topic, teacher, subject, number, thematic block, online link, JSON collections/resources, first/last seen and window-scoped soft deletion. Created additively on startup. |
 | `schedule` | `(student_key, date, time_from, subject)` | Per-lesson schedule including substitutions (`sub_teacher`, `sub_room`), cancellations (`annotation`), and extra lessons (`is_extra`). |
 | `mqtt_outbox` | `id` AUTOINCREMENT | Every MQTT publish is enqueued first; drained on each run. Broker outages survive restarts. |
 | `email_outbox` | `delivery_key` | Digest per sync-run/recipient and notification per upstream message/recipient; pending envelopes persist across restarts. Successful rows retain deduplication metadata while clearing private content. |
@@ -139,6 +140,33 @@ student-specific Pochwały i uwagi link. They are excluded from digest/AI input.
 Deduplication scopes note ID by student and recipient. Existing SMTP/outbox delivery
 limitations also apply to these emails. MQTT emits `school/<student>/remarks/new`
 (with the configurable topic prefix), including the raw numeric type/kind and URL.
+
+Completed lessons use `CompletedLesson`, `diff_completed_lessons()` and the
+independent `last_sync:<student>:completed_lessons` baseline. The first successful
+fetch and persistence, including an empty response and upgrades, initializes it
+silently. Failures roll back that section and preserve its old baseline/freshness.
+The default lookback is 90 days plus today (`SYNC_COMPLETED_LESSONS_DAYS`, minimum
+0), with full local days serialized as UTC instants. Rows are keyed by student
+and upstream ID. New IDs and changes to source fields emit `completed_lesson`
+events (`new`/`updated`), delivered through the existing MQTT outbox to
+`<prefix>/<student-slug>/completed_lessons/new` or `.../updated`. Payloads contain
+all model fields, including structured collections/resources and the student page
+URL. Missing entries are soft-deleted only within the successful fetch interval;
+restoration stays silent and older history remains stored. As with other MQTT
+categories, persistence and enqueue use separate commits and do not guarantee
+exactly-once delivery. The existing name-based MQTT student slug is unchanged.
+HTTP freshness includes this section; terminal output shows changes and TUI tab
+7 browses active stored records and their full details, with filtering and sorting.
+The email digest allowlist excludes completed lesson events from individual
+emails, digest groups and counts. `LLM_INCLUDE_LESSONS=true` optionally
+adds stored topics as historical AI context for students with included digest
+changes, using `LLM_LESSONS_DAYS=7` local calendar days including today.
+The standalone `summarize --type lessons [--days N]` command reads the
+same stored topics. Prompts group by student/subject and omit routine activities;
+lesson-only changes still create no email or AI request. Exams/homework
+calendar adapters and the scheduled-lesson iCalendar feed do not consume them.
+The recorded API contract and synthetic populated resource JSON are tested;
+live upstream behavior has not been verified in this implementation task.
 
 ## Notification channels
 
@@ -318,6 +346,7 @@ Long-running aiohttp server on port 8585, reading the same SQLite the sync write
 | `GET /api/exams?student=&days=` | Upcoming exams. |
 | `GET /api/messages?n=` | Recent messages (with content once backfilled). |
 | `GET /api/remarks?student=&n=` | Latest active praise/notes per active student from SQLite; optional exact student name filter, default 20 rows per student, limit 1–1000. Includes remarks freshness metadata. |
+| `GET /api/completed-lessons?student=&n=` | Latest active completed lessons per active student from SQLite, default 20, limit 1–1000; supports `student_key`/`keyed=1` and completed-lessons freshness metadata. Collections/resources remain structured JSON. |
 | `GET /api/schedule?student=&only_substitutions=&days=` | Lesson schedule including substitutions/cancellations. |
 | `GET /calendar/<student>.ics` | Per-student iCalendar feed (see below). |
 

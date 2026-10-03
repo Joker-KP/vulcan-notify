@@ -36,6 +36,7 @@ def _client(**overrides: object) -> AsyncMock:
     client.get_homework = AsyncMock(return_value=[])
     client.get_schedule = AsyncMock(return_value=[])
     client.get_remarks = AsyncMock(return_value=[])
+    client.get_completed_lessons = AsyncMock(return_value=[])
     client.get_dashboard = AsyncMock(return_value=DashboardData(unread_messages=0))
     client.get_messages = AsyncMock(return_value=[])
     client.get_message_detail = AsyncMock(return_value=None)
@@ -174,6 +175,7 @@ async def test_prune_respects_retention(db: Database, keep_days: int) -> None:
         "get_homework",
         "get_schedule",
         "get_remarks",
+        "get_completed_lessons",
         "get_messages",
     ],
 )

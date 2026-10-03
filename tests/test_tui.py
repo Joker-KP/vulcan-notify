@@ -219,3 +219,68 @@ async def test_tui_remarks_empty_database_and_help(tmp_path, monkeypatch):
         await pilot.pause()
         assert isinstance(app.screen, HelpScreen)
         assert "6=Remarks" in app.screen.query_one("#help-panel", Static).content
+
+
+async def test_tui_completed_lessons_detail_sort_filter_and_navigation(tmp_path, monkeypatch):
+    pytest.importorskip("textual")
+    from textual.widgets import DataTable, Static, TabbedContent
+
+    from tests.test_completed_lessons import LESSON
+    from tests.test_sync import STUDENT_A, STUDENT_B
+    from vulcan_notify.tui import DetailScreen, MainScreen, VulcanTuiApp
+
+    monkeypatch.setattr(cli.settings, "db_path", tmp_path / "completed-tui.db")
+    app = VulcanTuiApp()
+    await app.db.connect()
+    try:
+        for student in (STUDENT_A, STUDENT_B):
+            await app.db.upsert_student(student)
+            await app.db.upsert_completed_lesson(student.key, LESSON)
+        await app.db.mark_missing_completed_lessons(
+            STUDENT_B.key, set(), "2026-10-01", "2026-10-04"
+        )
+        await app.db.commit()
+    finally:
+        await app.db.close()
+    async with app.run_test(size=(150, 35)) as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.press("7")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, MainScreen)
+        assert screen.query_one(TabbedContent).active == "tab-completed_lessons"
+        table = screen.query_one("#completed_lessons-table", DataTable)
+        assert table.row_count == 1
+        assert [str(cell) for cell in table.get_row_at(0)] == [
+            "2026-10-02",
+            "Jan",
+            "1",
+            "Math",
+            "Example Teacher",
+            "Fractions & numbers",
+        ]
+        table.focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, DetailScreen)
+        assert app.screen._body == "Fractions & numbers"
+        fields = dict(app.screen._fields)
+        assert fields["Thematic block"] == "Numbers"
+        assert "Example collection" in fields["Collections"]
+        assert "Resource" in fields["Resources"]
+        assert fields["Vulcan"].endswith("/realizacjaZajec")
+        await pilot.press("escape", "o", "O")
+        assert screen._sort_state["completed_lessons"] == (1, True)
+        await pilot.press("s")  # Anna's soft-deleted entry is hidden.
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert table.row_count == 0
+        await pilot.press("1", "s", "7")  # Filter changed elsewhere applies on return.
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert table.row_count == 1
+        assert screen._data["completed_lessons"][0]["student_name"] == "Jan"
+        await pilot.press("?")
+        await pilot.pause()
+        assert "7=Completed lessons" in app.screen.query_one("#help-panel", Static).content

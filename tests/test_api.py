@@ -684,6 +684,7 @@ async def duplicate_names_db(seeded_db):
         api_mod._get_subject_summaries,
         api_mod._get_schedule,
         api_mod._get_remarks,
+        api_mod._get_completed_lessons,
     ],
 )
 async def test_duplicate_names_require_keys_and_preserve_both_students(duplicate_names_db, reader):
@@ -719,6 +720,7 @@ async def test_keyed_grade_results_keep_student_data_separate(duplicate_names_db
         ("/api/grades/summary", api_mod.handle_grades_summary),
         ("/api/schedule", api_mod.handle_schedule),
         ("/api/remarks", api_mod.handle_remarks),
+        ("/api/completed-lessons", api_mod.handle_completed_lessons),
     ],
 )
 async def test_handlers_accept_student_keys_and_scope_metadata(duplicate_names_db, path, handler):
@@ -726,7 +728,7 @@ async def test_handlers_accept_student_keys_and_scope_metadata(duplicate_names_d
     await database.connect()
     try:
         run = await database.create_sync_run()
-        for section in ("grades", "homework", "exams", "schedule", "remarks"):
+        for section in ("grades", "homework", "exams", "schedule", "remarks", "completed_lessons"):
             await database.record_section(run, section, "ok", student_key="S2")
     finally:
         await database.close()

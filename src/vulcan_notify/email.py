@@ -16,10 +16,10 @@ from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
 from vulcan_notify.config import parse_email_sender, settings
-from vulcan_notify.email_digest import render_summary
+from vulcan_notify.email_digest import GROUPS, render_summary
 from vulcan_notify.email_rendering import render_email, render_template
 from vulcan_notify.models import Remark
-from vulcan_notify.summarizer import summarize
+from vulcan_notify.summarizer import lessons_context, summarize
 from vulcan_notify.text import message_html, message_text, strip_html
 
 if TYPE_CHECKING:
@@ -308,8 +308,22 @@ async def queue_summary(result: FullSyncResult, db: Database) -> None:
     # its facts and student-specific links in both alternatives.
     if new_keys and settings.email_ai_summary and settings.llm_api_key:
         try:
+            ai_input = body
+            if settings.llm_include_lessons:
+                student_keys = [
+                    sr.student.key
+                    for sr in result.student_results
+                    if any(
+                        change.item_type == group and settings.email_digest_groups.get(group, True)
+                        for change in sr.all_changes
+                        for group in GROUPS
+                    )
+                ]
+                context = await lessons_context(db, settings, student_keys=student_keys)
+                if context:
+                    ai_input += "\n\n" + context
             replacement = await asyncio.wait_for(
-                summarize(body, settings),
+                summarize(ai_input, settings),
                 timeout=settings.email_ai_timeout_seconds,
             )
         except Exception as exc:

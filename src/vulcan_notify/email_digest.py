@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from vulcan_notify.sync import FullSyncResult
 
 # Order is shared by the subject and each student's sections.
+# Completed lesson changes stay outside these groups; AI can use stored topic context.
 GROUPS: dict[EmailDigestGroup, str] = {
     "grade": "Oceny",
     "attendance": "Frekwencja",

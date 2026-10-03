@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import asdict
 from datetime import datetime
 from importlib.metadata import PackageNotFoundError, version
 from typing import TYPE_CHECKING
@@ -11,7 +12,16 @@ from typing import TYPE_CHECKING
 import aiomqtt
 
 from vulcan_notify.config import settings
-from vulcan_notify.models import AttendanceEntry, Exam, Grade, Homework, Lesson, Message, Remark
+from vulcan_notify.models import (
+    AttendanceEntry,
+    CompletedLesson,
+    Exam,
+    Grade,
+    Homework,
+    Lesson,
+    Message,
+    Remark,
+)
 from vulcan_notify.text import strip_html
 
 if TYPE_CHECKING:
@@ -45,6 +55,7 @@ _TOPIC_SEGMENTS = {
     "cancellation": "cancellations",
     "addition": "additions",
     "remark": "remarks",
+    "completed_lesson": "completed_lessons",
 }
 
 
@@ -134,6 +145,9 @@ def build_payload(change: Change) -> dict[str, object]:
             absence_info=raw.absence_info,
             remarks=raw.remarks,
         )
+
+    elif isinstance(raw, CompletedLesson):
+        base.update(asdict(raw))
 
     elif isinstance(raw, Remark):
         base.update(

@@ -122,6 +122,11 @@ def format_full_sync(
                 for change in sr.new_remarks:
                     lines.append(format_change(change))
 
+            if sr.completed_lesson_changes:
+                lines.append(f"  {BOLD}Zajęcia zrealizowane:{RESET}")
+                for change in sr.completed_lesson_changes:
+                    lines.append(format_change(change))
+
         lines.append("")
 
     # Messages section
@@ -168,6 +173,8 @@ def format_compact_sync(
             counts.append(f"{len(sr.new_substitutions)} substitutions")
         if sr.new_remarks:
             counts.append(f"{len(sr.new_remarks)} remarks")
+        if sr.completed_lesson_changes:
+            counts.append(f"{len(sr.completed_lesson_changes)} completed lessons")
         if counts:
             parts.append(f"{sr.student.name}: {', '.join(counts)}")
 

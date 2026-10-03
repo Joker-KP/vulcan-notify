@@ -75,6 +75,7 @@ def _make_mock_client(
     client.get_homework = AsyncMock(return_value=[] if homework is None else homework)
     client.get_schedule = AsyncMock(return_value=[])
     client.get_remarks = AsyncMock(return_value=[])
+    client.get_completed_lessons = AsyncMock(return_value=[])
     client.get_dashboard = AsyncMock(return_value=DashboardData(unread_messages=5))
     client.get_messages = AsyncMock(return_value=[])
     client.get_message_detail = AsyncMock(return_value=None)

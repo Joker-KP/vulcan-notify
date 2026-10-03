@@ -25,6 +25,7 @@ from vulcan_notify.email_digest import render_summary
 from vulcan_notify.models import (
     AttendanceEntry,
     ClassificationPeriod,
+    CompletedLesson,
     Exam,
     Grade,
     Homework,
@@ -184,6 +185,11 @@ class DemoClient(VulcanClient):
         return self.original_lessons if self.baseline else self.lessons
 
     async def get_remarks(self, student: Student) -> list[Remark]:
+        return []
+
+    async def get_completed_lessons(
+        self, student: Student, date_from: str, date_to: str
+    ) -> list[CompletedLesson]:
         return []
 
 

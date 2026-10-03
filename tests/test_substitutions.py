@@ -174,6 +174,7 @@ async def test_sync_student_persists_and_reports(db: Database) -> None:
     client.get_exams = AsyncMock(return_value=[])
     client.get_homework = AsyncMock(return_value=[])
     client.get_remarks = AsyncMock(return_value=[])
+    client.get_completed_lessons = AsyncMock(return_value=[])
     baseline_lesson = make_lesson()
     client.get_schedule = AsyncMock(return_value=[baseline_lesson])
 
@@ -198,7 +199,14 @@ async def test_sync_cancels_missing_window_boundaries(db, monkeypatch, removed):
     monkeypatch.setattr(sync_mod, "datetime", clock)
     client = AsyncMock()
     client.student_portal_url = MagicMock(return_value=None)
-    for method in ("get_periods", "get_attendance", "get_exams", "get_homework", "get_remarks"):
+    for method in (
+        "get_periods",
+        "get_attendance",
+        "get_exams",
+        "get_homework",
+        "get_remarks",
+        "get_completed_lessons",
+    ):
         getattr(client, method).return_value = []
 
     def lesson(days):

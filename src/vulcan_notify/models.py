@@ -104,6 +104,24 @@ class Remark:
 
 
 @dataclass
+class CompletedLesson:
+    """Completed lesson from RealizacjaZajec13 (status=1), scoped to a student."""
+
+    id: int
+    date: str
+    lesson_number: int
+    subject: str
+    teacher: str
+    topic: str
+    thematic_block: str = ""
+    online: str = ""
+    collections: list[object] = field(default_factory=list)
+    has_collections: bool = False
+    resources: object | None = None
+    url: str | None = None
+
+
+@dataclass
 class Message:
     id: int
     api_global_key: str  # apiGlobalKey (UUID for fetching detail)

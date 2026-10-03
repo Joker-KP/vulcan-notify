@@ -22,7 +22,9 @@ def _settings(tmp_path: Path, *, api_key: str | None = "test-key") -> Settings:
         'prompt = "Weekly report: {sync_output}"\n'
     )
     return Settings(
+        _env_file=None,
         llm_api_key=api_key,
+        llm_base_url="https://api.cerebras.ai/v1",
         llm_model="gpt-oss-120b",
         prompts_file=prompts,
         db_path=tmp_path / "test.db",

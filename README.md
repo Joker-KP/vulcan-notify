@@ -19,6 +19,7 @@ Solves the problem of eduVulcan paywalling push notifications behind a subscript
 - **Messages** - unread count and body, with optional sender whitelist filtering
 - **Praise and behavior notes** - per-student persistence, new-item events and separate emails with a link to the Pochwały i uwagi view
 - **Lesson schedule** - substitutions, cancellations, and extra lessons
+- **Completed lessons** - topics, subjects, teachers and lesson resources; SQLite, TUI, MQTT and HTTP API, with no email notifications
 
 Supports multiple students under one parent account.
 
@@ -28,9 +29,9 @@ Supports multiple students under one parent account.
 - **macOS Calendar** - exams and homework as all-day events with reminders (iCloud syncs to iOS)
 - **MQTT events** - every detected change published to Mosquitto (with a persistent outbox for retries)
 - **Email notifications** - change digests with optional AI summary, plus a separate email for each new message; persistent SMTP retries ([setup](docs/email.md))
-- **HTTP API** - grade aggregates, homework, messages, and schedule over aiohttp on port 8585
+- **HTTP API** - grade aggregates, homework, messages, praise/notes, completed lessons and schedule over aiohttp on port 8585
 - **iCalendar feed** - per-student `.ics` feed for subscribing from iOS/macOS Calendar, Google Calendar, or Home Assistant
-- **AI summaries** - optional digest of recent changes or messages via any OpenAI-compatible API
+- **AI summaries** - optional digest of recent changes, messages or completed lesson topics via any OpenAI-compatible API
 
 ## 📦 Installation <a name="installation"></a>
 
@@ -70,12 +71,30 @@ uv run vulcan-notify sync
 | `vulcan-notify email-retry` | Retry queued SMTP digests without contacting eduVULCAN |
 | `vulcan-notify calendar` | Force re-sync all exams/homework to macOS Calendar |
 | `vulcan-notify tui` | Interactive Textual browser for synced content (requires `uv sync --extra tui`) |
-| `vulcan-notify summarize [--type sync\|messages] [--days N]` | AI summary of recent changes or messages (requires `LLM_API_KEY`) |
+| `vulcan-notify summarize [--type sync\|messages\|lessons] [--days N]` | AI summary of stored changes, messages or lesson topics (requires `LLM_API_KEY`) |
 
 In the TUI, press `6` for **Remarks** (praise and behavior notes). The list shows
 date, student, category, author, optional points and a content preview. Press Enter
 for full content and the student's Vulcan URL; use `s` to cycle the student filter
 and `o` / `O` to sort. Soft-deleted notes are hidden. All views read local SQLite.
+
+Press `7` for **Completed lessons**: date, student, lesson number, subject, teacher
+and topic. Enter opens the full topic, thematic block, online link and stored
+collections/resources. The same filtering and sorting controls apply.
+Completed lessons are fetched from `/api/RealizacjaZajec13` with `status=1`,
+stored per student and exposed at `/api/completed-lessons?n=20&student_key=...`.
+New and changed records emit `school/<student-slug>/completed_lessons/new` or
+`.../updated` MQTT events. The first successful import is silent, including when
+upgrading; this category does not trigger emails. Stored topics can optionally
+enter AI summaries with `LLM_INCLUDE_LESSONS=true`, covering seven local
+calendar days including today by default (`LLM_LESSONS_DAYS=7`).
+The prompt groups by student/subject and omits routine activities such as lunch
+or commuting. A standalone topic summary uses `summarize --type lessons
+--days 7`; see [AI configuration](docs/email.md#optional-ai-summary).
+The default window is the past 90 days plus today (`SYNC_COMPLETED_LESSONS_DAYS`).
+Missing entries are soft-deleted within the fetched window; older history is kept.
+The table is created automatically on startup. Recorded/synthetic responses are
+tested; live eduVULCAN behavior remains unverified.
 
 ## ⚙️ How it works <a name="how-it-works"></a>
 
@@ -215,6 +234,7 @@ Python settings load `.env`; Compose exports it to the containers. Direct auth/A
 | `VULCAN_LOGIN` | (none) | eduVulcan login email for auto-login |
 | `VULCAN_PASSWORD` | (none) | eduVulcan password for auto-login |
 | `SYNC_ATTENDANCE_DAYS` | `90` | How many days back to sync attendance |
+| `SYNC_COMPLETED_LESSONS_DAYS` | `90` | How many days back to sync completed lessons, plus today; no email notifications |
 | `SYNC_MESSAGE_BACKFILL_BATCH` | `10` | Legacy messages to refetch bodies for, per run |
 | `POLL_INTERVAL` | `1800` | Seconds between polls when run as a service |
 | `QUIET_HOURS_START` | `0` | Hour (0-23) to start quiet window, sync paused |
@@ -243,6 +263,8 @@ Python settings load `.env`; Compose exports it to the containers. Direct auth/A
 | `LLM_BASE_URL` | `https://api.cerebras.ai/v1` | OpenAI-compatible API base URL for AI summaries |
 | `LLM_API_KEY` | (none) | API key for AI summaries (disabled if unset) |
 | `LLM_MODEL` | `gpt-oss-120b` | Model name for AI summaries |
+| `LLM_INCLUDE_LESSONS` | `false` | Add stored lesson topics to email/CLI AI change summaries; topics alone do not trigger emails |
+| `LLM_LESSONS_DAYS` | `7` | Local calendar days including today for topic summaries; standalone CLI accepts `--days` |
 | `LOG_LEVEL` | `INFO` | Logging level |
 
 ## 📚 Documentation <a name="documentation"></a>

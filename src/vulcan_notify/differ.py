@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from vulcan_notify.db import Database
     from vulcan_notify.models import (
         AttendanceEntry,
+        CompletedLesson,
         Exam,
         Grade,
         Homework,
@@ -54,6 +55,34 @@ class Change:
     tags: list[str] | None = None
     raw: object | None = None  # original model for structured MQTT payloads
     old_value: str | None = None  # previous value (for updated grades)
+
+
+async def diff_completed_lessons(
+    student: Student, fetched: list[CompletedLesson], db: Database
+) -> list[Change]:
+    """Detect new IDs and content changes; restoration alone stays silent."""
+    stored = {row["id"]: row for row in await db.get_completed_lessons_for_student(student.key)}
+    changes: list[Change] = []
+    for lesson in {lesson.id: lesson for lesson in fetched}.values():
+        existing = stored.get(lesson.id)
+        state = asdict(lesson)
+        state.pop("url")
+        if existing is not None and (
+            existing["deleted_at"] is not None
+            or all(existing[name] == value for name, value in state.items())
+        ):
+            continue
+        changes.append(
+            Change(
+                change_type="new" if existing is None else "updated",
+                item_type="completed_lesson",
+                student_name=student.name,
+                title=f"Zajęcia zrealizowane: {lesson.subject}",
+                body=lesson.topic,
+                raw=lesson,
+            )
+        )
+    return changes
 
 
 async def diff_remarks(student: Student, fetched: list[Remark], db: Database) -> list[Change]:

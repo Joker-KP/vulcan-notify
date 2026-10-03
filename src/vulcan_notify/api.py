@@ -107,7 +107,16 @@ def _add_identities(payload: dict[str, Any], students: list[ApiStudent]) -> dict
 # Data sections tracked for freshness. Mirrors db.SECTIONS; duplicated rather than
 # imported because this module talks to SQLite synchronously and deliberately does
 # not pull in the aiosqlite Database class.
-_SECTIONS = ("grades", "attendance", "exams", "homework", "schedule", "remarks", "messages")
+_SECTIONS = (
+    "grades",
+    "attendance",
+    "exams",
+    "homework",
+    "schedule",
+    "remarks",
+    "completed_lessons",
+    "messages",
+)
 
 
 def _get_health(
@@ -1036,6 +1045,55 @@ async def handle_remarks(request: web.Request) -> web.Response:
     )
 
 
+def _get_completed_lessons(
+    student_filter: str | None = None,
+    n: int = 20,
+    *,
+    student_key: str | None = None,
+    keyed: bool = False,
+) -> dict[str, Any]:
+    """Read completed lessons from SQLite using the common student identity rules."""
+    db = _connect()
+    try:
+        selected = _select_students(db, student_filter, student_key, keyed)
+        result: dict[str, Any] = {}
+        for student in selected:
+            rows = db.execute(
+                "SELECT id, date, lesson_number, subject, teacher, topic, thematic_block, "
+                "online, collections, has_collections, resources, url, first_seen, last_seen "
+                "FROM completed_lessons WHERE student_key=? AND deleted_at IS NULL "
+                "ORDER BY julianday(date) DESC, lesson_number DESC, id DESC LIMIT ?",
+                (student["key"], n),
+            ).fetchall()
+            lessons = []
+            for row in rows:
+                lesson = dict(row)
+                lesson["collections"] = json.loads(lesson["collections"])
+                lesson["resources"] = json.loads(lesson["resources"])
+                lesson["has_collections"] = bool(lesson["has_collections"])
+                lessons.append(local_storage_timestamps(lesson))
+            result[student["response_key"]] = {"completed_lessons": lessons}
+        return _add_identities(result, selected)
+    finally:
+        db.close()
+
+
+async def handle_completed_lessons(request: web.Request) -> web.Response:
+    options = _student_options(request)
+    try:
+        n = int(request.query.get("n", "20"))
+    except ValueError:
+        raise web.HTTPBadRequest(text="n must be between 1 and 1000") from None
+    if not 1 <= n <= 1000:
+        raise web.HTTPBadRequest(text="n must be between 1 and 1000")
+    return _with_meta(
+        _get_completed_lessons(n=n, **options),
+        "completed_lessons",
+        student_filter=options["student_filter"],
+        student_key=options["student_key"],
+    )
+
+
 async def handle_messages(request: web.Request) -> web.Response:
     n = int(request.query.get("n", "20"))
     return _with_meta({"messages": _get_messages(n)}, "messages")
@@ -1110,6 +1168,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/homework", handle_homework)
     app.router.add_get("/api/messages", handle_messages)
     app.router.add_get("/api/remarks", handle_remarks)
+    app.router.add_get("/api/completed-lessons", handle_completed_lessons)
     app.router.add_get("/api/exams", handle_exams)
     app.router.add_get("/api/health", handle_health)
     app.router.add_get("/api/alive", handle_alive)

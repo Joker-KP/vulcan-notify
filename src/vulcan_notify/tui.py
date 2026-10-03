@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import ClassVar
 
 from rich.markup import escape
@@ -37,12 +38,28 @@ EXAM_TYPES: dict[int, str] = {
     2: "Quiz",
 }
 
-TAB_NAMES: list[str] = ["messages", "grades", "attendance", "exams", "homework", "remarks"]
-TAB_LABELS: list[str] = ["Messages", "Grades", "Attendance", "Exams", "Homework", "Remarks"]
+TAB_NAMES: list[str] = [
+    "messages",
+    "grades",
+    "attendance",
+    "exams",
+    "homework",
+    "remarks",
+    "completed_lessons",
+]
+TAB_LABELS: list[str] = [
+    "Messages",
+    "Grades",
+    "Attendance",
+    "Exams",
+    "Homework",
+    "Remarks",
+    "Completed lessons",
+]
 
 HELP_TEXT = """\
 [b]Navigation[/b]
-  1-6          Switch tabs (1=Messages .. 6=Remarks)
+  1-7          Switch tabs (1=Messages, 6=Remarks, 7=Completed lessons)
   j/k, arrows  Move cursor down / up
   Enter        Open detail view
   Escape / q   Back (detail) or quit (main)
@@ -123,6 +140,7 @@ class MainScreen(Screen[None]):
         Binding("4", "switch_tab('exams')", "4 Exams", show=False),
         Binding("5", "switch_tab('homework')", "5 HW", show=False),
         Binding("6", "switch_tab('remarks')", "6 Remarks", show=False),
+        Binding("7", "switch_tab('completed_lessons')", "7 Completed lessons", show=False),
         # Sorting
         Binding("o", "cycle_sort", "Sort"),
         Binding("O", "reverse_sort", "Reverse"),
@@ -144,14 +162,17 @@ class MainScreen(Screen[None]):
         self._student_filter_index: int = 0
         self._data: dict[str, list[dict[str, object]]] = {}
         self._loaded_tabs: set[str] = set()
-        self._sort_state: dict[str, tuple[int, bool]] = {"remarks": (0, True)}
+        self._sort_state: dict[str, tuple[int, bool]] = {
+            "remarks": (0, True),
+            "completed_lessons": (0, True),
+        }
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
         yield Static("", id="status-bar")
         with TabbedContent(*TAB_LABELS):
-            for name in TAB_NAMES:
-                with TabPane(name.capitalize(), id=f"tab-{name}"):
+            for name, label in zip(TAB_NAMES, TAB_LABELS, strict=True):
+                with TabPane(label, id=f"tab-{name}"):
                     yield DataTable(id=f"{name}-table", cursor_type="row")
         yield Footer()
 
@@ -172,6 +193,9 @@ class MainScreen(Screen[None]):
         self.query_one("#remarks-table", DataTable).add_columns(
             "Date", "Student", "Category", "Author", "Points", "Content"
         )
+        self.query_one("#completed_lessons-table", DataTable).add_columns(
+            "Date", "Student", "Lesson", "Subject", "Teacher", "Topic"
+        )
         self._load_students_and_first_tab()
 
     # ── Data loading ──────────────────────────────────────────────────
@@ -186,7 +210,7 @@ class MainScreen(Screen[None]):
     def _on_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         tab_id = event.pane.id or ""
         tab_name = tab_id.removeprefix("tab-")
-        if tab_name not in self._loaded_tabs or tab_name == "remarks":
+        if tab_name not in self._loaded_tabs or tab_name in ("remarks", "completed_lessons"):
             self._load_tab_work(tab_name)
         self._update_status_bar()
 
@@ -298,8 +322,16 @@ class MainScreen(Screen[None]):
                     r["student_name"] = student_name
                     all_rows.append(r)
 
+            elif tab_name == "completed_lessons":
+                rows = await app.db.get_completed_lessons_for_student(student_key)
+                for r in rows:
+                    if r.get("deleted_at") is not None:
+                        continue
+                    r["student_name"] = student_name
+                    all_rows.append(r)
+
         self._data[tab_name] = all_rows
-        if tab_name == "remarks":
+        if tab_name in ("remarks", "completed_lessons"):
             self._apply_sort(tab_name)
         self._update_status_bar()
 
@@ -312,6 +344,14 @@ class MainScreen(Screen[None]):
         "exams": ["date", "student_name", "subject", "type", "description"],
         "homework": ["date", "student_name", "subject", "content"],
         "remarks": ["date", "student_name", "category", "author", "points", "content"],
+        "completed_lessons": [
+            "date",
+            "student_name",
+            "lesson_number",
+            "subject",
+            "teacher",
+            "topic",
+        ],
     }
 
     _COLUMN_NAMES: ClassVar[dict[str, list[str]]] = {
@@ -321,6 +361,7 @@ class MainScreen(Screen[None]):
         "exams": ["Date", "Student", "Subject", "Type", "Description"],
         "homework": ["Date", "Student", "Subject", "Content"],
         "remarks": ["Date", "Student", "Category", "Author", "Points", "Content"],
+        "completed_lessons": ["Date", "Student", "Lesson", "Subject", "Teacher", "Topic"],
     }
 
     @on(DataTable.HeaderSelected)
@@ -429,6 +470,16 @@ class MainScreen(Screen[None]):
                     Text(" ".join(content.split())[:50]),
                 )
 
+            elif tab_name == "completed_lessons":
+                table.add_row(
+                    str(r.get("date", ""))[:10],
+                    Text(str(r.get("student_name", ""))),
+                    str(r.get("lesson_number", "")),
+                    Text(str(r.get("subject", ""))),
+                    Text(str(r.get("teacher", ""))),
+                    Text(" ".join(message_text(str(r.get("topic", ""))).split())[:80]),
+                )
+
     # ── Detail views ──────────────────────────────────────────────────
 
     def _get_active_tab_name(self) -> str:
@@ -530,6 +581,25 @@ class MainScreen(Screen[None]):
             if row.get("url"):
                 fields.append(("Vulcan", str(row["url"])))
             self.app.push_screen(DetailScreen("Praise / remark", fields, message_text(content)))
+
+        elif tab_name == "completed_lessons":
+            fields = [
+                ("Student", str(row.get("student_name", ""))),
+                ("Date", str(row.get("date", ""))),
+                ("Lesson", str(row.get("lesson_number", ""))),
+                ("Subject", str(row.get("subject", ""))),
+                ("Teacher", str(row.get("teacher", ""))),
+                ("Thematic block", str(row.get("thematic_block", ""))),
+                ("Online", str(row.get("online", ""))),
+                ("Has collections", str(bool(row.get("has_collections")))),
+                ("Collections", json.dumps(row.get("collections", []), ensure_ascii=False)),
+                ("Resources", json.dumps(row.get("resources"), ensure_ascii=False)),
+            ]
+            if row.get("url"):
+                fields.append(("Vulcan", str(row["url"])))
+            self.app.push_screen(
+                DetailScreen("Completed lesson", fields, message_text(str(row.get("topic", ""))))
+            )
 
     # ── Actions ───────────────────────────────────────────────────────
 

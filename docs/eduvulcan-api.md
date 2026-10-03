@@ -334,6 +334,19 @@ Additional fields are `online` (Zajęcia online), `kolekcjePoLekcji` and
 and collections were empty and resources null in the sample; populated shapes
 remain unverified. See `docs/eduvulcan/openapi.yaml` for the captured schema.
 
+`VulcanClient.get_completed_lessons()` implements this recorded contract with
+`status=1` only. It encodes the student key and date parameters, validates the
+entire response before persistence and collapses identical duplicate IDs;
+conflicting duplicate IDs fail the section. `CompletedLesson` retains the original
+date, lesson number, subject, teacher, topic, thematic block, online link, collection
+list, collection flag and resources. Unverified populated collections/resources
+are preserved as JSON, without assuming an undocumented nested schema. Each item
+links to the authenticated tenant's `/App/{encoded student key}/realizacjaZajec`.
+Synchronization requests full local days from `SYNC_COMPLETED_LESSONS_DAYS` days
+ago through today (default 90), converted to UTC instants with DST handling.
+This implementation was tested against recorded/synthetic responses; live API
+behavior was not verified during implementation.
+
 ### GET /api/KomunikatStartowy
 
 System-wide announcements. Returns `[]` when none.

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+from datetime import datetime
 from typing import Any
 from urllib.parse import quote, urlsplit
 
@@ -14,6 +15,7 @@ from vulcan_notify.auth import _make_ssl_context, cookies_for_url
 from vulcan_notify.models import (
     AttendanceEntry,
     ClassificationPeriod,
+    CompletedLesson,
     DashboardData,
     Exam,
     Grade,
@@ -280,6 +282,65 @@ class VulcanClient:
                 )
             )
         return remarks
+
+    async def get_completed_lessons(
+        self, student: Student, date_from: str, date_to: str
+    ) -> list[CompletedLesson]:
+        """Fetch completed lessons only; retain unverified resource shapes as JSON."""
+        endpoint = "/api/RealizacjaZajec13"
+        data = await self._request(
+            f"{endpoint}?key={quote(student.key, safe='')}&dataOd={quote(date_from, safe='')}"
+            f"&dataDo={quote(date_to, safe='')}&status=1"
+        )
+        if not isinstance(data, list):
+            raise VulcanFetchError(f"{endpoint} response is not a list")
+        lessons: dict[int, CompletedLesson] = {}
+        text_fields = ("data", "przedmiot", "nauczyciel", "tematOpis", "blokTematyczny", "online")
+        required = {
+            *text_fields,
+            "id",
+            "nrLekcji",
+            "kolekcjePoLekcji",
+            "existsKolekcjePoLekcji",
+            "zasoby",
+        }
+        for item in data:
+            if not isinstance(item, dict) or not required.issubset(item):
+                raise VulcanFetchError(f"{endpoint} item is missing required fields")
+            if any(not isinstance(item[name], str) for name in text_fields):
+                raise VulcanFetchError(f"{endpoint} item has invalid text fields")
+            for name in ("id", "nrLekcji"):
+                value = item[name]
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise VulcanFetchError(f"{endpoint} item has invalid numeric fields")
+                if not float(value).is_integer():
+                    raise VulcanFetchError(f"{endpoint} item has invalid numeric fields")
+            try:
+                datetime.fromisoformat(item["data"])
+            except ValueError:
+                raise VulcanFetchError(f"{endpoint} item has invalid date") from None
+            if not isinstance(item["kolekcjePoLekcji"], list) or not isinstance(
+                item["existsKolekcjePoLekcji"], bool
+            ):
+                raise VulcanFetchError(f"{endpoint} item has invalid collection fields")
+            lesson = CompletedLesson(
+                id=int(item["id"]),
+                date=item["data"],
+                lesson_number=int(item["nrLekcji"]),
+                subject=item["przedmiot"],
+                teacher=item["nauczyciel"],
+                topic=item["tematOpis"],
+                thematic_block=item["blokTematyczny"],
+                online=item["online"],
+                collections=item["kolekcjePoLekcji"],
+                has_collections=item["existsKolekcjePoLekcji"],
+                resources=item["zasoby"],
+                url=f"{self.student_portal_url(student)}/realizacjaZajec",
+            )
+            if lesson.id in lessons and lessons[lesson.id] != lesson:
+                raise VulcanFetchError(f"{endpoint} has conflicting duplicate IDs")
+            lessons[lesson.id] = lesson
+        return list(lessons.values())
 
     # ── Grades ───────────────────────────────────────────────────────
 

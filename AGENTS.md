@@ -84,6 +84,7 @@ The list above describes product direction. Current implementation status is:
 | Messages | Implemented with bounded coverage | Unified inbox, latest 50 messages per sync; new-message content and bounded historical content backfill. No full inbox pagination. |
 | Lesson schedule and substitutions/cancellations/additions | Implemented with bounded coverage | Previous 7 days through next 14 days; change semantics are described in section 5. |
 | Remarks and praise | Implemented from recorded API contract | `/api/Uwagi`; per-student IDs, full content, independent category baseline, new-ID events, silent updates and soft deletes. Live behavior not verified during implementation. |
+| Completed lessons | Implemented from recorded API contract | `/api/RealizacjaZajec13`, `status=1`; configurable 90-day lookback plus today, per-student IDs, independent baseline, new/update MQTT events, window-scoped soft deletes, TUI and HTTP API. No email events; optional stored-topic AI context and standalone summaries. Live behavior not verified during implementation. |
 
 Output-channel status is documented in section 6. Implemented coverage does not imply live eduVULCAN behavior has been verified in the current task.
 
@@ -204,6 +205,14 @@ Grades, attendance, exams, homework and schedule each use a successful-persisten
 
 `remarks` uses `last_sync:{student.key}:remarks`, initialized only after a successful fetch and persistence (including an empty list). It suppresses historical events when upgrading an existing installation. New categories must explicitly provide baseline behavior for existing installations; do not assume the student marker is sufficient.
 
+`completed_lessons` independently uses `last_sync:{student.key}:completed_lessons`
+after successful fetch and persistence, including empty lists. Upgrades baseline
+silently; failed sections do not initialize the marker. New IDs and content changes
+emit events, while soft deletion and restoration stay silent. Missing records are
+soft-deleted only within the successfully fetched UTC interval. Rolled-out history
+remains stored. Category events remain excluded from email; stored topics can
+optionally provide AI context with `LLM_INCLUDE_LESSONS=true`.
+
 ### Current change semantics
 
 | Category | Comparison identity | Events and limitations |
@@ -212,6 +221,7 @@ Grades, attendance, exams, homework and schedule each use a successful-persisten
 | Attendance | `(date, lesson_number)` within the student | `new` only for an unknown record with `category != 1`. Changes to an existing record's category do not emit events. |
 | Exams and homework | Upstream numeric `id`, checked against the student's stored IDs | New-item events only. Missing items are soft-deleted after baseline; updates and soft deletes do not emit `Change` events. |
 | Remarks/praise | `(student_key, id)` | New-ID events only; content/metadata updates are persisted silently, missing items are soft-deleted, restoration does not re-notify. |
+| Completed lessons | `(student_key, id)` | New-ID and source-field update events; independent baseline, window-scoped soft deletes and silent restoration. No email events; optional stored-topic AI context. |
 | Messages | Numeric `Message.id` in the unified inbox | New messages are returned separately in `FullSyncResult.new_messages`, not as `Change` objects. `api_global_key` has a DB uniqueness constraint and is used to fetch message detail. |
 | Schedule | `(date, time_from, subject)` within the student | New/updated substitutions when the fetched lesson is substituted; new extra lessons without substitution emit additions. Stored lessons missing within the diff window emit cancellations and are deleted from the DB. Ordinary lesson changes and complete removal of substitution fields do not emit substitution events. |
 
@@ -697,12 +707,15 @@ Direct environment readers do not load `.env` themselves. Compose uses `env_file
 | `DB_PATH` | `Settings` | `vulcan_notify.db`; Compose sets `/app/data/vulcan_notify.db`. |
 | `VULCAN_LOGIN`, `VULCAN_PASSWORD` | `Settings` | Unset; optional credential login with macOS Keychain fallback. |
 | `SYNC_ATTENDANCE_DAYS` | `Settings` | `90`. |
+| `SYNC_COMPLETED_LESSONS_DAYS` | `Settings` | `90`; completed lessons lookback plus today, no email notifications. |
 | `SYNC_MESSAGE_BACKFILL_BATCH` | `Settings` | `10`. |
 | `MQTT_ENABLED` | `Settings` | `false`. |
 | `MQTT_TOPIC_PREFIX`, `MQTT_STATUS_SUFFIX` | `Settings` | `school`, `status`. |
 | `CALENDAR_MAP` | `Settings` | Empty map disables macOS Calendar integration. |
 | `CALENDAR_TIMEOUT_SECONDS` | `Settings` | `30`; deadline per AppleScript operation, with child cleanup. |
 | `LLM_API_KEY` | `Settings` | Unset; AI summaries are optional. |
+| `LLM_INCLUDE_LESSONS` | `Settings` | `false`; optional stored lesson-topic context for email/CLI change summaries. Topics alone never trigger email. |
+| `LLM_LESSONS_DAYS` | `Settings` | `7`; positive local calendar days including today, by lesson date. Standalone `summarize --type lessons` accepts `--days`. |
 | `EMAIL_ENABLED`, `EMAIL_AI_SUMMARY`, `EMAIL_INCLUDE_MESSAGE_BODIES` | `Settings` | All `false`; email, AI summary and message content require explicit opt-in. |
 | `SMTP_HOST`, `EMAIL_FROM`, `EMAIL_TO` | `Settings` | Empty; required for enabled email. Sender accepts a bare address or `Name <address>`; SMTP uses only the address. Recipients use a JSON array of bare addresses. |
 | `SMTP_PORT`, `SMTP_SECURITY` | `Settings` | `587`, `starttls`; implicit TLS (`ssl`) and plain relay (`none`) supported. |

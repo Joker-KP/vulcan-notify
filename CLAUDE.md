@@ -6,6 +6,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 CLI tool that syncs data from the eduVulcan school e-journal (grades, attendance, exams, homework, praise/notes, messages) to a local SQLite database and detects changes between syncs. Uses HTTP cookie validation and persistent Chromium recovery before credential login. Manual headed authentication is available through the explicit `vulcan-auth` Compose profile. Read `AGENTS.md` for current local Docker/auth behavior.
 
+Completed lessons (`/api/RealizacjaZajec13`, `status=1`) are also synchronized using
+`CompletedLesson` and the additive `completed_lessons` table keyed by student/ID.
+`SYNC_COMPLETED_LESSONS_DAYS` defaults to 90 plus today. The independent successful
+baseline `last_sync:<student>:completed_lessons` suppresses initial/import history.
+New/content-update events use MQTT `completed_lessons/new` and `/updated`;
+missing records are soft-deleted only within the fetched interval and restoration
+is silent. TUI key 7 opens the list/detail view; `/api/completed-lessons` supports
+common student filters, limits and freshness. Completed lesson changes do not
+trigger emails or form digest groups. `LLM_INCLUDE_LESSONS=true` optionally
+adds stored topics as AI context for email/CLI change summaries, with
+`LLM_LESSONS_DAYS=7` local calendar days including today. Standalone
+`summarize --type lessons [--days N]` uses `[lessons]` prompts.
+Default prompts group by student/subject and omit routine activities.
+Collections/resources retain JSON
+without assumptions about unverified populated upstream shapes. Live behavior
+was not verified during implementation.
+
 ## Sibling repos (cross-repo work is common)
 
 Changes here almost always need a corresponding change in the homelab repo — new API endpoints need HA REST sensors, new MQTT topics need HA automations, new deploy behavior needs CLAUDE.md updates. Always check the homelab repo before assuming infra/docs don't exist, and update both in a single session when a change spans them.

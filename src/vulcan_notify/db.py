@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, TypedDict
@@ -17,6 +18,7 @@ if TYPE_CHECKING:
 
     from vulcan_notify.models import (
         AttendanceEntry,
+        CompletedLesson,
         Exam,
         Grade,
         Homework,
@@ -151,6 +153,27 @@ CREATE TABLE IF NOT EXISTS remarks (
     FOREIGN KEY (student_key) REFERENCES students(key)
 );
 
+CREATE TABLE IF NOT EXISTS completed_lessons (
+    student_key TEXT NOT NULL,
+    id INTEGER NOT NULL,
+    date TEXT NOT NULL,
+    lesson_number INTEGER NOT NULL,
+    subject TEXT NOT NULL,
+    teacher TEXT NOT NULL,
+    topic TEXT NOT NULL,
+    thematic_block TEXT NOT NULL,
+    online TEXT NOT NULL,
+    collections TEXT NOT NULL,
+    has_collections BOOLEAN NOT NULL,
+    resources TEXT NOT NULL,
+    url TEXT,
+    first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP,
+    PRIMARY KEY (student_key, id),
+    FOREIGN KEY (student_key) REFERENCES students(key)
+);
+
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY,
     api_global_key TEXT UNIQUE,
@@ -247,7 +270,16 @@ CREATE INDEX IF NOT EXISTS idx_sync_runs_started ON sync_runs(started_at);
 
 # Data sections a sync covers. Health is reported per section so a partial
 # outage names the broken part instead of just going red.
-SECTIONS = ("grades", "attendance", "exams", "homework", "schedule", "remarks", "messages")
+SECTIONS = (
+    "grades",
+    "attendance",
+    "exams",
+    "homework",
+    "schedule",
+    "remarks",
+    "completed_lessons",
+    "messages",
+)
 
 
 class Database:
@@ -735,6 +767,93 @@ class Database:
         ]
         await self.db.executemany(
             "UPDATE remarks SET deleted_at=CURRENT_TIMESTAMP WHERE student_key=? AND id=?",
+            missing,
+        )
+
+    async def upsert_completed_lesson(self, student_key: str, lesson: CompletedLesson) -> None:
+        await self.db.execute(
+            "INSERT INTO completed_lessons (student_key, id, date, lesson_number, subject, "
+            "teacher, topic, thematic_block, online, collections, has_collections, resources, url) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(student_key, id) DO UPDATE SET date=excluded.date, "
+            "lesson_number=excluded.lesson_number, subject=excluded.subject, "
+            "teacher=excluded.teacher, topic=excluded.topic, "
+            "thematic_block=excluded.thematic_block, "
+            "online=excluded.online, collections=excluded.collections, "
+            "has_collections=excluded.has_collections, resources=excluded.resources, "
+            "url=excluded.url, last_seen=CURRENT_TIMESTAMP, deleted_at=NULL",
+            (
+                student_key,
+                lesson.id,
+                lesson.date,
+                lesson.lesson_number,
+                lesson.subject,
+                lesson.teacher,
+                lesson.topic,
+                lesson.thematic_block,
+                lesson.online,
+                json.dumps(lesson.collections, ensure_ascii=False),
+                lesson.has_collections,
+                json.dumps(lesson.resources, ensure_ascii=False),
+                lesson.url,
+            ),
+        )
+
+    async def get_completed_lessons_for_student(self, student_key: str) -> list[dict[str, Any]]:
+        cursor = await self.db.execute(
+            "SELECT * FROM completed_lessons WHERE student_key=? "
+            "ORDER BY julianday(date) DESC, lesson_number DESC, id DESC",
+            (student_key,),
+        )
+        columns = [column[0] for column in cursor.description or []]
+        rows = [dict(zip(columns, row, strict=True)) for row in await cursor.fetchall()]
+        for row in rows:
+            row["collections"] = json.loads(row["collections"])
+            row["resources"] = json.loads(row["resources"])
+            row["has_collections"] = bool(row["has_collections"])
+        return rows
+
+    async def get_lessons_for_summary(
+        self, date_from: str, date_to: str, student_keys: list[str] | None = None
+    ) -> list[dict[str, object]]:
+        """Read active topics by lesson date, with explicit UTC window boundaries."""
+        if student_keys == []:
+            return []
+        params: list[str] = [date_from, date_to]
+        student_filter = ""
+        if student_keys is not None:
+            placeholders = ",".join("?" for _ in student_keys)
+            student_filter = f" AND l.student_key IN ({placeholders})"
+            params.extend(student_keys)
+        cursor = await self.db.execute(
+            "SELECT s.key AS student_key, s.name AS student, s.class_name, "
+            "l.subject, l.date, l.lesson_number, l.topic, l.thematic_block "
+            "FROM completed_lessons l JOIN students s ON s.key=l.student_key "
+            "WHERE s.active=1 AND l.deleted_at IS NULL "
+            "AND trim(l.topic) != '' "
+            "AND julianday(l.date) BETWEEN julianday(?) AND julianday(?)"
+            + student_filter
+            + " ORDER BY s.key, l.subject, julianday(l.date), l.lesson_number, l.id",
+            params,
+        )
+        columns = [column[0] for column in cursor.description or []]
+        return [dict(zip(columns, row, strict=True)) for row in await cursor.fetchall()]
+
+    async def mark_missing_completed_lessons(
+        self, student_key: str, active_ids: set[int], date_from: str, date_to: str
+    ) -> None:
+        """Soft-delete only absent records inside the successfully fetched window."""
+        cursor = await self.db.execute(
+            "SELECT id FROM completed_lessons WHERE student_key=? AND deleted_at IS NULL "
+            "AND julianday(date) BETWEEN julianday(?) AND julianday(?)",
+            (student_key, date_from, date_to),
+        )
+        missing = [
+            (student_key, row[0]) for row in await cursor.fetchall() if row[0] not in active_ids
+        ]
+        await self.db.executemany(
+            "UPDATE completed_lessons SET deleted_at=CURRENT_TIMESTAMP "
+            "WHERE student_key=? AND id=?",
             missing,
         )
 

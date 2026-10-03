@@ -26,7 +26,7 @@ from vulcan_notify.email import (
     publish_email,
 )
 from vulcan_notify.mqtt import drain_outbox, publish_changes
-from vulcan_notify.summarizer import format_changes_for_llm, summarize
+from vulcan_notify.summarizer import format_changes_for_llm, lessons_context, summarize
 from vulcan_notify.sync import FullSyncResult, SyncSessionExpiredError, sync_all
 
 logger = logging.getLogger(__name__)
@@ -337,8 +337,13 @@ async def cmd_tui() -> None:
     await run_tui()
 
 
-async def cmd_summarize(summary_type: str = "sync", days: int = 7) -> None:
+async def cmd_summarize(summary_type: str = "sync", days: int | None = None) -> None:
     """Summarize stored data using AI."""
+    if days is None:
+        days = settings.llm_lessons_days if summary_type == "lessons" else 7
+    if days < 1:
+        print("--days must be a positive integer.")
+        sys.exit(1)
     if not settings.llm_api_key:
         print("LLM_API_KEY not set. Configure it in .env to use AI summaries.")
         sys.exit(1)
@@ -349,6 +354,8 @@ async def cmd_summarize(summary_type: str = "sync", days: int = 7) -> None:
     try:
         if summary_type == "messages":
             await _summarize_messages(db, days)
+        elif summary_type == "lessons":
+            await _summarize_lessons(db, days)
         else:
             await _summarize_changes(db, days)
     finally:
@@ -358,14 +365,33 @@ async def cmd_summarize(summary_type: str = "sync", days: int = 7) -> None:
 async def _summarize_changes(db: Database, days: int) -> None:
     """Summarize recent sync changes from the database."""
     changes = await db.get_recent_changes(days=days)
-    if not changes:
+    text = format_changes_for_llm(changes)
+    if settings.llm_include_lessons:
+        context = await lessons_context(db, settings)
+        if context:
+            text = f"{text}\n\n{context}".strip()
+    if not text:
         print(f"No changes in the last {days} day(s). Try a larger range with --days.")
         sys.exit(1)
 
-    text = format_changes_for_llm(changes)
     summary = await summarize(text, settings, profile="default")
     if summary:
         print(f"{BOLD}Sync Summary (last {days} day(s)){RESET}")
+        print(summary)
+    else:
+        print("Failed to generate summary.")
+        sys.exit(1)
+
+
+async def _summarize_lessons(db: Database, days: int) -> None:
+    """Summarize stored lesson topics without contacting eduVULCAN."""
+    text = await lessons_context(db, settings, days=days)
+    if not text:
+        print(f"No completed lesson topics in the last {days} day(s).")
+        sys.exit(1)
+    summary = await summarize(text, settings, profile="lessons")
+    if summary:
+        print(f"{BOLD}Completed Lessons Summary (last {days} day(s)){RESET}")
         print(summary)
     else:
         print("Failed to generate summary.")
@@ -400,6 +426,12 @@ async def _summarize_messages(db: Database, days: int) -> None:
         sys.exit(1)
 
 
+def _print_summary_help() -> None:
+    print("Usage: vulcan-notify summarize [--type sync|messages|lessons] [--days N]")
+    print("    --type sync|messages|lessons  (default: sync)")
+    print("    --days N  (default: 7; lessons uses LLM_LESSONS_DAYS)")
+
+
 def main() -> None:
     setup_logging()
 
@@ -426,15 +458,22 @@ def main() -> None:
             asyncio.run(cmd_tui())
         case "summarize":
             summary_type = "sync"
-            days = 7
+            days = None
             args = sys.argv[2:]
+            if "--help" in args or "-h" in args:
+                _print_summary_help()
+                return
             for i, arg in enumerate(args):
                 if arg == "--type" and i + 1 < len(args):
                     summary_type = args[i + 1]
                 elif arg == "--days" and i + 1 < len(args):
-                    days = int(args[i + 1])
-            if summary_type not in ("sync", "messages"):
-                print("Invalid --type. Use 'sync' or 'messages'.")
+                    try:
+                        days = int(args[i + 1])
+                    except ValueError:
+                        print("--days must be a positive integer.")
+                        sys.exit(1)
+            if summary_type not in ("sync", "messages", "lessons"):
+                print("Invalid --type. Use 'sync', 'messages' or 'lessons'.")
                 sys.exit(1)
             asyncio.run(cmd_summarize(summary_type=summary_type, days=days))
         case _:
@@ -451,9 +490,8 @@ def main() -> None:
             print("  email-retry - Retry queued SMTP digests without an upstream sync")
             print("  calendar  - Force re-sync all events to macOS Calendar")
             print("  tui       - Interactive message browser")
-            print("  summarize - AI summary of recent changes or messages")
-            print("    --type sync|messages  (default: sync)")
-            print("    --days N              (default: 7)")
+            print("  summarize - AI summary of recent changes, messages or completed lesson topics")
+            _print_summary_help()
             sys.exit(1)
 
 

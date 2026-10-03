@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import tomllib
+from datetime import UTC, datetime, time, timedelta
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from vulcan_notify.config import Settings
+    from vulcan_notify.db import Database
+
+from vulcan_notify.time_utils import as_utc
 
 log = logging.getLogger(__name__)
 
@@ -17,6 +22,39 @@ _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 
 def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
+
+
+async def lessons_context(
+    db: Database,
+    settings: Settings,
+    *,
+    days: int | None = None,
+    student_keys: list[str] | None = None,
+    now: datetime | None = None,
+) -> str:
+    """Format stored topics from N local calendar days, including today, for AI."""
+    days = settings.llm_lessons_days if days is None else days
+    if days < 1:
+        raise ValueError("Completed lesson summary days must be positive")
+    now = as_utc(now or datetime.now(UTC))
+    local_date = now.astimezone(settings.timezone).date()
+    start_date = local_date - timedelta(days=days - 1)
+    start = datetime.combine(start_date, time.min, settings.timezone).astimezone(UTC)
+    lessons = await db.get_lessons_for_summary(start.isoformat(), now.isoformat(), student_keys)
+    if not lessons:
+        return ""
+    for lesson in lessons:
+        lesson["date"] = (
+            as_utc(datetime.fromisoformat(str(lesson["date"])))
+            .astimezone(settings.timezone)
+            .isoformat()
+        )
+    return (
+        f"Tematy zrealizowanych lekcji ({start_date} - {local_date}, "
+        f"ostatnie {days} dni, strefa {settings.tz}).\n"
+        "To kontekst z lokalnej bazy, a nie lista nowych zmian. Dane mogą być niepełne.\n"
+        + json.dumps(lessons, ensure_ascii=False, indent=2)
+    )
 
 
 async def summarize(
