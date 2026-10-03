@@ -126,6 +126,9 @@ class Settings(BaseSettings):
     # Optional stored lesson-topic context for change summaries (CLI and email).
     llm_include_lessons: bool = False
     llm_lessons_days: int = Field(default=7, ge=1)
+    # Friday's first successful sync from 15:00 in TZ emails a seven-day mix.
+    # Requires enabled email and an LLM key; independent of digest AI switches.
+    weekly_summary_enabled: bool = True
 
     # SMTP digests (optional). Lists in .env use JSON, e.g. EMAIL_TO=["you@example.org"].
     email_enabled: bool = False

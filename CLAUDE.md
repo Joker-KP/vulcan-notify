@@ -25,6 +25,14 @@ Prompts request Markdown; mixed emails render sanitized HTML, with inbox and
 active student lesson-list links from the saved session (omitted if unavailable).
 Requires enabled SMTP email and an LLM key, independently of digest AI/context
 switches. Final bodies persist in the existing outbox; retries do not rerun AI.
+`sync` automatically runs a seven-day mix after the first successful Friday sync
+starting at/after 15:00 in `TZ`, when email and an LLM key are configured.
+`WEEKLY_SUMMARY_ENABLED` defaults to true; false disables only the automatic action.
+The Friday date in `summary:mix:weekly` and emails commit together before SMTP.
+Empty source windows complete silently; total AI failures retry on a later
+qualifying sync, and SMTP retries reuse stored bodies. Degraded/failed syncs skip
+the action; there is no catch-up outside Friday. Optional summary failures do not
+fail the sync.
 Default prompts group by student/subject and omit routine activities.
 Collections/resources retain JSON
 without assumptions about unverified populated upstream shapes. Live behavior

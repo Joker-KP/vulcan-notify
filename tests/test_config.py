@@ -23,3 +23,9 @@ def test_lesson_summary_environment_uses_short_names(tmp_path):
     config = Settings(_env_file=env)
     assert config.llm_include_lessons is True
     assert config.llm_lessons_days == 3
+
+
+def test_weekly_summary_can_be_disabled_in_environment(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("WEEKLY_SUMMARY_ENABLED=false\n")
+    assert Settings(_env_file=env).weekly_summary_enabled is False

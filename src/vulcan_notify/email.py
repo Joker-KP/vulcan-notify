@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 _WEEKDAYS_PL = ("poniedziałek", "wtorek", "środa", "czwartek", "piątek", "sobota", "niedziela")
 AUTH_FAILURE_STATE = "email:auth_failure"
+WEEKLY_MIX_STATE = "summary:mix:weekly"
 AuthFailureReason = Literal[
     "recovery_failed", "credentials_missing", "session_expired", "interactive_failed"
 ]
@@ -291,7 +292,12 @@ async def _mix_summary_footers(db: Database) -> tuple[str, str]:
 
 
 async def queue_mix_summary(
-    db: Database, messages_summary: str | None, lessons_summary: str | None, days: int
+    db: Database,
+    messages_summary: str | None,
+    lessons_summary: str | None,
+    days: int,
+    *,
+    weekly_period: str | None = None,
 ) -> None:
     """Persist one mixed AI email per recipient; retries reuse the rendered results."""
     if not settings.email_enabled:
@@ -314,9 +320,13 @@ async def queue_mix_summary(
     )
     title = "Podsumowanie tygodnia" if days == 7 else f"Podsumowanie (ostatnie {days} dni)"
     subject = f"{settings.email_subject_prefix} {title}".strip()
-    await _queue_email(
-        db, f"summary:mix:{uuid4().hex}", subject, message_text(html, include_links=True), html
+    identity = (
+        f"summary:mix:weekly:{weekly_period}" if weekly_period else f"summary:mix:{uuid4().hex}"
     )
+    await _queue_email(db, identity, subject, message_text(html, include_links=True), html)
+    if weekly_period:
+        await db.set_state(WEEKLY_MIX_STATE, weekly_period)
+    # Scheduled email and its completion marker persist together, before SMTP.
     await db.commit()
 
 

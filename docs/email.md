@@ -442,6 +442,29 @@ to resend the saved bodies and Message-ID without another AI request. Running
 `summarize --type mix` again creates a fresh summary email. This command also
 drains any previously queued emails.
 
+The `sync` command also runs a weekly mixed summary automatically. With
+`WEEKLY_SUMMARY_ENABLED=true` (default), `EMAIL_ENABLED=true` and `LLM_API_KEY`
+configured, it runs after the first successful synchronization **starting on
+Friday at or after 15:00 in `TZ`** (default `Europe/Warsaw`). This includes
+unchanged runs and successful session recovery. Failed/degraded syncs and runs
+with no students skip the action. A sync starting before 15:00 does not qualify
+even if it finishes later. No weekend or weekday catch-up is performed.
+
+It uses seven days for both sources and the same independent profiles, message
+bodies, templates and timeout as explicit `summarize --type mix --days 7`.
+Digest AI/context/body switches do not control the scheduled summary.
+Set `WEEKLY_SUMMARY_ENABLED=false` to disable it without affecting manual summaries.
+
+`sync_state["summary:mix:weekly"]` stores the qualifying Friday's local date.
+The marker and per-recipient emails are committed together before SMTP; delivery
+failures retain the marker and queued bodies, preventing new AI requests for that
+week after a restart. Later syncs or `email-retry` drain the existing outbox.
+An empty source window records the week without AI or email. If all requested AI
+sections fail, no marker is saved and a later qualifying Friday sync retries.
+One successful section queues the email and completes the week. Summary failures
+are logged without failing an otherwise successful sync. Use one sync owner;
+this does not add concurrent-job coordination or guaranteed SMTP delivery.
+
 ## Delivery and retries
 
 Individual message notifications and both digest alternatives are committed to `email_outbox`

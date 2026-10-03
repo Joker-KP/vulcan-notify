@@ -98,6 +98,10 @@ zajęcia** sections, each ending with links to the corresponding eduVULCAN views
 when the saved session is available.
 This requires `EMAIL_ENABLED=true` and configured SMTP; `--days` defaults to 7
 for both sections. See [mixed summary emails](docs/email.md#mixed-summary-email).
+With email and an LLM key configured, the first successful Friday `sync` starting
+at or after 15:00 in `TZ` (default `Europe/Warsaw`) automatically sends a seven-day
+mixed summary. SQLite remembers the week across restarts; SMTP retries reuse
+the saved email. Set `WEEKLY_SUMMARY_ENABLED=false` to disable this action.
 The default window is the past 90 days plus today (`SYNC_COMPLETED_LESSONS_DAYS`).
 Missing entries are soft-deleted within the fetched window; older history is kept.
 The table is created automatically on startup. Recorded/synthetic responses are

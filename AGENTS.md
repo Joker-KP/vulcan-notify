@@ -679,6 +679,15 @@ The service is designed for periodic synchronization.
 
 The Docker `sync-loop.sh` controls scheduling: run sync, wait `POLL_INTERVAL` seconds (default `1800`), then repeat. This is a delay after completion, not a fixed start-to-start interval. `Settings.poll_interval` also defaults to `1800`; the shell reads the process environment independently of `Settings`.
 
+`sync` runs a seven-day `summarize --type mix` action after the first successful
+sync starting on Friday at/after 15:00 in `TZ`, with enabled email and an LLM key.
+`WEEKLY_SUMMARY_ENABLED=true` by default; false disables the automatic action.
+The local Friday date in `sync_state["summary:mix:weekly"]` commits atomically with
+the per-recipient email outbox entries before SMTP. Restarts and SMTP failures do
+not repeat AI; empty source windows complete without email. Total AI failure
+allows a later qualifying sync to retry. Failed/degraded syncs skip summaries;
+there is no catch-up outside Friday. Summary output failures do not fail sync.
+
 Quiet hours default to `QUIET_HOURS_START=0`, `QUIET_HOURS_END=5` in the shared `TZ=Europe/Warsaw`. `QUIET_HOURS_TZ` is a legacy fallback when `TZ` is unset. Equal start/end disables the pause; windows crossing midnight are supported. Keep scheduler and `freshness.py` semantics aligned. Container/Python clocks, logs, Chromium and rendered dates use `TZ`. SQLite and Python persistence explicitly use UTC; legacy naive timestamps continue to mean UTC. Changing the runtime zone requires no history migration.
 
 Successful fetches stamp `last_success:<student>:<section>`; messages use account-level `last_success::messages`. Freshness excludes scheduled quiet hours and defaults to `STALE_AFTER_SECONDS=3600`. A section failure is recorded without advancing its timestamp. Missing timestamps remain stale until a successful sync; do not backfill them from attempted-sync markers. `sync_sections` stores outcomes and `sync_runs` distinguishes completed, degraded, failed and interrupted runs. `SYNC_HISTORY_KEEP_DAYS=90` prunes run/section history, preserving entity data and baseline markers.
@@ -723,6 +732,7 @@ Direct environment readers do not load `.env` themselves. Compose uses `env_file
 | `CALENDAR_MAP` | `Settings` | Empty map disables macOS Calendar integration. |
 | `CALENDAR_TIMEOUT_SECONDS` | `Settings` | `30`; deadline per AppleScript operation, with child cleanup. |
 | `LLM_API_KEY` | `Settings` | Unset; AI summaries are optional. |
+| `WEEKLY_SUMMARY_ENABLED` | `Settings` | `true`; first successful Friday sync starting at/after 15:00 in `TZ` emails a seven-day mix, requiring enabled email and an LLM key. |
 | `LLM_INCLUDE_LESSONS` | `Settings` | `false`; optional stored lesson-topic context for email/CLI change summaries. Topics alone never trigger email. |
 | `LLM_LESSONS_DAYS` | `Settings` | `7`; positive local calendar days including today, by lesson date. Standalone `summarize --type lessons` accepts `--days`. |
 | `EMAIL_ENABLED`, `EMAIL_AI_SUMMARY`, `EMAIL_INCLUDE_MESSAGE_BODIES` | `Settings` | All `false`; email, AI summary and message content require explicit opt-in. |

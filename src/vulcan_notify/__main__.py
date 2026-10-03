@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import sys
+from datetime import UTC, datetime
 from typing import Any
 
 from vulcan_notify.auth import (
@@ -19,6 +20,7 @@ from vulcan_notify.config import settings
 from vulcan_notify.db import Database
 from vulcan_notify.display import BOLD, RESET, format_compact_sync, format_full_sync
 from vulcan_notify.email import (
+    WEEKLY_MIX_STATE,
     AuthFailureReason,
     clear_auth_failure,
     drain_email_outbox,
@@ -205,6 +207,7 @@ async def cmd_email_retry() -> None:
 
 async def cmd_sync() -> None:
     """Fetch latest data and show changes since last sync."""
+    started_at = datetime.now(UTC)
     session = await _ensure_session()
     client = VulcanClient(session)
     db = Database(settings.db_path)
@@ -230,6 +233,7 @@ async def cmd_sync() -> None:
         await publish_changes(result, db)
         if result.has_failures:
             sys.exit(1)
+        await _weekly_mix_summary(db, started_at)
 
     except SessionExpiredError as exc:
         # A retry compares against rows already committed by successful sections.
@@ -267,6 +271,7 @@ async def cmd_sync() -> None:
             await publish_changes(result, db)
             if result.has_failures:
                 sys.exit(1)
+            await _weekly_mix_summary(db, started_at)
         else:
             print("Session expired. Run 'vulcan-notify auth' to re-authenticate.")
             print(
@@ -436,10 +441,39 @@ async def _summarize_messages(db: Database, days: int) -> None:
         sys.exit(1)
 
 
-async def _summarize_mix(db: Database, days: int) -> None:
+async def _weekly_mix_summary(db: Database, started_at: datetime) -> None:
+    """Run Friday's summary once, keeping optional output failures out of sync status."""
+    if not (settings.weekly_summary_enabled and settings.email_enabled and settings.llm_api_key):
+        return
+    local_start = started_at.astimezone(settings.timezone)
+    if local_start.weekday() != 4 or local_start.hour < 15:
+        return
+    period = local_start.date().isoformat()
+    try:
+        if await db.get_state(WEEKLY_MIX_STATE) == period:
+            return
+        logger.info("Running weekly mixed summary (%s)", period)
+        await _summarize_mix(db, 7, weekly_period=period)
+    except SystemExit:
+        # CLI mix exits nonzero for AI failure or pending SMTP. Queued summaries
+        # already have a marker, so normal outbox retries never repeat their AI.
+        logger.warning("Weekly mixed summary incomplete; subsequent syncs will retry")
+    except Exception as exc:
+        await db.db.rollback()
+        logger.warning(
+            "Weekly mixed summary failed (%s); subsequent syncs will retry", type(exc).__name__
+        )
+
+
+async def _summarize_mix(db: Database, days: int, *, weekly_period: str | None = None) -> None:
     """Email independent messages/lessons AI results in at most two sections."""
     messages, _ = await _messages_context(db, days)
     lessons = await lessons_context(db, settings, days=days)
+    if weekly_period and not messages and not lessons:
+        await db.set_state(WEEKLY_MIX_STATE, weekly_period)
+        await db.commit()
+        logger.info("No source data for weekly mixed summary (%s)", weekly_period)
+        return
     summaries: dict[str, str | None] = {}
     for profile, text in (("messages", messages), ("lessons", lessons)):
         summary = None
@@ -457,7 +491,9 @@ async def _summarize_mix(db: Database, days: int) -> None:
     if not any(summaries.values()):
         print(f"No mixed summary to email for the last {days} day(s).")
         sys.exit(1)
-    await queue_mix_summary(db, summaries["messages"], summaries["lessons"], days)
+    await queue_mix_summary(
+        db, summaries["messages"], summaries["lessons"], days, weekly_period=weekly_period
+    )
     delivered, pending = await drain_email_outbox(db)
     print(f"Summary email: SMTP accepted={delivered}, pending={pending}.")
     if pending:
