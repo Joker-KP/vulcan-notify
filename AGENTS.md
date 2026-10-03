@@ -196,11 +196,13 @@ First synchronization must not generate a flood of historical notifications.
 
 ### Current baseline behavior
 
-`sync_student()` checks `sync_state["last_sync:{student.key}"]`. When absent, it stores fetched data without emitting student change events. This marker applies to the whole student, not individual data categories.
+Grades, attendance, exams, homework and schedule each use a successful-persistence baseline at `last_sync:{student.key}:{section}`. Failed initial sections remain uninitialized and store their recovered history silently; already successful sections continue detecting changes. Successful empty fetches initialize baselines. The student-level `last_sync:{student.key}` remains an attempted-sync marker. `SyncResult.is_first_sync` is true only when neither that marker nor any of these section baselines exists.
+
+`baseline_sections:{student.key}` records one-time initialization. Upgrades inherit confirmed `last_success` timestamps when section history exists. Legacy installations without section history inherit the prior student baseline; their past section failures cannot be reconstructed. Initialization and each successful section marker persist independently of process lifetime.
 
 `sync_messages()` uses a separate account-level marker, `sync_state["last_sync:messages"]`, for the unified inbox and suppresses new-message notifications on its first sync.
 
-`remarks` uses `last_sync:{student.key}:remarks`, initialized only after a successful fetch and persistence (including an empty list). It suppresses historical events when upgrading an existing installation. Other categories have no per-category baseline markers; adding them to an already synchronized student does not automatically suppress historical notifications. New categories must explicitly provide baseline behavior for existing installations; do not assume the student marker is sufficient.
+`remarks` uses `last_sync:{student.key}:remarks`, initialized only after a successful fetch and persistence (including an empty list). It suppresses historical events when upgrading an existing installation. New categories must explicitly provide baseline behavior for existing installations; do not assume the student marker is sufficient.
 
 ### Current change semantics
 
@@ -212,6 +214,8 @@ First synchronization must not generate a flood of historical notifications.
 | Remarks/praise | `(student_key, id)` | New-ID events only; content/metadata updates are persisted silently, missing items are soft-deleted, restoration does not re-notify. |
 | Messages | Numeric `Message.id` in the unified inbox | New messages are returned separately in `FullSyncResult.new_messages`, not as `Change` objects. `api_global_key` has a DB uniqueness constraint and is used to fetch message detail. |
 | Schedule | `(date, time_from, subject)` within the student | New/updated substitutions when the fetched lesson is substituted; new extra lessons without substitution emit additions. Stored lessons missing within the diff window emit cancellations and are deleted from the DB. Ordinary lesson changes and complete removal of substitution fields do not emit substitution events. |
+
+The schedule comparison includes the full requested local window (previous 7 through next 14 days), extending to any returned boundary dates. Missing first/last lesson days are compared even when no remaining fetched lesson has that date.
 
 Prefer stable upstream identifiers as keys whenever available. Keep comparison scope explicit and preserve student/account boundaries.
 
@@ -287,6 +291,8 @@ Keep topic naming stable unless there is a clear migration reason.
 
 The HTTP API exposes locally persisted state to other systems.
 
+`/api/students` lists active profiles by stable key. Student data endpoints accept `student_key` or `keyed=1`, with `name` and `student_key` metadata in each student payload. Unique names retain the existing response keys; ambiguous name requests return HTTP 409 instead of overwriting data. Calendar feeds accept `?student_key=...`; name-based feeds require one active profile and include retired profiles only with the same nonempty mailbox identity.
+
 It should read primarily from SQLite rather than trigger unnecessary live eduVULCAN requests.
 
 Current deployment expects the service on port `8585`.
@@ -296,6 +302,8 @@ Current deployment expects the service on port `8585`.
 `ics.py` generates a lesson schedule feed with substitution information, refresh hints and a warning event when that student's schedule is stale. It does not generate exam or homework feeds. Event stamps use row `last_seen`, which advances on each successful upsert; it is not an actual modification timestamp.
 
 `calendar.py` separately synchronizes exams and homework to macOS Calendar using `osascript`. It stores macOS event UIDs in SQLite for subsequent updates and deletion. This integration requires macOS and should remain disabled in Linux Docker deployments (`CALENDAR_MAP` empty).
+
+Transient Calendar update/deletion failures retain UIDs for retry, including forced re-sync. Only successful deletion or explicitly confirmed event absence clears a UID. `CALENDAR_TIMEOUT_SECONDS` defaults to 30; timed-out/cancelled AppleScript processes are killed and reaped.
 
 Prefer stable event identifiers so that changed items update existing calendar events instead of generating duplicates.
 
@@ -334,6 +342,8 @@ Do not routinely delete or recreate it.
 ### `session.json`
 
 `session.json` remains useful as explicit application session state / cookie persistence.
+
+Session writes use a flushed temporary file in the same directory and atomic replacement, with mode 0600. Invalid JSON or session structure follows normal credential-backed recovery; without credentials, normal sync requests explicit manual authentication. Failed reads/writes preserve the previous file and never print its content.
 
 The current authentication implementation can bootstrap/import cookies from the stored session into the persistent browser context and save refreshed state after successful authentication.
 
@@ -689,6 +699,7 @@ Direct environment readers do not load `.env` themselves. Compose uses `env_file
 | `MQTT_ENABLED` | `Settings` | `false`. |
 | `MQTT_TOPIC_PREFIX`, `MQTT_STATUS_SUFFIX` | `Settings` | `school`, `status`. |
 | `CALENDAR_MAP` | `Settings` | Empty map disables macOS Calendar integration. |
+| `CALENDAR_TIMEOUT_SECONDS` | `Settings` | `30`; deadline per AppleScript operation, with child cleanup. |
 | `LLM_API_KEY` | `Settings` | Unset; AI summaries are optional. |
 | `EMAIL_ENABLED`, `EMAIL_AI_SUMMARY`, `EMAIL_INCLUDE_MESSAGE_BODIES` | `Settings` | All `false`; email, AI summary and message content require explicit opt-in. |
 | `SMTP_HOST`, `EMAIL_FROM`, `EMAIL_TO` | `Settings` | Empty; required for enabled email. Sender accepts a bare address or `Name <address>`; SMTP uses only the address. Recipients use a JSON array of bare addresses. |

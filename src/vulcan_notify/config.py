@@ -172,6 +172,7 @@ class Settings(BaseSettings):
     # Calendar (macOS Calendar via AppleScript, empty map = disabled)
     calendar_map: dict[str, str] = {}  # student name -> calendar name
     calendar_reminder_hours: int = 24  # alarm trigger (hours before event)
+    calendar_timeout_seconds: float = Field(default=30, gt=0)
 
     # MQTT (optional - publish changes to Mosquitto broker)
     mqtt_enabled: bool = False

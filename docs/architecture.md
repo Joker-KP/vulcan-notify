@@ -69,7 +69,7 @@ The CLI always follows the same six-phase pipeline:
 | Publish | `display.py`, `email.py`, `calendar.py`, `mqtt.py` | Fan-out | Print to terminal, queue + send SMTP digests, sync macOS Calendar events, enqueue + publish MQTT messages. |
 | Serve | `api.py` (separate process/command) | aiohttp app | Expose HTTP endpoints and iCalendar feeds over the same SQLite. |
 
-On first sync for a student, every item is treated as baseline: stored silently, no change events emitted. Only subsequent runs report diffs.
+Each student's grades, attendance, exams, homework and schedule has a successful-persistence baseline at `last_sync:<student>:<section>`. A section's first successful fetch stores history silently, including after another section already completed. Successful empty fetches initialize the marker; failures do not. `baseline_sections:<student>` initializes these markers once on upgrades: confirmed `last_success` timestamps are inherited when section history exists, while legacy installations without section history retain their student baseline. Past failures without recorded section outcomes cannot be reconstructed. No schema migration or manual database action is required.
 
 ## Modules
 
@@ -124,7 +124,7 @@ The full entity diagram (students + primary entities) is in the [README](../READ
 - **Messages** — keyed by `api_global_key`. Content is pulled lazily; the MQTT payload for a newly-appeared message includes the body once fetched.
 - **Schedule** — keyed by `(date, time_from, subject)`. Three independent change types are emitted: `substitution` (teacher/room swap), `cancellation` (annotation flag set), `addition` (is_extra lesson inserted).
 
-First sync for a student writes a `sync_state` marker and suppresses all changes, so new installs don't flood channels with backlog noise.
+Each section's first successful persistence writes its baseline marker and suppresses historical changes. Missing schedule lessons are compared over the full requested local date window, extended to include returned boundary dates, so disappearing first/last lesson days are detected.
 
 Praise/notes use `diff_remarks()` and a separate `last_sync:<student>:remarks`
 baseline, initialized only after successful fetching and persistence. This also
@@ -194,6 +194,8 @@ See [email configuration and limitations](email.md).
 ### macOS Calendar (`calendar.py`)
 
 Optional. Driven by `CALENDAR_MAP` (JSON dict: student name → macOS calendar name). For each new/updated exam and homework, AppleScript creates an all-day event with a reminder alarm (`CALENDAR_REMINDER_HOURS`). The macOS-assigned UID is stored back in the DB so subsequent syncs update in-place and soft-deletes remove the event. iCloud handles propagation to iPhone/iPad.
+
+Transient updates/deletions preserve UIDs for retry. Only successful deletion (including an already absent event) or explicitly confirmed absence during update clears the UID. Forced re-sync also preserves failed deletions. `CALENDAR_TIMEOUT_SECONDS` defaults to 30 seconds per operation; timeout/cancellation kills and reaps the child process. Confirmed missing active events are recreated on a later sync.
 
 ### MQTT (`mqtt.py` + `mqtt_outbox`)
 
@@ -298,6 +300,7 @@ Long-running aiohttp server on port 8585, reading the same SQLite the sync write
 | Route | Purpose |
 |-------|---------|
 | `GET /api/alive` | Pure liveness. 200 whenever the process is serving. |
+| `GET /api/students` | Active profiles keyed by stable student key, with name/class/school metadata. |
 | `GET /api/health` | Data freshness. **503 when stale or failed.** `?soft=1` forces 200. |
 | `GET /api/grades?n=` | Latest N grades plus diagnostics, per student. |
 | `GET /api/grades/average?student=&window=&period=` | Weighted rolling average. |
@@ -312,6 +315,8 @@ Long-running aiohttp server on port 8585, reading the same SQLite the sync write
 | `GET /calendar/<student>.ics` | Per-student iCalendar feed (see below). |
 
 All responses are JSON except the ICS feed.
+
+All student data endpoints accept either `student=<exact name>` or `student_key=<key>`. `keyed=1` returns all selected profiles keyed by their stable keys; supplying `student_key` also uses key-based output. Student payloads include `name` and `student_key`. Existing unique-name keys remain compatible. Ambiguous name-based responses return HTTP 409 with candidate keys rather than losing one student's data. Supplying both filters returns HTTP 400. Homework is ordered by its ISO source date, newest first, with ID as a deterministic tie-breaker.
 
 #### Freshness (`_meta`)
 
@@ -361,6 +366,8 @@ Freshness for student-filtered endpoints and calendar warnings uses that student
 
 `GET /calendar/<student>.ics` returns an RFC 5545 feed of the student's lesson schedule. Zero external deps — hand-rolled so it builds in any minimal container. Point a calendar client (iOS, macOS Calendar subscribe, Google Calendar "from URL", Thunderbird) at the URL for a self-updating timetable that reflects substitutions and cancellations.
 
+`?student_key=<key>` restricts the feed to that exact profile, including retired profiles. A name-based feed selects one active profile (ambiguous names return HTTP 409). Retired profiles are included only when their nonempty mailbox identity matches the selected profile; names alone never link their schedules. If mailbox identity is absent or changes across years, access old history with an explicit key.
+
 Three properties matter for a feed nobody actively checks:
 
 - **`DTSTAMP` comes from the row's `last_seen`**, which advances on successful upserts, rather than the request time. This stabilizes repeated feed requests between syncs; it does not track actual field modification time.
@@ -387,6 +394,8 @@ and forwards to Telegram.
 2. Every subsequent run loads the cookie jar and hits the API directly — no browser needed.
 3. If the client detects an HTML response (eduVulcan's expired-session sentinel) and credentials are available (from `.env` or the macOS Keychain service `vulcan-notify`), it restores persistent Chromium, imports stored cookies, tries browser reuse and then credential login, before retrying once. Docker supplies Xvfb for headed recovery; manual authentication remains explicit through the `vulcan-auth` profile.
 4. SSL uses certifi's bundled root store so it works inside minimal containers.
+
+Session writes flush/fsync a mode-0600 temporary file in the same directory before atomic replacement. Failed writes leave the previous session intact. JSON and structure validation raises a sanitized error; normal sync attempts existing credential-backed recovery, or asks for explicit manual authentication when credentials are unavailable. No browser starts merely to validate a corrupt file.
 
 ## Home Assistant integration
 

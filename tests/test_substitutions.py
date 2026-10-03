@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
+from vulcan_notify import sync as sync_mod
+from vulcan_notify.config import settings
 from vulcan_notify.differ import diff_schedule
 from vulcan_notify.models import Lesson, Student
 from vulcan_notify.sync import sync_student
@@ -182,3 +188,40 @@ async def test_sync_student_persists_and_reports(db: Database) -> None:
     assert result2.is_first_sync is False
     assert len(result2.new_substitutions) == 1
     assert result2.new_substitutions[0].change_type == "updated"
+
+
+@pytest.mark.parametrize("removed", [(0,), (2,), (0, 1, 2)])
+async def test_sync_cancels_missing_window_boundaries(db, monkeypatch, removed):
+    now = datetime(2026, 10, 3, 12, tzinfo=settings.timezone)
+    clock = MagicMock(wraps=datetime)
+    clock.now.return_value = now
+    monkeypatch.setattr(sync_mod, "datetime", clock)
+    client = AsyncMock()
+    client.student_portal_url = MagicMock(return_value=None)
+    for method in ("get_periods", "get_attendance", "get_exams", "get_homework", "get_remarks"):
+        getattr(client, method).return_value = []
+
+    def lesson(days):
+        date = (now + timedelta(days=days)).strftime("%Y-%m-%d")
+        return replace(
+            make_lesson(),
+            date=date,
+            time_from=f"{date}T08:00:00+02:00",
+            time_to=f"{date}T08:45:00+02:00",
+        )
+
+    fetched = [lesson(days) for days in (-7, 0, 14)]
+    client.get_schedule.return_value = fetched
+    await sync_student(client, db, STUDENT)
+    outside = [lesson(-8), lesson(15)]
+    for item in outside:
+        await db.upsert_lesson(STUDENT.key, item)
+    await db.commit()
+
+    client.get_schedule.return_value = [item for i, item in enumerate(fetched) if i not in removed]
+    result = await sync_student(client, db, STUDENT)
+    assert len(result.new_substitutions) == len(removed)
+    assert all(change.item_type == "cancellation" for change in result.new_substitutions)
+    rows = await db.get_lessons_for_student(STUDENT.key)
+    assert {item.date for item in outside}.issubset({row["date"] for row in rows})
+    assert (await sync_student(client, db, STUDENT)).new_substitutions == []

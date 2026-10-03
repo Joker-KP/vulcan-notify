@@ -10,6 +10,7 @@ import os
 import platform
 import ssl
 import subprocess
+import tempfile
 import time
 from contextlib import contextmanager, suppress
 from pathlib import Path
@@ -30,6 +31,32 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 logger = logging.getLogger(__name__)
+
+
+class InvalidSessionError(ValueError):
+    """Saved session cannot be safely reused; never includes private file data."""
+
+
+def _write_session(session_path: Path, session_data: dict[str, Any]) -> None:
+    """Replace session state atomically, keeping the previous file on failure."""
+    session_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=session_path.parent,
+            prefix=f".{session_path.name}.",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            json.dump(session_data, handle, indent=2, default=str)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, session_path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 KEYCHAIN_SERVICE = "vulcan-notify"
@@ -914,19 +941,7 @@ async def _save_current_session(
         "dashboard_url": dashboard_url,
     }
 
-    session_path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    session_path.write_text(
-        json.dumps(
-            session_data,
-            indent=2,
-            default=str,
-        ),
-        encoding="utf-8",
-    )
+    _write_session(session_path, session_data)
 
     logger.info(
         "Auth: session saved to %s (tenant=%s, cookies=%d)",
@@ -1302,7 +1317,32 @@ def load_session(
             f"No session file at {session_path}. Run 'vulcan-notify auth' first."
         )
 
-    data: dict[str, Any] = json.loads(session_path.read_text(encoding="utf-8"))
+    try:
+        data = json.loads(session_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise InvalidSessionError("Saved session is invalid; authentication required") from None
+    if not isinstance(data, dict) or not isinstance(data.get("base_url"), str):
+        raise InvalidSessionError("Saved session has invalid structure; authentication required")
+    try:
+        url = urlparse(data["base_url"])
+    except ValueError:
+        raise InvalidSessionError(
+            "Saved session has invalid structure; authentication required"
+        ) from None
+    cookies = data.get("cookies")
+    if (
+        url.scheme != "https"
+        or not url.hostname
+        or url.username
+        or url.password
+        or not isinstance(cookies, list)
+        or any(
+            not isinstance(cookie, dict)
+            or any(not isinstance(cookie.get(key), str) for key in ("name", "value", "domain"))
+            for cookie in cookies
+        )
+    ):
+        raise InvalidSessionError("Saved session has invalid structure; authentication required")
     return data
 
 

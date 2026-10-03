@@ -212,3 +212,88 @@ async def test_degraded_sync_publishes_successful_changes_then_exits_nonzero(mon
     with pytest.raises(SystemExit, match="1"):
         await cli.cmd_sync()
     publish.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        '{"private":',
+        "[]",
+        "{}",
+        '{"base_url": 1, "cookies": []}',
+        '{"base_url": "https://example.test", "cookies": {}}',
+        '{"base_url": "https://example.test", "cookies": [{"name": "private-value"}]}',
+        '{"base_url": "https://example.test", "cookies": [null]}',
+        '{"base_url": "https://[invalid", "cookies": []}',
+    ],
+)
+def test_invalid_session_files_have_safe_errors(tmp_path, content):
+    path = tmp_path / "session.json"
+    path.write_text(content)
+    with pytest.raises(auth.InvalidSessionError) as failure:
+        auth.load_session(path)
+    assert "private-value" not in str(failure.value)
+    assert path.read_text() == content
+
+
+def test_atomic_session_replacement_is_private_and_loadable(tmp_path):
+    path = tmp_path / "session.json"
+    path.write_text("old state")
+    path.chmod(0o644)
+    session = {
+        "base_url": "https://example.test",
+        "cookies": [{"name": "fixture", "value": "fixture", "domain": "example.test"}],
+    }
+    auth._write_session(path, session)
+    assert auth.load_session(path) == session
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert list(tmp_path.iterdir()) == [path]
+
+
+@pytest.mark.parametrize("operation", ["replace", "fsync"])
+def test_failed_atomic_session_write_preserves_previous_file(tmp_path, monkeypatch, operation):
+    path = tmp_path / "session.json"
+    original = '{"base_url": "https://example.test", "cookies": []}'
+    path.write_text(original)
+    monkeypatch.setattr(auth.os, operation, MagicMock(side_effect=OSError("fixture failure")))
+    with pytest.raises(OSError):
+        auth._write_session(path, {"base_url": "https://example.test", "cookies": []})
+    assert path.read_text() == original
+    assert list(tmp_path.iterdir()) == [path]
+
+
+@pytest.mark.parametrize("credentials", [None, ("fixture", "fixture")])
+async def test_corrupt_session_uses_existing_recovery_policy(
+    tmp_path, monkeypatch, credentials, capsys
+):
+    path = tmp_path / "session.json"
+    path.write_text('{"private-value":')
+    monkeypatch.setattr(cli.settings, "session_file", path)
+    monkeypatch.setattr(cli, "_get_credentials", MagicMock(return_value=credentials))
+    recovery = AsyncMock(return_value={"recovered": True})
+    monkeypatch.setattr(cli, "_recover_session", recovery)
+    interactive = AsyncMock()
+    monkeypatch.setattr(cli, "login_and_save_session", interactive)
+    if credentials:
+        assert await cli._ensure_session() == {"recovered": True}
+        recovery.assert_awaited_once_with(*credentials)
+    else:
+        with pytest.raises(SystemExit, match="1"):
+            await cli._ensure_session()
+        recovery.assert_not_awaited()
+    assert "private-value" not in capsys.readouterr().out
+    interactive.assert_not_awaited()
+    assert path.read_text() == '{"private-value":'
+
+
+async def test_test_command_handles_corrupt_session_without_traceback(
+    tmp_path, monkeypatch, capsys
+):
+    path = tmp_path / "session.json"
+    path.write_text("private-value")
+    monkeypatch.setattr(cli.settings, "session_file", path)
+    with pytest.raises(SystemExit, match="1"):
+        await cli.cmd_test()
+    output = capsys.readouterr().out
+    assert "vulcan-notify auth" in output
+    assert "private-value" not in output

@@ -1,14 +1,20 @@
 """Integration tests for the sync pipeline."""
 
+from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
+from vulcan_notify.client import VulcanFetchError
 from vulcan_notify.db import Database
 from vulcan_notify.models import (
+    AttendanceEntry,
     ClassificationPeriod,
     DashboardData,
     Exam,
     Grade,
     Homework,
+    Lesson,
     Message,
     Student,
 )
@@ -229,3 +235,103 @@ async def test_reauthentication_carries_changes_persisted_before_expiry(db: Data
     retry = await sync_all(_make_mock_client(grades=[GRADE]), db)
     assert retry.notification_id == "sync:3"
     assert retry.student_results[0].new_grades == []
+
+
+@pytest.mark.parametrize(
+    "section,method,field",
+    [
+        ("grades", "get_grades_and_summaries", "new_grades"),
+        ("attendance", "get_attendance", "new_attendance"),
+        ("exams", "get_exams", "new_exams"),
+        ("homework", "get_homework", "new_homework"),
+        ("schedule", "get_schedule", "new_substitutions"),
+    ],
+)
+async def test_failed_first_section_baselines_on_recovery(db, section, method, field):
+    client = _make_mock_client()
+    getattr(client, method).side_effect = VulcanFetchError("temporary failure")
+    initial = await sync_all(client, db)
+    assert section in initial.student_results[0].failed_sections
+    assert await db.get_state(f"last_sync:KEYA:{section}") is None
+
+    historical = {
+        "grades": ([GRADE], []),
+        "attendance": [AttendanceEntry(1, 2, "2026-03-16", "Math", "T", "", "")],
+        "exams": [EXAM],
+        "homework": [HOMEWORK],
+        "schedule": [
+            Lesson(
+                "2026-03-16",
+                "2026-03-16T08:00:00+01:00",
+                "2026-03-16T08:45:00+01:00",
+                "Math",
+                "T",
+                "",
+                None,
+                1,
+                False,
+                sub_teacher="Sub",
+            )
+        ],
+    }[section]
+    getattr(client, method).side_effect = None
+    getattr(client, method).return_value = historical
+    recovered = await sync_all(client, db)
+    assert getattr(recovered.student_results[0], field) == []
+    assert await db.get_state(f"last_sync:KEYA:{section}") is not None
+    # Successful categories continue reporting while the failed one baselines.
+    if section != "exams":
+        client.get_exams.return_value = [EXAM]
+    else:
+        client.get_grades_and_summaries.return_value = ([GRADE], [])
+    subsequent = await sync_all(client, db)
+    assert subsequent.student_results[0].has_changes
+
+
+async def test_standalone_failed_first_section_keeps_baseline_after_reopening(db):
+    client = _make_mock_client()
+    client.get_attendance.side_effect = VulcanFetchError("temporary failure")
+    await sync_student(client, db, STUDENT_A)
+    await db.close()
+    await db.connect()
+    client.get_attendance.side_effect = None
+    client.get_attendance.return_value = [AttendanceEntry(1, 2, "2026-03-16", "Math", "T", "", "")]
+    assert (await sync_student(client, db, STUDENT_A)).new_attendance == []
+
+
+@pytest.mark.parametrize("tracked_failure", [False, True])
+async def test_baseline_upgrade_preserves_legacy_success_and_tracked_failure(db, tracked_failure):
+    await db.upsert_student(STUDENT_A)
+    await db.set_state("last_sync:KEYA", "2026-03-01T00:00:00+00:00")
+    if tracked_failure:
+        run = await db.create_sync_run()
+        await db.record_section(run, "grades", "failed", student_key="KEYA")
+        await db.record_section(run, "exams", "ok", student_key="KEYA")
+    await db.commit()
+    result = await sync_student(_make_mock_client(grades=[GRADE], exams=[EXAM]), db, STUDENT_A)
+    assert bool(result.new_grades) is not tracked_failure
+    assert len(result.new_exams) == 1
+
+
+async def test_successful_empty_baseline_notifies_later_records(db):
+    await sync_all(_make_mock_client(), db)
+    result = await sync_all(_make_mock_client(grades=[replace(GRADE, column_id=101)]), db)
+    assert len(result.student_results[0].new_grades) == 1
+
+
+async def test_failed_section_commit_does_not_initialize_baseline(db, monkeypatch):
+    record = db.record_section
+
+    async def fail_grades_commit(run_id, section, status, **kwargs):
+        if section == "grades" and status == "ok":
+            raise RuntimeError("fixture commit failure")
+        await record(run_id, section, status, **kwargs)
+
+    monkeypatch.setattr(db, "record_section", fail_grades_commit)
+    result = await sync_all(_make_mock_client(grades=[GRADE]), db)
+    assert "grades" in result.student_results[0].failed_sections
+    assert await db.get_state("last_sync:KEYA:grades") is None
+    assert await db.get_grades_for_student("KEYA") == []
+    monkeypatch.setattr(db, "record_section", record)
+    recovered = await sync_all(_make_mock_client(grades=[GRADE]), db)
+    assert recovered.student_results[0].new_grades == []

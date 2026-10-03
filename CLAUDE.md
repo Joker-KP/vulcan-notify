@@ -55,6 +55,12 @@ The tool follows a linear pipeline: **Auth -> Client -> Sync -> Diff -> Display*
 
 - `sync.py` - `sync_all()` orchestrates per-student sync: fetch data via client, diff against stored state, upsert into database. Returns `SyncResult` per student. First sync stores baseline without reporting changes. Praise/notes also use their own successful-fetch baseline (`last_sync:<student>:remarks`) for upgrades, with new-ID events and silent updates/soft deletes.
 
+  Grades, attendance, exams, homework and schedule now also have independent successful-section baselines. Failed initial sections baseline silently on recovery. Legacy initialization preserves prior confirmed successes (or the student marker when no section history exists). Schedule comparison covers the full requested local window, including missing boundary days.
+
+- `api.py` - `/api/students` discovers stable profile keys. Student endpoints support `student_key` and `keyed=1`; unique-name response keys remain compatible, while ambiguous names return HTTP 409. Calendar feeds accept explicit profile keys; historical profile merging requires a matching nonempty mailbox identity.
+
+- Session writes are atomic and mode 0600. Invalid session files use the existing recovery policy without exposing file contents. Calendar transient failures preserve stored UIDs for retry; `CALENDAR_TIMEOUT_SECONDS` bounds AppleScript and kills/reaps timed-out or cancelled processes.
+
 - `differ.py` - Compares fetched API data against stored database rows. `diff_grades()` detects new/updated grades by column_id. `diff_attendance()` detects new records by (date, lesson_number). Returns `Change` dataclasses.
 
 - `display.py` - Formats `SyncResult` for terminal output with ANSI colors (auto-disabled when piped). Groups by student, then by data type.

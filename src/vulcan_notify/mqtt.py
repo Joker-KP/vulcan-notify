@@ -237,7 +237,7 @@ async def drain_outbox(db: Database) -> tuple[int, int]:
         ) as client:
             for item in queue:
                 await client.publish(str(item["topic"]), str(item["payload"]))
-                published_ids.append(int(item["id"]))
+                published_ids.append(item["id"])
                 logger.debug("MQTT publish: %s", item["topic"])
 
             pending_after = len(queue) - len(published_ids)
@@ -248,7 +248,7 @@ async def drain_outbox(db: Database) -> tuple[int, int]:
                 retain=True,
             )
     except Exception as exc:
-        failed_ids = [int(i["id"]) for i in queue if int(i["id"]) not in published_ids]
+        failed_ids = [i["id"] for i in queue if i["id"] not in published_ids]
         if failed_ids:
             await db.mark_mqtt_outbox_failure(failed_ids, f"{type(exc).__name__}: {exc}")
         logger.warning(

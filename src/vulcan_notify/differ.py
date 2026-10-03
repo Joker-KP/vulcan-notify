@@ -244,7 +244,9 @@ async def diff_schedule(
     if date_to is None:
         date_to = max((lsn.date for lsn in fetched), default=None)
     stored_rows = await db.get_lessons_for_student(student.key, date_from, date_to)
-    stored_by_key = {(r["date"], r["time_from"], r["subject"]): r for r in stored_rows}
+    stored_by_key = {
+        (str(r["date"]), str(r["time_from"]), str(r["subject"])): r for r in stored_rows
+    }
     fetched_keys = {(lsn.date, lsn.time_from, lsn.subject) for lsn in fetched}
     changes: list[Change] = []
 

@@ -1,12 +1,12 @@
 """Entry point for vulcan-notify service."""
 
 import asyncio
-import contextlib
 import logging
 import sys
 from typing import Any
 
 from vulcan_notify.auth import (
+    InvalidSessionError,
     auto_login,
     get_keychain_credentials,
     load_session,
@@ -41,7 +41,11 @@ async def cmd_auth() -> None:
 
 async def cmd_test() -> None:
     """Test if saved session is still valid."""
-    session = load_session(settings.session_file)
+    try:
+        session = load_session(settings.session_file)
+    except (FileNotFoundError, InvalidSessionError):
+        print("No usable session. Run 'vulcan-notify auth' to authenticate.")
+        sys.exit(1)
     valid = await test_session(session)
     if not valid:
         print("Session expired. Run 'vulcan-notify auth' to re-authenticate.")
@@ -75,6 +79,9 @@ async def _ensure_session() -> dict[str, Any]:
         session = load_session(settings.session_file)
     except FileNotFoundError:
         session = None
+    except InvalidSessionError:
+        logger.warning("Saved session is invalid; authentication required")
+        session = None
 
     if session and await test_session(session):
         return session
@@ -86,7 +93,7 @@ async def _ensure_session() -> dict[str, Any]:
         return await _recover_session(creds[0], creds[1])
 
     if session is None:
-        print("No session file. Run 'vulcan-notify auth' to authenticate.")
+        print("No usable session. Run 'vulcan-notify auth' to authenticate.")
     else:
         print("Session expired. Run 'vulcan-notify auth' to re-authenticate.")
     print(
@@ -260,10 +267,16 @@ async def cmd_calendar() -> None:
             for table in ("exams", "homework"):
                 for item in items[table]:
                     if item["calendar_uid"]:
-                        with contextlib.suppress(Exception):
+                        try:
                             await _delete_event(calendar_name, str(item["calendar_uid"]))
-
-        await db.clear_all_calendar_uids()
+                        except Exception as exc:
+                            logger.warning(
+                                "Calendar deletion failed (%s); retaining UID for retry",
+                                type(exc).__name__,
+                            )
+                        else:
+                            await db.clear_calendar_uid(table, int(str(item["id"])))
+        await db.commit()
 
         # Re-create all events
         print("Creating calendar events...")

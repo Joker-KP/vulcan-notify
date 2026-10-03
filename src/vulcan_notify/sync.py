@@ -27,6 +27,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_STUDENT_SECTIONS = ("grades", "attendance", "exams", "homework", "schedule")
+
 
 def _api_date_window(now: datetime, days_past: int, days_future: int) -> tuple[str, str]:
     """Serialize full local days as UTC instants, respecting DST at each bound."""
@@ -123,17 +125,48 @@ async def sync_student(
 
     # Check if this is the first sync for this student
     last_sync = await db.get_state(f"last_sync:{student.key}")
-    is_first = last_sync is None
+    # Initialize once so a failed first fetch cannot inherit the student marker
+    # on the next run. Old installations with no section history retain their
+    # existing baseline; tracked installations inherit only confirmed successes.
+    initialized = f"baseline_sections:{student.key}"
+    if await db.get_state(initialized) is None:
+        if last_sync is not None:
+            cursor = await db.db.execute(
+                "SELECT 1 FROM sync_sections WHERE student_key = ? LIMIT 1", (student.key,)
+            )
+            legacy = await cursor.fetchone() is None
+            for section in _STUDENT_SECTIONS:
+                successful = await db.get_state(f"last_success:{student.key}:{section}")
+                if legacy or successful is not None:
+                    await db.set_state(
+                        f"last_sync:{student.key}:{section}", successful or last_sync
+                    )
+        await db.set_state(initialized, "1")
+        await db.commit()
+    first_sections = {
+        section: await db.get_state(f"last_sync:{student.key}:{section}") is None
+        for section in _STUDENT_SECTIONS
+    }
+    is_first = last_sync is None and all(first_sections.values())
 
     result = SyncResult(
         student=student, is_first_sync=is_first, portal_url=client.student_portal_url(student)
     )
 
     async def section_ok(section: str, item_count: int) -> None:
-        if run_id is not None:
-            await db.record_section(
-                run_id, section, "ok", student_key=student.key, item_count=item_count
-            )
+        try:
+            await db.set_state(f"last_sync:{student.key}:{section}", datetime.now(UTC).isoformat())
+            if run_id is not None:
+                await db.record_section(
+                    run_id, section, "ok", student_key=student.key, item_count=item_count
+                )
+            else:
+                await db.commit()
+        except Exception:
+            # Failed commits must not leave a ready marker for section_failed()
+            # to accidentally commit when it records the failure.
+            await db.db.rollback()
+            raise
 
     async def section_failed(section: str, exc: Exception) -> None:
         detail = f"{type(exc).__name__}: {exc}"[:500]
@@ -176,7 +209,7 @@ async def sync_student(
                 await db.upsert_subject_summary(student.key, summary)
 
         deduplicated = list(all_grades.values())
-        if not is_first:
+        if not first_sections["grades"]:
             result.new_grades.extend(await diff_grades(student, deduplicated, db))
 
         for grade in deduplicated:
@@ -192,7 +225,7 @@ async def sync_student(
 
         attendance = await client.get_attendance(student, date_from, date_to)
 
-        if not is_first:
+        if not first_sections["attendance"]:
             result.new_attendance = await diff_attendance(student, attendance, db)
 
         for entry in attendance:
@@ -206,7 +239,7 @@ async def sync_student(
         exams = await client.get_exams(student)
         stored_exam_ids = await db.get_exam_ids_for_student(student.key)
 
-        if not is_first:
+        if not first_sections["exams"]:
             result.new_exams = await diff_exams(student, exams, db)
 
         for exam in exams:
@@ -231,7 +264,7 @@ async def sync_student(
                     logger.debug("Failed to fetch exam detail for %d", exam.id)
 
         # Mark exams no longer returned by API as soft-deleted
-        if not is_first:
+        if not first_sections["exams"]:
             deleted = await db.mark_missing(student.key, "exams", {e.id for e in exams})
             if deleted:
                 logger.info("Soft-deleted %d exams for %s", deleted, student.name)
@@ -244,7 +277,7 @@ async def sync_student(
         homework = await client.get_homework(student)
         stored_hw_ids = await db.get_homework_ids_for_student(student.key)
 
-        if not is_first:
+        if not first_sections["homework"]:
             result.new_homework = await diff_homework(student, homework, db)
 
         for hw in homework:
@@ -269,7 +302,7 @@ async def sync_student(
                     logger.debug("Failed to fetch homework detail for %d", hw.id)
 
         # Mark homework no longer returned by API as soft-deleted
-        if not is_first:
+        if not first_sections["homework"]:
             deleted = await db.mark_missing(student.key, "homework", {h.id for h in homework})
             if deleted:
                 logger.info("Soft-deleted %d homework for %s", deleted, student.name)
@@ -285,17 +318,13 @@ async def sync_student(
 
         lessons = await client.get_schedule(student, date_from_api, date_to_api)
 
-        # Anchor the diff window to the fetched lessons' actual local-date range
-        # so that timezone drift in the UTC API window doesn't park a lesson
-        # outside the DB lookup and resurrect it as "new" on every sync.
-        if lessons:
-            date_from_local = min(lesson.date for lesson in lessons)
-            date_to_local = max(lesson.date for lesson in lessons)
-        else:
-            date_from_local = (now - timedelta(days=7)).strftime("%Y-%m-%d")
-            date_to_local = (now + timedelta(days=14)).strftime("%Y-%m-%d")
+        # Include the full requested window, even when its boundary days vanish.
+        # Extend it for returned boundary dates to retain timezone-drift tolerance.
+        dates = [lesson.date for lesson in lessons]
+        date_from_local = min([(now - timedelta(days=7)).strftime("%Y-%m-%d"), *dates])
+        date_to_local = max([(now + timedelta(days=14)).strftime("%Y-%m-%d"), *dates])
 
-        if not is_first:
+        if not first_sections["schedule"]:
             result.new_substitutions = await diff_schedule(
                 student, lessons, db, date_from_local, date_to_local
             )

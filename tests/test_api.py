@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
+from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
 
 if TYPE_CHECKING:
@@ -82,13 +83,28 @@ async def rollover_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     await database.connect()
     for key, class_name in (("OLD", "4E"), ("NEW", "5E")):
         await database.upsert_student(
-            Student(key=key, name="Solomiia", class_name=class_name, school="Sz", diary_id=1,
-                    mailbox_key=None),
+            Student(
+                key=key,
+                name="Solomiia",
+                class_name=class_name,
+                school="Sz",
+                diary_id=1,
+                mailbox_key="pupil-mailbox",
+            ),
         )
     await database.upsert_grade(
         "OLD",
-        Grade(column_id=1, value="5", date="10.05.2026", subject="Math", column_name="Test",
-              category="1", weight=1, teacher="T", changed_since_login=False),
+        Grade(
+            column_id=1,
+            value="5",
+            date="10.05.2026",
+            subject="Math",
+            column_name="Test",
+            category="1",
+            weight=1,
+            teacher="T",
+            changed_since_login=False,
+        ),
     )
 
     today = datetime.now()
@@ -130,7 +146,7 @@ async def test_retired_year_grades_are_still_on_disk(rollover_db: Path) -> None:
 
 
 async def test_ics_feed_still_spans_both_keys(rollover_db: Path) -> None:
-    """The calendar window straddles September, so it must ignore the active flag."""
+    """A shared mailbox identity safely links profiles across a school year."""
     await _retire_old(rollover_db)
 
     _key, lessons = api_mod._get_lessons_for_ics("Solomiia", 30, 60)
@@ -212,8 +228,12 @@ async def db_with_improvements(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     await database.connect()
     await database.upsert_student(
         Student(
-            key="S1", name="Solomiia", class_name="4E", school="Sz",
-            diary_id=1, mailbox_key=None,
+            key="S1",
+            name="Solomiia",
+            class_name="4E",
+            school="Sz",
+            diary_id=1,
+            mailbox_key=None,
         ),
     )
     await database.upsert_classification_period("S1", 100, 1, "2025-09-01", "2026-01-31")
@@ -224,27 +244,77 @@ async def db_with_improvements(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     #   superseded_by_grade_id=999, current improvement (5-) goes through.
     grades = [
         # Okres 1
-        Grade(column_id=101, value="3", date="15.10.2025", subject="Math",
-              column_name="kartkówka", category="Kartkówka", weight=1, teacher="T",
-              changed_since_login=False, period_id=100, superseded_by_grade_id=None),
-        Grade(column_id=102, value="2", date="20.12.2025", subject="Math",
-              column_name="sprawdzian", category="Sprawdzian", weight=1, teacher="T",
-              changed_since_login=False, period_id=100, superseded_by_grade_id=None),
+        Grade(
+            column_id=101,
+            value="3",
+            date="15.10.2025",
+            subject="Math",
+            column_name="kartkówka",
+            category="Kartkówka",
+            weight=1,
+            teacher="T",
+            changed_since_login=False,
+            period_id=100,
+            superseded_by_grade_id=None,
+        ),
+        Grade(
+            column_id=102,
+            value="2",
+            date="20.12.2025",
+            subject="Math",
+            column_name="sprawdzian",
+            category="Sprawdzian",
+            weight=1,
+            teacher="T",
+            changed_since_login=False,
+            period_id=100,
+            superseded_by_grade_id=None,
+        ),
         # Okres 2: only the improvement (5-) lands in DB; original (3+) is what
         # sync drops because the PK conflict prefers the row WITHOUT superseded.
         # We still seed both to verify the API-side guard.
-        Grade(column_id=202, value="5-", date="15.04.2026", subject="Math",
-              column_name="sprawdzian poprawa", category="Sprawdzian", weight=1, teacher="T",
-              changed_since_login=False, period_id=200, superseded_by_grade_id=None),
+        Grade(
+            column_id=202,
+            value="5-",
+            date="15.04.2026",
+            subject="Math",
+            column_name="sprawdzian poprawa",
+            category="Sprawdzian",
+            weight=1,
+            teacher="T",
+            changed_since_login=False,
+            period_id=200,
+            superseded_by_grade_id=None,
+        ),
         # Simulate a stale 'original' row that somehow survived — should be
         # excluded by the superseded guard, not double-counted with the improvement.
-        Grade(column_id=203, value="3+", date="01.04.2026", subject="Math",
-              column_name="sprawdzian (original)", category="Sprawdzian", weight=1, teacher="T",
-              changed_since_login=False, period_id=200, superseded_by_grade_id=999),
+        Grade(
+            column_id=203,
+            value="3+",
+            date="01.04.2026",
+            subject="Math",
+            column_name="sprawdzian (original)",
+            category="Sprawdzian",
+            weight=1,
+            teacher="T",
+            changed_since_login=False,
+            period_id=200,
+            superseded_by_grade_id=999,
+        ),
         # Plus a clean Okres 2 row
-        Grade(column_id=204, value="4", date="20.04.2026", subject="Math",
-              column_name="kartkówka", category="Kartkówka", weight=1, teacher="T",
-              changed_since_login=False, period_id=200, superseded_by_grade_id=None),
+        Grade(
+            column_id=204,
+            value="4",
+            date="20.04.2026",
+            subject="Math",
+            column_name="kartkówka",
+            category="Kartkówka",
+            weight=1,
+            teacher="T",
+            changed_since_login=False,
+            period_id=200,
+            superseded_by_grade_id=None,
+        ),
     ]
     for g in grades:
         await database.upsert_grade("S1", g)
@@ -310,8 +380,9 @@ async def db_with_summaries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     database = Database(db_path)
     await database.connect()
     await database.upsert_student(
-        Student(key="S1", name="Solomiia", class_name="4E", school="Sz",
-                diary_id=1, mailbox_key=None),
+        Student(
+            key="S1", name="Solomiia", class_name="4E", school="Sz", diary_id=1, mailbox_key=None
+        ),
     )
     await database.upsert_classification_period("S1", 100, 1, "2025-09-01", "2026-01-31")
     await database.upsert_classification_period("S1", 200, 2, "2026-02-01", "2026-06-30")
@@ -319,15 +390,25 @@ async def db_with_summaries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     for subj, final in [("Matematyka", "3"), ("Język polski", "4"), ("Plastyka", "6")]:
         await database.upsert_subject_summary(
             "S1",
-            SubjectSummary(subject=subj, period_id=100, final_grade=final,
-                          proposed_final_grade=None, use_weighted_average=True),
+            SubjectSummary(
+                subject=subj,
+                period_id=100,
+                final_grade=final,
+                proposed_final_grade=None,
+                use_weighted_average=True,
+            ),
         )
     # Okres 2: finals blank, one proposed
     for subj, prop in [("Matematyka", None), ("Język polski", None), ("Plastyka", "5+")]:
         await database.upsert_subject_summary(
             "S1",
-            SubjectSummary(subject=subj, period_id=200, final_grade=None,
-                          proposed_final_grade=prop, use_weighted_average=True),
+            SubjectSummary(
+                subject=subj,
+                period_id=200,
+                final_grade=None,
+                proposed_final_grade=prop,
+                use_weighted_average=True,
+            ),
         )
     await database.db.commit()
     await database.close()
@@ -384,8 +465,12 @@ async def seeded_exams_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pa
     for key, name in (("S1", "Yarema"), ("S2", "Solomiia")):
         await database.upsert_student(
             Student(
-                key=key, name=name, class_name="3A", school="Sz",
-                diary_id=1, mailbox_key=None,
+                key=key,
+                name=name,
+                class_name="3A",
+                school="Sz",
+                diary_id=1,
+                mailbox_key=None,
             ),
         )
 
@@ -403,8 +488,7 @@ async def seeded_exams_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pa
     for key, eid, date, subject, etype, desc, teacher in exams:
         await database.upsert_exam(
             key,
-            Exam(id=eid, date=date, subject=subject, type=etype,
-                 description=desc, teacher=teacher),
+            Exam(id=eid, date=date, subject=subject, type=etype, description=desc, teacher=teacher),
         )
     await database.db.commit()
     await database.close()
@@ -459,8 +543,9 @@ async def seeded_diag_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pat
     database = Database(db_path)
     await database.connect()
     await database.upsert_student(
-        Student(key="S1", name="Solomiia", class_name="4E", school="Sz",
-                diary_id=1, mailbox_key=None),
+        Student(
+            key="S1", name="Solomiia", class_name="4E", school="Sz", diary_id=1, mailbox_key=None
+        ),
     )
     today = datetime.now().strftime("%d.%m.%Y")
     long_ago = (datetime.now() - timedelta(days=400)).strftime("%d.%m.%Y")
@@ -473,9 +558,17 @@ async def seeded_diag_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pat
     for date, value, weight, col_id, subj in grades:
         await database.upsert_grade(
             "S1",
-            Grade(column_id=col_id, value=value, date=date, subject=subj,
-                  column_name="t", category="c", weight=weight, teacher="T",
-                  changed_since_login=False),
+            Grade(
+                column_id=col_id,
+                value=value,
+                date=date,
+                subject=subj,
+                column_name="t",
+                category="c",
+                weight=weight,
+                teacher="T",
+                changed_since_login=False,
+            ),
         )
     await database.db.commit()
     await database.close()
@@ -562,3 +655,140 @@ async def test_calendar_freshness_is_scoped_to_its_student(seeded_exams_db: Path
     )
     assert b"School sync" not in fresh.body
     assert b"School sync" in stale.body
+
+
+@pytest.fixture
+async def duplicate_names_db(seeded_db):
+    database = Database(seeded_db)
+    await database.connect()
+    try:
+        await database.upsert_student(Student("S2", "Solomiia", "2B", "Other School", 2, "other"))
+        await database.upsert_grade(
+            "S2", Grade(900, "6", "01.01.2026", "Science", "Test", "", 1, "T", False)
+        )
+        await database.commit()
+    finally:
+        await database.close()
+    return seeded_db
+
+
+@pytest.mark.parametrize(
+    "reader",
+    [
+        api_mod._get_grades,
+        api_mod._get_homework,
+        api_mod._get_exams,
+        api_mod._get_grade_averages,
+        api_mod._get_monthly_averages,
+        api_mod._get_subject_averages,
+        api_mod._get_subject_summaries,
+        api_mod._get_schedule,
+        api_mod._get_remarks,
+    ],
+)
+async def test_duplicate_names_require_keys_and_preserve_both_students(duplicate_names_db, reader):
+    with pytest.raises(web.HTTPConflict) as failure:
+        reader()
+    assert failure.value.status == 409
+    assert {s["student_key"] for s in json.loads(failure.value.text)["students"]} == {"S1", "S2"}
+    with pytest.raises(web.HTTPConflict):
+        reader(student_filter="Solomiia")
+    keyed = reader(keyed=True)
+    assert set(keyed) == {"S1", "S2"}
+    assert keyed["S1"]["name"] == keyed["S2"]["name"] == "Solomiia"
+    assert reader(student_key="S2") == {"S2": keyed["S2"]}
+    with pytest.raises(web.HTTPBadRequest):
+        reader(student_filter="Solomiia", student_key="S2")
+
+
+async def test_keyed_grade_results_keep_student_data_separate(duplicate_names_db):
+    result = api_mod._get_grades(keyed=True)
+    assert all(grade["subject"] == "Math" for grade in result["S1"]["grades"])
+    assert result["S2"]["grades"][0]["subject"] == "Science"
+
+
+@pytest.mark.parametrize(
+    "path,handler",
+    [
+        ("/api/grades", api_mod.handle_grades),
+        ("/api/homework", api_mod.handle_homework),
+        ("/api/exams", api_mod.handle_exams),
+        ("/api/grades/average", api_mod.handle_grades_average),
+        ("/api/grades/monthly", api_mod.handle_grades_monthly),
+        ("/api/grades/by-subject", api_mod.handle_grades_by_subject),
+        ("/api/grades/summary", api_mod.handle_grades_summary),
+        ("/api/schedule", api_mod.handle_schedule),
+        ("/api/remarks", api_mod.handle_remarks),
+    ],
+)
+async def test_handlers_accept_student_keys_and_scope_metadata(duplicate_names_db, path, handler):
+    database = Database(duplicate_names_db)
+    await database.connect()
+    try:
+        run = await database.create_sync_run()
+        for section in ("grades", "homework", "exams", "schedule", "remarks"):
+            await database.record_section(run, section, "ok", student_key="S2")
+    finally:
+        await database.close()
+    response = await handler(make_mocked_request("GET", path + "?student_key=S2"))
+    body = json.loads(response.text)
+    assert set(body) == {"_meta", "S2"}
+    assert body["_meta"]["stale"] is False
+    all_students = await handler(make_mocked_request("GET", path + "?keyed=1"))
+    assert set(json.loads(all_students.text)) == {"_meta", "S1", "S2"}
+
+
+async def test_student_roster_supports_duplicate_names(duplicate_names_db):
+    response = await api_mod.handle_students(make_mocked_request("GET", "/api/students"))
+    body = json.loads(response.text)
+    assert set(body) == {"S1", "S2"}
+    assert body["S2"]["school"] == "Other School"
+
+
+async def test_calendar_never_merges_duplicate_names(duplicate_names_db):
+    with pytest.raises(web.HTTPConflict):
+        api_mod._get_lessons_for_ics("Solomiia", 30, 60)
+    assert api_mod._get_lessons_for_ics("Solomiia", 30, 60, student_key="S2") == ("S2", [])
+    response = await api_mod.handle_calendar(
+        make_mocked_request(
+            "GET", "/calendar/Solomiia.ics?student_key=S2", match_info={"student": "Solomiia"}
+        )
+    )
+    assert response.status == 200
+
+
+async def test_calendar_excludes_unrelated_retired_namesakes(rollover_db):
+    await _retire_old(rollover_db)
+    database = Database(rollover_db)
+    await database.connect()
+    try:
+        await database.db.execute("UPDATE students SET mailbox_key='unrelated' WHERE key='OLD'")
+        await database.commit()
+    finally:
+        await database.close()
+    key, lessons = api_mod._get_lessons_for_ics("Solomiia", 30, 60)
+    assert key == "NEW"
+    assert {lesson["student_key"] for lesson in lessons} == {"NEW"}
+    # Explicit historical keys remain accessible without guessing identities.
+    key, historical = api_mod._get_lessons_for_ics("Solomiia", 30, 60, student_key="OLD")
+    assert key == "OLD"
+    assert {lesson["student_key"] for lesson in historical} == {"OLD"}
+
+
+async def test_homework_order_is_chronological_across_months_and_years(seeded_db):
+    from vulcan_notify.models import Homework
+
+    database = Database(seeded_db)
+    await database.connect()
+    try:
+        dates = ["2025-12-31", "2026-01-01T00:00:00+01:00", "2026-09-30", "2026-10-01"]
+        for i, date in enumerate(dates):
+            await database.upsert_homework("S1", Homework(i + 1, date, date))
+        await database.commit()
+    finally:
+        await database.close()
+    result = api_mod._get_homework(2)["Solomiia"]["homework"]
+    assert [item["subject"] for item in result] == dates[-2:][::-1]
+    assert [item["subject"] for item in api_mod._get_homework(10)["Solomiia"]["homework"]] == dates[
+        ::-1
+    ]

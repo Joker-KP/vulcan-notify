@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypedDict
 
 import aiosqlite
 
@@ -28,6 +28,14 @@ if TYPE_CHECKING:
     )
 
 logger = logging.getLogger(__name__)
+
+
+class MqttOutboxRow(TypedDict):
+    id: int
+    topic: str
+    payload: str
+    attempts: int
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS students (
@@ -664,7 +672,7 @@ class Database:
             (topic, payload),
         )
 
-    async def list_mqtt_outbox(self) -> list[dict[str, object]]:
+    async def list_mqtt_outbox(self) -> list[MqttOutboxRow]:
         cursor = await self.db.execute(
             "SELECT id, topic, payload, attempts FROM mqtt_outbox ORDER BY id ASC"
         )

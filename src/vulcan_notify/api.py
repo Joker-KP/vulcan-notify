@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import calendar
+import json
 import logging
 import sqlite3
 from collections.abc import Awaitable, Callable
+from contextlib import closing
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, TypedDict
 
 from aiohttp import web
 
@@ -24,13 +26,93 @@ def _connect() -> sqlite3.Connection:
     return db
 
 
+class ApiStudent(TypedDict):
+    key: str
+    name: str
+    class_name: str
+    school: str
+    response_key: str
+
+
+class StudentOptions(TypedDict):
+    student_filter: str | None
+    student_key: str | None
+    keyed: bool
+
+
+class SubjectAverage(TypedDict):
+    subject: str
+    average: float
+    count: int
+
+
+def _select_students(
+    db: sqlite3.Connection,
+    student_filter: str | None = None,
+    student_key: str | None = None,
+    keyed: bool = False,
+) -> list[ApiStudent]:
+    """Keep legacy name keys only when they identify one active student."""
+    if student_filter is not None and student_key is not None:
+        raise web.HTTPBadRequest(text="Use either student or student_key")
+    query = "SELECT key, name, class_name, school FROM students WHERE active = 1"
+    params: tuple[str, ...] = ()
+    if student_filter is not None:
+        query += " AND name = ?"
+        params = (student_filter,)
+    elif student_key is not None:
+        query += " AND key = ?"
+        params = (student_key,)
+    rows = db.execute(query + " ORDER BY key", params).fetchall()
+    names = [str(row["name"]) for row in rows]
+    if (student_filter is not None or not (keyed or student_key is not None)) and (
+        len(names) != len(set(names)) or "_meta" in names
+    ):
+        raise web.HTTPConflict(
+            text=json.dumps(
+                {
+                    "error": "ambiguous student name",
+                    "detail": "Use student_key for one student or keyed=1 for all students",
+                    "students": [{"student_key": row["key"], "name": row["name"]} for row in rows],
+                }
+            ),
+            content_type="application/json",
+        )
+    return [
+        ApiStudent(
+            key=str(row["key"]),
+            name=str(row["name"]),
+            class_name=str(row["class_name"]),
+            school=str(row["school"]),
+            response_key=str(row["key"] if keyed or student_key is not None else row["name"]),
+        )
+        for row in rows
+    ]
+
+
+def _student_options(request: web.Request) -> StudentOptions:
+    return {
+        "student_filter": request.query.get("student"),
+        "student_key": request.query.get("student_key"),
+        "keyed": request.query.get("keyed", "").lower() in ("1", "true", "yes"),
+    }
+
+
+def _add_identities(payload: dict[str, Any], students: list[ApiStudent]) -> dict[str, Any]:
+    for student in students:
+        payload[student["response_key"]].update(student_key=student["key"], name=student["name"])
+    return payload
+
+
 # Data sections tracked for freshness. Mirrors db.SECTIONS; duplicated rather than
 # imported because this module talks to SQLite synchronously and deliberately does
 # not pull in the aiosqlite Database class.
 _SECTIONS = ("grades", "attendance", "exams", "homework", "schedule", "remarks", "messages")
 
 
-def _get_health(student_filter: str | None = None) -> dict[str, Any]:
+def _get_health(
+    student_filter: str | None = None, student_key: str | None = None
+) -> dict[str, Any]:
     """Compute the freshness picture from sync_runs + sync_state.
 
     Freshness comes from `last_success:<student>:<section>` keys, which sync.py only
@@ -59,12 +141,9 @@ def _get_health(student_filter: str | None = None) -> dict[str, Any]:
         ).fetchone()
         last_run = dict(row) if row else None
 
-        query = "SELECT key FROM students WHERE active = 1"
-        params: tuple[str, ...] = ()
-        if student_filter is not None:
-            query += " AND name = ?"
-            params = (student_filter,)
-        active_keys = [r[0] for r in db.execute(query, params)]
+        active_keys = [
+            s["key"] for s in _select_students(db, student_filter, student_key, keyed=True)
+        ]
         stamps = {
             r[0]: r[1]
             for r in db.execute("SELECT key, value FROM sync_state WHERE key LIKE 'last_success:%'")
@@ -128,14 +207,16 @@ def _get_health(student_filter: str | None = None) -> dict[str, Any]:
     }
 
 
-def _meta(*sections: str, student_filter: str | None = None) -> dict[str, Any]:
+def _meta(
+    *sections: str, student_filter: str | None = None, student_key: str | None = None
+) -> dict[str, Any]:
     """Provenance block attached to every data response.
 
     Added as a top-level `_meta` key rather than wrapping the payload in an envelope:
     every Home Assistant REST sensor scopes `json_attributes_path` to a student key,
     so an extra sibling key is invisible to them and no HA config had to change.
     """
-    health = _get_health(student_filter)
+    health = _get_health(student_filter, student_key)
     relevant = {s: health.get("sections", {}).get(s) for s in sections if s in _SECTIONS}
     stale = any(v and v["stale"] for v in relevant.values()) if relevant else health["stale"]
     ages = [v["age_seconds"] for v in relevant.values() if v and v["age_seconds"] is not None]
@@ -242,7 +323,7 @@ def _resolve_period_id(
         # Looks like an explicit period_id
         for p in row:
             if p["period_id"] == int(period_request):
-                return p["period_id"]
+                return int(p["period_id"])
         return None
 
     # Match on okres number (1, 2, ...)
@@ -250,87 +331,85 @@ def _resolve_period_id(
         wanted = int(period_request[-1])
         for p in row:
             if p["number"] == wanted:
-                return p["period_id"]
+                return int(p["period_id"])
         return None
 
     # Default: current period (date range contains today, else latest)
     today = datetime.now().strftime("%Y-%m-%d")
     for p in row:
         if p["date_from"] <= today <= p["date_to"]:
-            return p["period_id"]
-    return row[-1]["period_id"]
+            return int(p["period_id"])
+    return int(row[-1]["period_id"])
 
 
 def _get_grade_averages(
     student_filter: str | None = None,
     window_days: int = 30,
     period_request: str | None = None,
+    *,
+    student_key: str | None = None,
+    keyed: bool = False,
 ) -> dict[str, Any]:
     """Compute weighted grade averages per student with rolling window time series."""
-    db = _connect()
-    result: dict[str, Any] = {}
+    with closing(_connect()) as db:
+        result: dict[str, Any] = {}
 
-    query = "SELECT key, name FROM students WHERE active = 1"
-    params: tuple[str, ...] = ()
-    if student_filter:
-        query += " AND name = ?"
-        params = (student_filter,)
+        selected = _select_students(db, student_filter, student_key, keyed)
 
-    for s in db.execute(query, params):
-        period_id = _resolve_period_id(db, s["key"], period_request)
-        sql = (
-            "SELECT value, date, weight FROM grades "
-            "WHERE student_key = ? AND superseded_by_grade_id IS NULL"
-        )
-        sql_params: list[object] = [s["key"]]
-        if period_id is not None:
-            sql += " AND period_id = ?"
-            sql_params.append(period_id)
-        sql += " ORDER BY substr(date,7,4)||substr(date,4,2)||substr(date,1,2) ASC"
-        grades = db.execute(sql, sql_params).fetchall()
+        for s in selected:
+            period_id = _resolve_period_id(db, s["key"], period_request)
+            sql = (
+                "SELECT value, date, weight FROM grades "
+                "WHERE student_key = ? AND superseded_by_grade_id IS NULL"
+            )
+            sql_params: list[object] = [s["key"]]
+            if period_id is not None:
+                sql += " AND period_id = ?"
+                sql_params.append(period_id)
+            sql += " ORDER BY substr(date,7,4)||substr(date,4,2)||substr(date,1,2) ASC"
+            grades = db.execute(sql, sql_params).fetchall()
 
-        # Parse all grades into a list with ISO dates
-        parsed: list[tuple[str, float, int]] = []
-        for g in grades:
-            numeric = _grade_to_numeric(g["value"])
-            if numeric is None:
-                continue
-            raw_date = g["date"]
-            iso_date = f"{raw_date[6:10]}-{raw_date[3:5]}-{raw_date[0:2]}"
-            parsed.append((iso_date, numeric, g["weight"] or 1))
+            # Parse all grades into a list with ISO dates
+            parsed: list[tuple[str, float, int]] = []
+            for g in grades:
+                numeric = _grade_to_numeric(g["value"])
+                if numeric is None:
+                    continue
+                raw_date = g["date"]
+                iso_date = f"{raw_date[6:10]}-{raw_date[3:5]}-{raw_date[0:2]}"
+                parsed.append((iso_date, numeric, g["weight"] or 1))
 
-        # Compute rolling window average at each grade date
-        timeline: list[dict[str, Any]] = []
-        for i, (date, _, _) in enumerate(parsed):
-            cutoff = _date_minus_days(date, window_days)
-            w_sum = 0.0
-            wt_sum = 0
-            for d, val, w in parsed[: i + 1]:
-                if d >= cutoff:
-                    w_sum += val * w
-                    wt_sum += w
-            if wt_sum:
-                timeline.append(
-                    {
-                        "date": date,
-                        "average": round(w_sum / wt_sum, 2),
-                    }
-                )
+            # Compute rolling window average at each grade date
+            timeline: list[dict[str, Any]] = []
+            for i, (date, _, _) in enumerate(parsed):
+                cutoff = _date_minus_days(date, window_days)
+                w_sum = 0.0
+                wt_sum = 0
+                for d, val, w in parsed[: i + 1]:
+                    if d >= cutoff:
+                        w_sum += val * w
+                        wt_sum += w
+                if wt_sum:
+                    timeline.append(
+                        {
+                            "date": date,
+                            "average": round(w_sum / wt_sum, 2),
+                        }
+                    )
 
-        # Current overall weighted average (all time)
-        total_w_sum = sum(v * w for _, v, w in parsed)
-        total_wt = sum(w for _, _, w in parsed)
+            # Current overall weighted average (all time)
+            total_w_sum = sum(v * w for _, v, w in parsed)
+            total_wt = sum(w for _, _, w in parsed)
 
-        result[s["name"]] = {
-            "average": round(total_w_sum / total_wt, 2) if total_wt else None,
-            "rolling_average": timeline[-1]["average"] if timeline else None,
-            "window_days": window_days,
-            "count": len(parsed),
-            "grades_over_time": timeline,
-        }
+            result[s["response_key"]] = {
+                "average": round(total_w_sum / total_wt, 2) if total_wt else None,
+                "rolling_average": timeline[-1]["average"] if timeline else None,
+                "window_days": window_days,
+                "count": len(parsed),
+                "grades_over_time": timeline,
+            }
 
-    db.close()
-    return result
+        return _add_identities(result, selected)
 
 
 def _month_list(year: int | None, months: int) -> list[str]:
@@ -354,289 +433,292 @@ def _get_monthly_averages(
     student_filter: str | None = None,
     year: int | None = None,
     months: int = 6,
+    *,
+    student_key: str | None = None,
+    keyed: bool = False,
 ) -> dict[str, Any]:
     """Compute weighted grade averages grouped by calendar month per student."""
-    db = _connect()
-    result: dict[str, Any] = {}
+    with closing(_connect()) as db:
+        result: dict[str, Any] = {}
 
-    query = "SELECT key, name FROM students WHERE active = 1"
-    params: tuple[str, ...] = ()
-    if student_filter:
-        query += " AND name = ?"
-        params = (student_filter,)
+        selected = _select_students(db, student_filter, student_key, keyed)
 
-    month_keys = _month_list(year, months)
+        month_keys = _month_list(year, months)
 
-    for s in db.execute(query, params):
-        # Monthly chart shows all months regardless of semester; just skip
-        # superseded (improvement-original) rows.
-        grades = db.execute(
-            "SELECT value, date, weight FROM grades "
-            "WHERE student_key = ? AND superseded_by_grade_id IS NULL",
-            (s["key"],),
-        ).fetchall()
+        for s in selected:
+            # Monthly chart shows all months regardless of semester; just skip
+            # superseded (improvement-original) rows.
+            grades = db.execute(
+                "SELECT value, date, weight FROM grades "
+                "WHERE student_key = ? AND superseded_by_grade_id IS NULL",
+                (s["key"],),
+            ).fetchall()
 
-        buckets: dict[str, tuple[float, int, int]] = {k: (0.0, 0, 0) for k in month_keys}
-        for g in grades:
-            numeric = _grade_to_numeric(g["value"])
-            if numeric is None:
-                continue
-            raw_date = g["date"]
-            month_key = f"{raw_date[6:10]}-{raw_date[3:5]}"
-            if month_key not in buckets:
-                continue
-            w = g["weight"] or 1
-            w_sum, wt_sum, count = buckets[month_key]
-            buckets[month_key] = (w_sum + numeric * w, wt_sum + w, count + 1)
+            buckets: dict[str, tuple[float, int, int]] = {k: (0.0, 0, 0) for k in month_keys}
+            for g in grades:
+                numeric = _grade_to_numeric(g["value"])
+                if numeric is None:
+                    continue
+                raw_date = g["date"]
+                month_key = f"{raw_date[6:10]}-{raw_date[3:5]}"
+                if month_key not in buckets:
+                    continue
+                w = g["weight"] or 1
+                w_sum, wt_sum, count = buckets[month_key]
+                buckets[month_key] = (w_sum + numeric * w, wt_sum + w, count + 1)
 
-        month_rows: list[dict[str, Any]] = []
-        for key in month_keys:
-            w_sum, wt_sum, count = buckets[key]
-            avg = round(w_sum / wt_sum, 2) if wt_sum else None
-            month_num = int(key[5:7])
-            month_rows.append(
-                {
-                    "month": key,
-                    "label": calendar.month_abbr[month_num],
-                    "average": avg,
-                    "count": count,
-                }
-            )
+            month_rows: list[dict[str, Any]] = []
+            for key in month_keys:
+                w_sum, wt_sum, count = buckets[key]
+                avg = round(w_sum / wt_sum, 2) if wt_sum else None
+                month_num = int(key[5:7])
+                month_rows.append(
+                    {
+                        "month": key,
+                        "label": calendar.month_abbr[month_num],
+                        "average": avg,
+                        "count": count,
+                    }
+                )
 
-        result[s["name"]] = {"months": month_rows}
+            result[s["response_key"]] = {"months": month_rows}
 
-    db.close()
-    return result
+        return _add_identities(result, selected)
 
 
 def _get_subject_averages(
     student_filter: str | None = None,
     period_request: str | None = None,
+    *,
+    student_key: str | None = None,
+    keyed: bool = False,
 ) -> dict[str, Any]:
     """Compute weighted grade averages grouped by subject, sorted descending."""
-    db = _connect()
-    result: dict[str, Any] = {}
+    with closing(_connect()) as db:
+        result: dict[str, Any] = {}
 
-    query = "SELECT key, name FROM students WHERE active = 1"
-    params: tuple[str, ...] = ()
-    if student_filter:
-        query += " AND name = ?"
-        params = (student_filter,)
+        selected = _select_students(db, student_filter, student_key, keyed)
 
-    for s in db.execute(query, params):
-        period_id = _resolve_period_id(db, s["key"], period_request)
-        sql = (
-            "SELECT value, subject, weight FROM grades "
-            "WHERE student_key = ? AND superseded_by_grade_id IS NULL"
-        )
-        sql_params: list[object] = [s["key"]]
-        if period_id is not None:
-            sql += " AND period_id = ?"
-            sql_params.append(period_id)
-        grades = db.execute(sql, sql_params).fetchall()
+        for s in selected:
+            period_id = _resolve_period_id(db, s["key"], period_request)
+            sql = (
+                "SELECT value, subject, weight FROM grades "
+                "WHERE student_key = ? AND superseded_by_grade_id IS NULL"
+            )
+            sql_params: list[object] = [s["key"]]
+            if period_id is not None:
+                sql += " AND period_id = ?"
+                sql_params.append(period_id)
+            grades = db.execute(sql, sql_params).fetchall()
 
-        buckets: dict[str, tuple[float, int, int]] = {}
-        for g in grades:
-            numeric = _grade_to_numeric(g["value"])
-            if numeric is None:
-                continue
-            subject = g["subject"]
-            w = g["weight"] or 1
-            w_sum, wt_sum, count = buckets.get(subject, (0.0, 0, 0))
-            buckets[subject] = (w_sum + numeric * w, wt_sum + w, count + 1)
+            buckets: dict[str, tuple[float, int, int]] = {}
+            for g in grades:
+                numeric = _grade_to_numeric(g["value"])
+                if numeric is None:
+                    continue
+                subject = g["subject"]
+                w = g["weight"] or 1
+                w_sum, wt_sum, count = buckets.get(subject, (0.0, 0, 0))
+                buckets[subject] = (w_sum + numeric * w, wt_sum + w, count + 1)
 
-        rows = [
-            {
-                "subject": subject,
-                "average": round(w_sum / wt_sum, 2),
-                "count": count,
-            }
-            for subject, (w_sum, wt_sum, count) in buckets.items()
-            if wt_sum
-        ]
-        rows.sort(key=lambda r: r["average"], reverse=True)
-        result[s["name"]] = {"subjects": rows}
+            rows: list[SubjectAverage] = [
+                {
+                    "subject": subject,
+                    "average": round(w_sum / wt_sum, 2),
+                    "count": count,
+                }
+                for subject, (w_sum, wt_sum, count) in buckets.items()
+                if wt_sum
+            ]
+            rows.sort(key=lambda r: r["average"], reverse=True)
+            result[s["response_key"]] = {"subjects": rows}
 
-    db.close()
-    return result
+        return _add_identities(result, selected)
 
 
 def _get_subject_summaries(
     student_filter: str | None = None,
     period_request: str | None = None,
+    *,
+    student_key: str | None = None,
+    keyed: bool = False,
 ) -> dict[str, Any]:
     """Return per-subject end-of-term roll-ups (final + proposed grade) for a period."""
-    db = _connect()
-    result: dict[str, Any] = {}
+    with closing(_connect()) as db:
+        result: dict[str, Any] = {}
 
-    query = "SELECT key, name FROM students WHERE active = 1"
-    params: tuple[str, ...] = ()
-    if student_filter:
-        query += " AND name = ?"
-        params = (student_filter,)
+        selected = _select_students(db, student_filter, student_key, keyed)
 
-    for s in db.execute(query, params):
-        period_id = _resolve_period_id(db, s["key"], period_request)
-        sql = (
-            "SELECT subject, final_grade, proposed_final_grade, use_weighted_average "
-            "FROM subject_summaries WHERE student_key = ?"
-        )
-        sql_params: list[object] = [s["key"]]
-        if period_id is not None:
-            sql += " AND period_id = ?"
-            sql_params.append(period_id)
-        sql += " ORDER BY subject"
+        for s in selected:
+            period_id = _resolve_period_id(db, s["key"], period_request)
+            sql = (
+                "SELECT subject, final_grade, proposed_final_grade, use_weighted_average "
+                "FROM subject_summaries WHERE student_key = ?"
+            )
+            sql_params: list[object] = [s["key"]]
+            if period_id is not None:
+                sql += " AND period_id = ?"
+                sql_params.append(period_id)
+            sql += " ORDER BY subject"
 
-        rows = [
-            {
-                "subject": r["subject"],
-                "final_grade": r["final_grade"],
-                "proposed_final_grade": r["proposed_final_grade"],
-                "use_weighted_average": bool(r["use_weighted_average"]),
-            }
-            for r in db.execute(sql, sql_params)
-        ]
-        # Resolve period metadata for the response so HA templates know which
-        # term they're looking at without a second call.
-        period_meta = None
-        if period_id is not None:
-            p = db.execute(
-                "SELECT period_id, number, date_from, date_to "
-                "FROM classification_periods WHERE student_key = ? AND period_id = ?",
-                (s["key"], period_id),
-            ).fetchone()
-            if p:
-                period_meta = {
-                    "id": p["period_id"],
-                    "number": p["number"],
-                    "date_from": p["date_from"],
-                    "date_to": p["date_to"],
+            rows = [
+                {
+                    "subject": r["subject"],
+                    "final_grade": r["final_grade"],
+                    "proposed_final_grade": r["proposed_final_grade"],
+                    "use_weighted_average": bool(r["use_weighted_average"]),
                 }
-        result[s["name"]] = {"period": period_meta, "subjects": rows}
+                for r in db.execute(sql, sql_params)
+            ]
+            # Resolve period metadata for the response so HA templates know which
+            # term they're looking at without a second call.
+            period_meta = None
+            if period_id is not None:
+                p = db.execute(
+                    "SELECT period_id, number, date_from, date_to "
+                    "FROM classification_periods WHERE student_key = ? AND period_id = ?",
+                    (s["key"], period_id),
+                ).fetchone()
+                if p:
+                    period_meta = {
+                        "id": p["period_id"],
+                        "number": p["number"],
+                        "date_from": p["date_from"],
+                        "date_to": p["date_to"],
+                    }
+            result[s["response_key"]] = {"period": period_meta, "subjects": rows}
 
-    db.close()
-    return result
+        return _add_identities(result, selected)
 
 
 def _get_schedule(
     student_filter: str | None = None,
     only_substitutions: bool = False,
     days_ahead: int = 14,
+    *,
+    student_key: str | None = None,
+    keyed: bool = False,
 ) -> dict[str, Any]:
     """Return upcoming lessons per student, newest first.
 
     With `only_substitutions=True`, returns only lessons where a substitution
     has been recorded.
     """
-    db = _connect()
-    result: dict[str, Any] = {}
+    with closing(_connect()) as db:
+        result: dict[str, Any] = {}
 
-    today = datetime.now().strftime("%Y-%m-%d")
-    to_date = (datetime.now() + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+        today = datetime.now().strftime("%Y-%m-%d")
+        to_date = (datetime.now() + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
 
-    query = "SELECT key, name FROM students WHERE active = 1"
-    params: tuple[str, ...] = ()
-    if student_filter:
-        query += " AND name = ?"
-        params = (student_filter,)
+        selected = _select_students(db, student_filter, student_key, keyed)
 
-    for s in db.execute(query, params):
-        sql = (
-            "SELECT date, time_from, time_to, subject, teacher, room, group_name, "
-            "annotation, is_extra, sub_teacher, sub_room, sub_type, absence_info, remarks "
-            "FROM schedule WHERE student_key = ? AND date >= ? AND date <= ?"
-        )
-        row_params: list[object] = [s["key"], today, to_date]
-        if only_substitutions:
-            sql += (
-                " AND (sub_teacher IS NOT NULL OR (sub_room IS NOT NULL AND sub_room != '') "
-                "OR remarks IS NOT NULL OR annotation != 0)"
+        for s in selected:
+            sql = (
+                "SELECT date, time_from, time_to, subject, teacher, room, group_name, "
+                "annotation, is_extra, sub_teacher, sub_room, sub_type, absence_info, remarks "
+                "FROM schedule WHERE student_key = ? AND date >= ? AND date <= ?"
             )
-        sql += " ORDER BY date ASC, time_from ASC"
+            row_params: list[object] = [s["key"], today, to_date]
+            if only_substitutions:
+                sql += (
+                    " AND (sub_teacher IS NOT NULL OR (sub_room IS NOT NULL AND sub_room != '') "
+                    "OR remarks IS NOT NULL OR annotation != 0)"
+                )
+            sql += " ORDER BY date ASC, time_from ASC"
 
-        rows = db.execute(sql, row_params).fetchall()
-        lessons = [
-            {
-                "date": r["date"],
-                "time_from": r["time_from"],
-                "time_to": r["time_to"],
-                "subject": r["subject"],
-                "teacher": r["teacher"],
-                "room": r["room"],
-                "group": r["group_name"],
-                "is_extra": bool(r["is_extra"]),
-                "sub_teacher": r["sub_teacher"],
-                "sub_room": r["sub_room"],
-                "sub_type": r["sub_type"],
-                "absence_info": r["absence_info"],
-                "remarks": r["remarks"],
-            }
-            for r in rows
-        ]
-        result[s["name"]] = {"lessons": lessons, "count": len(lessons)}
+            rows = db.execute(sql, row_params).fetchall()
+            lessons = [
+                {
+                    "date": r["date"],
+                    "time_from": r["time_from"],
+                    "time_to": r["time_to"],
+                    "subject": r["subject"],
+                    "teacher": r["teacher"],
+                    "room": r["room"],
+                    "group": r["group_name"],
+                    "is_extra": bool(r["is_extra"]),
+                    "sub_teacher": r["sub_teacher"],
+                    "sub_room": r["sub_room"],
+                    "sub_type": r["sub_type"],
+                    "absence_info": r["absence_info"],
+                    "remarks": r["remarks"],
+                }
+                for r in rows
+            ]
+            result[s["response_key"]] = {"lessons": lessons, "count": len(lessons)}
 
-    db.close()
-    return result
+        return _add_identities(result, selected)
 
 
-def _get_grades(n: int = 5, diagnostic_days: int = 180) -> dict[str, Any]:
+def _get_grades(
+    n: int = 5,
+    diagnostic_days: int = 180,
+    *,
+    student_key: str | None = None,
+    keyed: bool = False,
+    student_filter: str | None = None,
+) -> dict[str, Any]:
     """Read latest N grades per student plus recent diagnostic-test results.
 
     Diagnostics (Polish 'diagnoza' tests, scored as raw percentages e.g. '35 (%)')
     are surfaced separately so the dashboard can flag them without polluting the
     regular grade stream — they don't count toward the semester average.
     """
-    db = _connect()
-    students = {}
-    diag_cutoff = _date_minus_days(datetime.now().strftime("%Y-%m-%d"), diagnostic_days)
-    for s in db.execute("SELECT key, name, class_name FROM students WHERE active = 1"):
-        grades = []
-        non_diag_count = 0
-        diagnostics: list[dict[str, Any]] = []
-        for g in db.execute(
-            "SELECT value, date, subject, column_name, category "
-            "FROM grades WHERE student_key = ? "
-            "ORDER BY substr(date,7,4)||substr(date,4,2)||substr(date,1,2) DESC ",
-            (s["key"],),
-        ):
-            row = dict(g)
-            iso = f"{row['date'][6:10]}-{row['date'][3:5]}-{row['date'][0:2]}"
-            if _is_diagnostic(row["value"]):
-                if iso >= diag_cutoff:
-                    diagnostics.append(row)
-                continue
-            if non_diag_count < n:
-                grades.append(row)
-                non_diag_count += 1
-        students[s["name"]] = {
-            "class": s["class_name"],
-            "grades": grades,
-            "diagnostics": diagnostics,
-        }
-    db.close()
-    return students
+    with closing(_connect()) as db:
+        students = {}
+        diag_cutoff = _date_minus_days(datetime.now().strftime("%Y-%m-%d"), diagnostic_days)
+        for s in (selected := _select_students(db, student_filter, student_key, keyed)):
+            grades = []
+            non_diag_count = 0
+            diagnostics: list[dict[str, Any]] = []
+            for g in db.execute(
+                "SELECT value, date, subject, column_name, category "
+                "FROM grades WHERE student_key = ? "
+                "ORDER BY substr(date,7,4)||substr(date,4,2)||substr(date,1,2) DESC ",
+                (s["key"],),
+            ):
+                row = dict(g)
+                iso = f"{row['date'][6:10]}-{row['date'][3:5]}-{row['date'][0:2]}"
+                if _is_diagnostic(row["value"]):
+                    if iso >= diag_cutoff:
+                        diagnostics.append(row)
+                    continue
+                if non_diag_count < n:
+                    grades.append(row)
+                    non_diag_count += 1
+            students[s["response_key"]] = {
+                "class": s["class_name"],
+                "grades": grades,
+                "diagnostics": diagnostics,
+            }
+        return _add_identities(students, selected)
 
 
-def _get_homework(n: int = 5) -> dict[str, Any]:
+def _get_homework(
+    n: int = 5,
+    *,
+    student_key: str | None = None,
+    keyed: bool = False,
+    student_filter: str | None = None,
+) -> dict[str, Any]:
     """Read latest N homework items per student."""
-    db = _connect()
-    students = {}
-    for s in db.execute("SELECT key, name, class_name FROM students WHERE active = 1"):
-        items = []
-        for h in db.execute(
-            "SELECT date, subject, content "
-            "FROM homework WHERE student_key = ? AND deleted_at IS NULL "
-            "ORDER BY substr(date,7,4)||substr(date,4,2)||substr(date,1,2) DESC "
-            "LIMIT ?",
-            (s["key"], n),
-        ):
-            items.append(dict(h))
-        students[s["name"]] = {
-            "class": s["class_name"],
-            "homework": items,
-        }
-    db.close()
-    return students
+    with closing(_connect()) as db:
+        students = {}
+        for s in (selected := _select_students(db, student_filter, student_key, keyed)):
+            items = []
+            for h in db.execute(
+                "SELECT date, subject, content "
+                "FROM homework WHERE student_key = ? AND deleted_at IS NULL "
+                "ORDER BY date DESC, id DESC "
+                "LIMIT ?",
+                (s["key"], n),
+            ):
+                items.append(dict(h))
+            students[s["response_key"]] = {
+                "class": s["class_name"],
+                "homework": items,
+            }
+        return _add_identities(students, selected)
 
 
 _EXAM_TYPE_LABELS = {1: "test", 2: "quiz"}
@@ -645,50 +727,48 @@ _EXAM_TYPE_LABELS = {1: "test", 2: "quiz"}
 def _get_exams(
     student_filter: str | None = None,
     days_ahead: int = 21,
+    *,
+    student_key: str | None = None,
+    keyed: bool = False,
 ) -> dict[str, Any]:
     """Return upcoming exams per student, soonest first.
 
     Exam dates are stored as ISO 8601 timestamps (e.g. `2026-04-15T00:00:00+02:00`),
     so the date prefix is compared against today's `YYYY-MM-DD`.
     """
-    db = _connect()
-    result: dict[str, Any] = {}
+    with closing(_connect()) as db:
+        result: dict[str, Any] = {}
 
-    today = datetime.now().strftime("%Y-%m-%d")
-    to_date = (datetime.now() + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+        today = datetime.now().strftime("%Y-%m-%d")
+        to_date = (datetime.now() + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
 
-    query = "SELECT key, name, class_name FROM students WHERE active = 1"
-    params: tuple[str, ...] = ()
-    if student_filter:
-        query += " AND name = ?"
-        params = (student_filter,)
+        selected = _select_students(db, student_filter, student_key, keyed)
 
-    for s in db.execute(query, params):
-        rows = db.execute(
-            "SELECT date, subject, type, description, teacher "
-            "FROM exams WHERE student_key = ? AND deleted_at IS NULL "
-            "AND substr(date, 1, 10) >= ? AND substr(date, 1, 10) <= ? "
-            "ORDER BY date ASC, subject ASC",
-            (s["key"], today, to_date),
-        ).fetchall()
-        exams = [
-            {
-                "date": r["date"][:10],
-                "subject": r["subject"],
-                "type": _EXAM_TYPE_LABELS.get(r["type"], "exam"),
-                "description": r["description"],
-                "teacher": r["teacher"],
+        for s in selected:
+            rows = db.execute(
+                "SELECT date, subject, type, description, teacher "
+                "FROM exams WHERE student_key = ? AND deleted_at IS NULL "
+                "AND substr(date, 1, 10) >= ? AND substr(date, 1, 10) <= ? "
+                "ORDER BY date ASC, subject ASC",
+                (s["key"], today, to_date),
+            ).fetchall()
+            exams = [
+                {
+                    "date": r["date"][:10],
+                    "subject": r["subject"],
+                    "type": _EXAM_TYPE_LABELS.get(r["type"], "exam"),
+                    "description": r["description"],
+                    "teacher": r["teacher"],
+                }
+                for r in rows
+            ]
+            result[s["response_key"]] = {
+                "class": s["class_name"],
+                "exams": exams,
+                "count": len(exams),
             }
-            for r in rows
-        ]
-        result[s["name"]] = {
-            "class": s["class_name"],
-            "exams": exams,
-            "count": len(exams),
-        }
 
-    db.close()
-    return result
+        return _add_identities(result, selected)
 
 
 def _get_messages(n: int = 20) -> list[dict[str, Any]]:
@@ -705,86 +785,106 @@ def _get_messages(n: int = 20) -> list[dict[str, Any]]:
 
 
 async def handle_grades_average(request: web.Request) -> web.Response:
-    student = request.query.get("student")
+    options = _student_options(request)
     window = int(request.query.get("window", "30"))
     period = request.query.get("period")
     return _with_meta(
-        _get_grade_averages(student, window, period), "grades", student_filter=student
+        _get_grade_averages(window_days=window, period_request=period, **options),
+        "grades",
+        student_filter=options["student_filter"],
+        student_key=options["student_key"],
     )
 
 
 async def handle_grades_monthly(request: web.Request) -> web.Response:
-    student = request.query.get("student")
+    options = _student_options(request)
     year_q = request.query.get("year")
     year = int(year_q) if year_q else None
     months = int(request.query.get("months", "6"))
     return _with_meta(
-        _get_monthly_averages(student, year, months), "grades", student_filter=student
+        _get_monthly_averages(year=year, months=months, **options),
+        "grades",
+        student_filter=options["student_filter"],
+        student_key=options["student_key"],
     )
 
 
 def _get_lessons_for_ics(
-    student_name: str, days_past: int, days_future: int
+    student_name: str, days_past: int, days_future: int, *, student_key: str | None = None
 ) -> tuple[str, list[dict[str, Any]]]:
     """Fetch all lessons (not only substitutions) for one student as a list of dicts.
 
-    A student gets a fresh Vulcan key every school year (the key encodes the class
-    register, not just the pupil), so one name can map to several keys. Union across
-    all of them and let the date window drop the stale years.
-
-    Deliberately does NOT filter on students.active, unlike the read paths above:
-    `days_past` reaches back over a September rollover, where the lessons that
-    belong in the feed still hang off last year's now-inactive key.
+    Explicit keys include that profile only, including retired profiles. A name
+    selects one active profile; historical keys are included only when their
+    nonempty mailbox identity matches. Names alone cannot establish pupil identity.
 
     Returns (student_key, lessons). Empty student_key if student not found.
     """
-    db = _connect()
-    key_rows = db.execute("SELECT key FROM students WHERE name = ?", (student_name,))
-    keys = [r["key"] for r in key_rows]
-    if not keys:
-        db.close()
-        return "", []
+    with closing(_connect()) as db:
+        if student_key is not None:
+            rows = db.execute("SELECT key FROM students WHERE key = ?", (student_key,)).fetchall()
+            keys = [str(row["key"]) for row in rows]
+        else:
+            selected = _select_students(db, student_name)
+            if selected:
+                current_key = selected[0]["key"]
+                mailbox = db.execute(
+                    "SELECT mailbox_key FROM students WHERE key = ?", (current_key,)
+                ).fetchone()[0]
+                keys = [current_key]
+                if mailbox:
+                    keys.extend(
+                        str(row[0])
+                        for row in db.execute(
+                            "SELECT key FROM students WHERE active = 0 "
+                            "AND mailbox_key = ? AND key != ?",
+                            (mailbox, current_key),
+                        )
+                    )
+            else:
+                keys = []
+        if not keys:
+            return "", []
 
-    today = datetime.now()
-    date_from = (today - timedelta(days=days_past)).strftime("%Y-%m-%d")
-    date_to = (today + timedelta(days=days_future)).strftime("%Y-%m-%d")
+        today = datetime.now()
+        date_from = (today - timedelta(days=days_past)).strftime("%Y-%m-%d")
+        date_to = (today + timedelta(days=days_future)).strftime("%Y-%m-%d")
 
-    placeholders = ",".join("?" * len(keys))
-    rows = db.execute(
-        "SELECT student_key, date, time_from, time_to, subject, teacher, room, group_name, "
-        "annotation, is_extra, sub_teacher, sub_room, sub_type, absence_info, remarks, "
-        "first_seen, last_seen "
-        f"FROM schedule WHERE student_key IN ({placeholders}) AND date >= ? AND date <= ? "
-        "ORDER BY date ASC, time_from ASC",
-        (*keys, date_from, date_to),
-    ).fetchall()
-    db.close()
+        placeholders = ",".join("?" * len(keys))
+        rows = db.execute(
+            "SELECT student_key, date, time_from, time_to, subject, teacher, room, group_name, "
+            "annotation, is_extra, sub_teacher, sub_room, sub_type, absence_info, remarks, "
+            "first_seen, last_seen "
+            f"FROM schedule WHERE student_key IN ({placeholders}) AND date >= ? AND date <= ? "
+            "ORDER BY date ASC, time_from ASC",
+            (*keys, date_from, date_to),
+        ).fetchall()
 
-    lessons = [
-        {
-            "student_key": r["student_key"],
-            "date": r["date"],
-            "time_from": r["time_from"],
-            "time_to": r["time_to"],
-            "subject": r["subject"],
-            "teacher": r["teacher"],
-            "room": r["room"],
-            "group_name": r["group_name"],
-            "annotation": r["annotation"],
-            "is_extra": bool(r["is_extra"]),
-            "sub_teacher": r["sub_teacher"],
-            "sub_room": r["sub_room"],
-            "sub_type": r["sub_type"],
-            "absence_info": r["absence_info"],
-            "remarks": r["remarks"],
-            # Carried through so each VEVENT gets a DTSTAMP reflecting when the
-            # lesson last changed rather than when the feed was served.
-            "first_seen": r["first_seen"],
-            "last_seen": r["last_seen"],
-        }
-        for r in rows
-    ]
-    return keys[0], lessons
+        lessons = [
+            {
+                "student_key": r["student_key"],
+                "date": r["date"],
+                "time_from": r["time_from"],
+                "time_to": r["time_to"],
+                "subject": r["subject"],
+                "teacher": r["teacher"],
+                "room": r["room"],
+                "group_name": r["group_name"],
+                "annotation": r["annotation"],
+                "is_extra": bool(r["is_extra"]),
+                "sub_teacher": r["sub_teacher"],
+                "sub_room": r["sub_room"],
+                "sub_type": r["sub_type"],
+                "absence_info": r["absence_info"],
+                "remarks": r["remarks"],
+                # Carried through so each VEVENT gets a DTSTAMP reflecting when the
+                # lesson last changed rather than when the feed was served.
+                "first_seen": r["first_seen"],
+                "last_seen": r["last_seen"],
+            }
+            for r in rows
+        ]
+        return keys[0], lessons
 
 
 async def handle_calendar(request: web.Request) -> web.Response:
@@ -796,12 +896,19 @@ async def handle_calendar(request: web.Request) -> web.Response:
     days_past = int(request.query.get("past", "30"))
     days_future = int(request.query.get("future", "60"))
 
-    key, lessons = _get_lessons_for_ics(student_name, days_past, days_future)
+    student_key = request.query.get("student_key")
+    key, lessons = _get_lessons_for_ics(
+        student_name, days_past, days_future, student_key=student_key
+    )
     if not key:
         return web.Response(status=404, text=f"Unknown student: {student_name}")
+    with closing(_connect()) as db:
+        student_name = str(
+            db.execute("SELECT name FROM students WHERE key = ?", (key,)).fetchone()[0]
+        )
 
     # A frozen feed has to announce itself in the calendar; see ics._stale_event.
-    schedule_health = _get_health(student_name).get("sections", {}).get("schedule", {})
+    schedule_health = _get_health(student_key=key).get("sections", {}).get("schedule", {})
     is_stale = bool(schedule_health.get("stale", True))
     age = schedule_health.get("age_seconds")
     stale_since = datetime.now(UTC) - timedelta(seconds=age) if age is not None else None
@@ -819,72 +926,114 @@ async def handle_calendar(request: web.Request) -> web.Response:
 
 
 def _with_meta(
-    payload: dict[str, Any], *sections: str, student_filter: str | None = None
+    payload: dict[str, Any],
+    *sections: str,
+    student_filter: str | None = None,
+    student_key: str | None = None,
 ) -> web.Response:
     """Attach provenance and reply. `_meta` sorts before student names on purpose."""
-    return web.json_response({"_meta": _meta(*sections, student_filter=student_filter), **payload})
+    return web.json_response(
+        {
+            "_meta": _meta(*sections, student_filter=student_filter, student_key=student_key),
+            **payload,
+        }
+    )
 
 
 async def handle_schedule(request: web.Request) -> web.Response:
-    student = request.query.get("student")
+    options = _student_options(request)
     only_subs = request.query.get("only_substitutions", "").lower() in ("1", "true", "yes")
     days = int(request.query.get("days", "14"))
-    return _with_meta(_get_schedule(student, only_subs, days), "schedule", student_filter=student)
+    return _with_meta(
+        _get_schedule(only_substitutions=only_subs, days_ahead=days, **options),
+        "schedule",
+        student_filter=options["student_filter"],
+        student_key=options["student_key"],
+    )
 
 
 async def handle_grades_by_subject(request: web.Request) -> web.Response:
-    student = request.query.get("student")
+    options = _student_options(request)
     period = request.query.get("period")
-    return _with_meta(_get_subject_averages(student, period), "grades", student_filter=student)
+    return _with_meta(
+        _get_subject_averages(period_request=period, **options),
+        "grades",
+        student_filter=options["student_filter"],
+        student_key=options["student_key"],
+    )
 
 
 async def handle_grades_summary(request: web.Request) -> web.Response:
-    student = request.query.get("student")
+    options = _student_options(request)
     period = request.query.get("period")
-    return _with_meta(_get_subject_summaries(student, period), "grades", student_filter=student)
+    return _with_meta(
+        _get_subject_summaries(period_request=period, **options),
+        "grades",
+        student_filter=options["student_filter"],
+        student_key=options["student_key"],
+    )
 
 
 async def handle_grades(request: web.Request) -> web.Response:
     n = int(request.query.get("n", "5"))
-    return _with_meta(_get_grades(n), "grades")
+    options = _student_options(request)
+    return _with_meta(
+        _get_grades(n, **options),
+        "grades",
+        student_filter=options["student_filter"],
+        student_key=options["student_key"],
+    )
 
 
 async def handle_homework(request: web.Request) -> web.Response:
     n = int(request.query.get("n", "5"))
-    return _with_meta(_get_homework(n), "homework")
+    options = _student_options(request)
+    return _with_meta(
+        _get_homework(n, **options),
+        "homework",
+        student_filter=options["student_filter"],
+        student_key=options["student_key"],
+    )
 
 
-def _get_remarks(student_filter: str | None = None, n: int = 20) -> dict[str, Any]:
+def _get_remarks(
+    student_filter: str | None = None,
+    n: int = 20,
+    *,
+    student_key: str | None = None,
+    keyed: bool = False,
+) -> dict[str, Any]:
     """Read locally stored praise/notes for active students, without upstream calls."""
     db = _connect()
     try:
-        query = "SELECT key, name FROM students WHERE active = 1"
-        params: tuple[str, ...] = ()
-        if student_filter is not None:
-            query += " AND name = ?"
-            params = (student_filter,)
+        selected = _select_students(db, student_filter, student_key, keyed)
         result: dict[str, Any] = {}
-        for student in db.execute(query, params).fetchall():
+        for student in selected:
             rows = db.execute(
                 "SELECT id, date, category, type, author, content, kind, points, url, "
                 "first_seen, last_seen FROM remarks "
                 "WHERE student_key = ? AND deleted_at IS NULL ORDER BY date DESC, id DESC LIMIT ?",
                 (student["key"], n),
             ).fetchall()
-            result[student["name"]] = {
+            result[student["response_key"]] = {
                 "remarks": [local_storage_timestamps(dict(row)) for row in rows]
             }
-        return result
+        return _add_identities(result, selected)
     finally:
         db.close()
 
 
 async def handle_remarks(request: web.Request) -> web.Response:
-    student = request.query.get("student")
+    options = _student_options(request)
     n = int(request.query.get("n", "20"))
     if not 1 <= n <= 1000:
         raise web.HTTPBadRequest(text="n must be between 1 and 1000")
-    return _with_meta(_get_remarks(student, n), "remarks", student_filter=student)
+    return _with_meta(
+        _get_remarks(n=n, **options),
+        "remarks",
+        student_filter=options["student_filter"],
+        student_key=options["student_key"],
+    )
 
 
 async def handle_messages(request: web.Request) -> web.Response:
@@ -893,9 +1042,31 @@ async def handle_messages(request: web.Request) -> web.Response:
 
 
 async def handle_exams(request: web.Request) -> web.Response:
-    student = request.query.get("student")
+    options = _student_options(request)
     days = int(request.query.get("days", "21"))
-    return _with_meta(_get_exams(student, days), "exams", student_filter=student)
+    return _with_meta(
+        _get_exams(days_ahead=days, **options),
+        "exams",
+        student_filter=options["student_filter"],
+        student_key=options["student_key"],
+    )
+
+
+async def handle_students(request: web.Request) -> web.Response:
+    """Discover stable keys without relying on display-name uniqueness."""
+    with closing(_connect()) as db:
+        students = _select_students(db, keyed=True)
+    return web.json_response(
+        {
+            s["key"]: {
+                "student_key": s["key"],
+                "name": s["name"],
+                "class_name": s["class_name"],
+                "school": s["school"],
+            }
+            for s in students
+        }
+    )
 
 
 async def handle_alive(request: web.Request) -> web.Response:
@@ -933,6 +1104,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/grades/by-subject", handle_grades_by_subject)
     app.router.add_get("/api/grades/summary", handle_grades_summary)
     app.router.add_get("/api/schedule", handle_schedule)
+    app.router.add_get("/api/students", handle_students)
     app.router.add_get("/calendar/{student}.ics", handle_calendar)
     app.router.add_get("/api/grades", handle_grades)
     app.router.add_get("/api/homework", handle_homework)

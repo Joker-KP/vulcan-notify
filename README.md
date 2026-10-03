@@ -182,6 +182,10 @@ VULCAN_PASSWORD=your_password
 
 When credentials are available, `vulcan-notify sync` detects expired sessions, imports saved cookies into persistent Chromium and attempts browser-session recovery before credential login. Docker provides Xvfb for headed recovery by default; `VULCAN_BROWSER_HEADLESS=true` opts into headless mode. If automatic recovery fails, stop `vulcan-sync` and run `docker compose --profile auth up vulcan-auth` for manual headed authentication through noVNC, then restart the worker. All services share the persistent `/app/data` volume.
 
+Session files are replaced atomically with permissions 0600. Invalid saved sessions use the same recovery policy, preserving the file until authentication succeeds.
+
+Student API endpoints keep existing name-based response keys when names are unique. `/api/students` lists stable keys; use `?student_key=KEY` for one profile or `?keyed=1` for responses keyed by profile. Each student payload includes `name` and `student_key`. Ambiguous name lookups return HTTP 409. Calendar subscriptions can use `/calendar/<name>.ics?student_key=KEY`; historical profiles are combined by name only when their nonempty mailbox identity matches.
+
 ## 📅 Calendar integration <a name="calendar-integration"></a>
 
 Push exams and homework to iCloud Calendar as all-day events with reminder alarms. Events sync to all devices via iCloud.
@@ -195,6 +199,8 @@ CALENDAR_MAP={"Alice Smith": "School Alice", "Bob Johnson": "School Bob"}
 The calendar names must match existing calendars in macOS Calendar. Each student maps to their own calendar.
 
 When configured, `vulcan-notify sync` automatically creates and updates calendar events. Use `vulcan-notify calendar` to force a clean re-sync of all events. Events are deduplicated by storing the macOS calendar UID in the database; when exams or homework are removed from the API (soft-deleted), their calendar events are also removed.
+
+Transient update/deletion failures retain UIDs for retry, including forced re-sync. `CALENDAR_TIMEOUT_SECONDS` defaults to 30 seconds per AppleScript operation; timeout or cancellation kills and reaps the subprocess. Missing events are recreated on a later sync after Calendar confirms their absence.
 
 ## 🔧 Configuration <a name="configuration"></a>
 
