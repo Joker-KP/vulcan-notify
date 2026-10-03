@@ -16,6 +16,7 @@ from vulcan_notify.differ import (
     diff_exams,
     diff_grades,
     diff_homework,
+    diff_remarks,
     diff_schedule,
 )
 
@@ -40,6 +41,8 @@ class SyncResult:
     unread_messages: int = 0
     is_first_sync: bool = False
     failed_sections: dict[str, str] = field(default_factory=dict)
+    new_remarks: list[Change] = field(default_factory=list)
+    is_first_remarks_sync: bool = False
 
     @property
     def has_failures(self) -> bool:
@@ -53,6 +56,7 @@ class SyncResult:
             or self.new_exams
             or self.new_homework
             or self.new_substitutions
+            or self.new_remarks
         )
 
     @property
@@ -63,6 +67,7 @@ class SyncResult:
             + self.new_exams
             + self.new_homework
             + self.new_substitutions
+            + self.new_remarks
         )
 
 
@@ -290,6 +295,27 @@ async def sync_student(
         await section_ok("schedule", len(lessons))
     except Exception as exc:
         await section_failed("schedule", exc)
+
+    # Remarks have their own baseline for installations that already sync students.
+    # Only a successful fetch + persistence initializes this marker, including [].
+    try:
+        marker = f"last_sync:{student.key}:remarks"
+        result.is_first_remarks_sync = await db.get_state(marker) is None
+        remarks = await client.get_remarks(student)
+        changes = (
+            []
+            if result.is_first_remarks_sync or is_first
+            else await diff_remarks(student, remarks, db)
+        )
+        for remark in remarks:
+            await db.upsert_remark(student.key, remark)
+        await db.mark_missing_remarks(student.key, {remark.id for remark in remarks})
+        await db.set_state(marker, datetime.now().isoformat())
+        await db.commit()
+        result.new_remarks = changes
+        await section_ok("remarks", len(remarks))
+    except Exception as exc:
+        await section_failed("remarks", exc)
 
     # Flush remaining writes; recording section outcomes commits each section.
     await db.commit()

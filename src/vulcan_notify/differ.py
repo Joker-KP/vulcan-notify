@@ -15,6 +15,7 @@ if TYPE_CHECKING:
         Grade,
         Homework,
         Lesson,
+        Remark,
         Student,
     )
 
@@ -53,6 +54,27 @@ class Change:
     tags: list[str] | None = None
     raw: object | None = None  # original model for structured MQTT payloads
     old_value: str | None = None  # previous value (for updated grades)
+
+
+async def diff_remarks(student: Student, fetched: list[Remark], db: Database) -> list[Change]:
+    """Announce new upstream IDs only; edits and restored notes stay silent."""
+    known = {row["id"] for row in await db.get_remarks_for_student(student.key)}
+    changes: list[Change] = []
+    for remark in fetched:
+        if remark.id in known:
+            continue
+        known.add(remark.id)
+        changes.append(
+            Change(
+                change_type="new",
+                item_type="remark",
+                student_name=student.name,
+                title=f"Pochwały i uwagi: {remark.category}",
+                body=remark.content,
+                raw=remark,
+            )
+        )
+    return changes
 
 
 async def diff_grades(

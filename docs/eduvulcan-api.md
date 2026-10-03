@@ -255,7 +255,26 @@ Homeroom teachers.
 
 ### GET /api/Uwagi?key={key}
 
-Student notes/remarks. Returns `[]` when none.
+Student praise and behavior notes. Request needs the authenticated student session
+and URL-encoded student `key`; no date-range or pagination parameters were observed.
+Returns the available list, or `[]` when none. The recorded schema includes:
+
+```json
+[{"id": 1, "data": "2000-01-03T08:00:00+01:00", "kategoria": "SYNTHETIC",
+  "typ": 1, "autor": "SYNTHETIC", "tresc": "SYNTHETIC",
+  "rodzaj": 1, "liczbaPunktow": null}]
+```
+
+`VulcanClient.get_remarks()` returns `Remark` models. Numeric `typ` and `rodzaj`
+are retained verbatim: their enum meanings have not been confirmed. Both praise
+and notes share this endpoint and the `/App/{encoded student key}/pochwalyUwagi`
+view. Content is returned in the list; no detail request is needed.
+
+Synchronization persists rows by `(student_key, id)`, tracks a separate category
+baseline, emits new-ID events only and soft-deletes missing entries. See
+`docs/email.md` for individual notification behavior. Implementation tests use the
+recorded sanitized contract; live fetching/link navigation was not verified during
+this implementation.
 
 ## Other endpoints
 

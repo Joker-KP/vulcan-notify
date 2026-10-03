@@ -26,7 +26,7 @@ def _connect() -> sqlite3.Connection:
 # Data sections tracked for freshness. Mirrors db.SECTIONS; duplicated rather than
 # imported because this module talks to SQLite synchronously and deliberately does
 # not pull in the aiosqlite Database class.
-_SECTIONS = ("grades", "attendance", "exams", "homework", "schedule", "messages")
+_SECTIONS = ("grades", "attendance", "exams", "homework", "schedule", "remarks", "messages")
 
 
 def _get_health(student_filter: str | None = None) -> dict[str, Any]:
@@ -853,6 +853,37 @@ async def handle_homework(request: web.Request) -> web.Response:
     return _with_meta(_get_homework(n), "homework")
 
 
+def _get_remarks(student_filter: str | None = None, n: int = 20) -> dict[str, Any]:
+    """Read locally stored praise/notes for active students, without upstream calls."""
+    db = _connect()
+    try:
+        query = "SELECT key, name FROM students WHERE active = 1"
+        params: tuple[str, ...] = ()
+        if student_filter is not None:
+            query += " AND name = ?"
+            params = (student_filter,)
+        result: dict[str, Any] = {}
+        for student in db.execute(query, params).fetchall():
+            rows = db.execute(
+                "SELECT id, date, category, type, author, content, kind, points, url, "
+                "first_seen, last_seen FROM remarks "
+                "WHERE student_key = ? AND deleted_at IS NULL ORDER BY date DESC, id DESC LIMIT ?",
+                (student["key"], n),
+            ).fetchall()
+            result[student["name"]] = {"remarks": [dict(row) for row in rows]}
+        return result
+    finally:
+        db.close()
+
+
+async def handle_remarks(request: web.Request) -> web.Response:
+    student = request.query.get("student")
+    n = int(request.query.get("n", "20"))
+    if not 1 <= n <= 1000:
+        raise web.HTTPBadRequest(text="n must be between 1 and 1000")
+    return _with_meta(_get_remarks(student, n), "remarks", student_filter=student)
+
+
 async def handle_messages(request: web.Request) -> web.Response:
     n = int(request.query.get("n", "20"))
     return _with_meta({"messages": _get_messages(n)}, "messages")
@@ -903,6 +934,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/grades", handle_grades)
     app.router.add_get("/api/homework", handle_homework)
     app.router.add_get("/api/messages", handle_messages)
+    app.router.add_get("/api/remarks", handle_remarks)
     app.router.add_get("/api/exams", handle_exams)
     app.router.add_get("/api/health", handle_health)
     app.router.add_get("/api/alive", handle_alive)

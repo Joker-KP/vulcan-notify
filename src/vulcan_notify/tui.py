@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+from rich.markup import escape
+from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
@@ -21,7 +23,7 @@ from textual.widgets import (
 from vulcan_notify.config import settings
 from vulcan_notify.db import Database
 from vulcan_notify.display import _format_sender_short
-from vulcan_notify.text import strip_html
+from vulcan_notify.text import message_text, strip_html
 
 ATTENDANCE_CATEGORIES: dict[int, str] = {
     1: "Present",
@@ -35,12 +37,12 @@ EXAM_TYPES: dict[int, str] = {
     2: "Quiz",
 }
 
-TAB_NAMES: list[str] = ["messages", "grades", "attendance", "exams", "homework"]
-TAB_LABELS: list[str] = ["Messages", "Grades", "Attendance", "Exams", "Homework"]
+TAB_NAMES: list[str] = ["messages", "grades", "attendance", "exams", "homework", "remarks"]
+TAB_LABELS: list[str] = ["Messages", "Grades", "Attendance", "Exams", "Homework", "Remarks"]
 
 HELP_TEXT = """\
 [b]Navigation[/b]
-  1-5          Switch tabs (1=Messages .. 5=Homework)
+  1-6          Switch tabs (1=Messages .. 6=Remarks)
   j/k, arrows  Move cursor down / up
   Enter        Open detail view
   Escape / q   Back (detail) or quit (main)
@@ -96,10 +98,12 @@ class DetailScreen(Screen[None]):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
         with VerticalScroll():
-            meta_lines = [f"[b]{label}:[/b] {value}" for label, value in self._fields]
+            meta_lines = [
+                f"[b]{escape(label)}:[/b] {escape(value)}" for label, value in self._fields
+            ]
             yield Static("\n".join(meta_lines), classes="metadata")
             if self._body:
-                yield Static(self._body, classes="content")
+                yield Static(self._body, classes="content", markup=False)
         yield Footer()
 
     def action_go_back(self) -> None:
@@ -118,6 +122,7 @@ class MainScreen(Screen[None]):
         Binding("3", "switch_tab('attendance')", "3 Attend", show=False),
         Binding("4", "switch_tab('exams')", "4 Exams", show=False),
         Binding("5", "switch_tab('homework')", "5 HW", show=False),
+        Binding("6", "switch_tab('remarks')", "6 Remarks", show=False),
         # Sorting
         Binding("o", "cycle_sort", "Sort"),
         Binding("O", "reverse_sort", "Reverse"),
@@ -139,7 +144,7 @@ class MainScreen(Screen[None]):
         self._student_filter_index: int = 0
         self._data: dict[str, list[dict[str, object]]] = {}
         self._loaded_tabs: set[str] = set()
-        self._sort_state: dict[str, tuple[int, bool]] = {}
+        self._sort_state: dict[str, tuple[int, bool]] = {"remarks": (0, True)}
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
@@ -151,9 +156,7 @@ class MainScreen(Screen[None]):
         yield Footer()
 
     def on_mount(self) -> None:
-        self.query_one("#messages-table", DataTable).add_columns(
-            "Date", "Sender", "Subject"
-        )
+        self.query_one("#messages-table", DataTable).add_columns("Date", "Sender", "Subject")
         self.query_one("#grades-table", DataTable).add_columns(
             "Date", "Student", "Subject", "Grade", "Category", "Weight"
         )
@@ -165,6 +168,9 @@ class MainScreen(Screen[None]):
         )
         self.query_one("#homework-table", DataTable).add_columns(
             "Date", "Student", "Subject", "Content"
+        )
+        self.query_one("#remarks-table", DataTable).add_columns(
+            "Date", "Student", "Category", "Author", "Points", "Content"
         )
         self._load_students_and_first_tab()
 
@@ -180,7 +186,7 @@ class MainScreen(Screen[None]):
     def _on_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         tab_id = event.pane.id or ""
         tab_name = tab_id.removeprefix("tab-")
-        if tab_name not in self._loaded_tabs:
+        if tab_name not in self._loaded_tabs or tab_name == "remarks":
             self._load_tab_work(tab_name)
         self._update_status_bar()
 
@@ -284,7 +290,17 @@ class MainScreen(Screen[None]):
                     )
                 all_rows.extend(rows)
 
+            elif tab_name == "remarks":
+                rows = await app.db.get_remarks_for_student(student_key)
+                for r in rows:
+                    if r.get("deleted_at") is not None:
+                        continue
+                    r["student_name"] = student_name
+                    all_rows.append(r)
+
         self._data[tab_name] = all_rows
+        if tab_name == "remarks":
+            self._apply_sort(tab_name)
         self._update_status_bar()
 
     # ── Sorting ───────────────────────────────────────────────────────
@@ -295,6 +311,7 @@ class MainScreen(Screen[None]):
         "attendance": ["date", "student_name", "lesson_number", "category", "subject"],
         "exams": ["date", "student_name", "subject", "type", "description"],
         "homework": ["date", "student_name", "subject", "content"],
+        "remarks": ["date", "student_name", "category", "author", "points", "content"],
     }
 
     _COLUMN_NAMES: ClassVar[dict[str, list[str]]] = {
@@ -303,6 +320,7 @@ class MainScreen(Screen[None]):
         "attendance": ["Date", "Student", "Lesson", "Status", "Subject"],
         "exams": ["Date", "Student", "Subject", "Type", "Description"],
         "homework": ["Date", "Student", "Subject", "Content"],
+        "remarks": ["Date", "Student", "Category", "Author", "Points", "Content"],
     }
 
     @on(DataTable.HeaderSelected)
@@ -399,6 +417,17 @@ class MainScreen(Screen[None]):
                     str(r.get("subject", "")),
                     content[:50],
                 )
+            elif tab_name == "remarks":
+                points = r.get("points")
+                content = message_text(str(r.get("content", "") or ""))
+                table.add_row(
+                    str(r.get("date", ""))[:10],
+                    Text(str(r.get("student_name", ""))),
+                    Text(str(r.get("category", ""))),
+                    Text(str(r.get("author", ""))),
+                    str(points) if points is not None else "",
+                    Text(" ".join(content.split())[:50]),
+                )
 
     # ── Detail views ──────────────────────────────────────────────────
 
@@ -488,6 +517,20 @@ class MainScreen(Screen[None]):
             ]
             self.app.push_screen(DetailScreen("Homework", fields, body))
 
+        elif tab_name == "remarks":
+            content = str(row.get("content", "") or "")
+            fields = [
+                ("Student", str(row.get("student_name", ""))),
+                ("Date", str(row.get("date", ""))),
+                ("Category", str(row.get("category", ""))),
+                ("Author", str(row.get("author", ""))),
+            ]
+            if row.get("points") is not None:
+                fields.append(("Points", str(row["points"])))
+            if row.get("url"):
+                fields.append(("Vulcan", str(row["url"])))
+            self.app.push_screen(DetailScreen("Praise / remark", fields, message_text(content)))
+
     # ── Actions ───────────────────────────────────────────────────────
 
     def action_quit_app(self) -> None:
@@ -523,9 +566,7 @@ class MainScreen(Screen[None]):
     def action_cycle_student(self) -> None:
         if not self._students:
             return
-        self._student_filter_index = (self._student_filter_index + 1) % (
-            len(self._students) + 1
-        )
+        self._student_filter_index = (self._student_filter_index + 1) % (len(self._students) + 1)
         if self._student_filter_index == 0:
             self._student_filter = None
         else:
@@ -553,8 +594,7 @@ class MainScreen(Screen[None]):
             student_part = "All"
         else:
             student_part = next(
-                (str(s["name"]) for s in self._students
-                 if str(s["key"]) == self._student_filter),
+                (str(s["name"]) for s in self._students if str(s["key"]) == self._student_filter),
                 "?",
             )
 
@@ -564,10 +604,11 @@ class MainScreen(Screen[None]):
         col_name = col_names[col_idx] if col_idx < len(col_names) else "?"
         arrow = "v" if reverse else "^"
 
-        # Tab indicators: [1] [2] [3] [4] [5]
+        # Tab indicators match the numbered navigation shortcuts.
         tab_idx = TAB_NAMES.index(tab_name) if tab_name in TAB_NAMES else 0
         tabs = "  ".join(
-            f"[b][{i + 1}]{TAB_LABELS[i][:4]}[/b]" if i == tab_idx
+            f"[b][{i + 1}]{TAB_LABELS[i][:4]}[/b]"
+            if i == tab_idx
             else f"[{i + 1}]{TAB_LABELS[i][:4]}"
             for i in range(len(TAB_NAMES))
         )

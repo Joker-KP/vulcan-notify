@@ -20,6 +20,7 @@ if TYPE_CHECKING:
         Homework,
         Lesson,
         Message,
+        Remark,
         Student,
         SubjectSummary,
     )
@@ -122,6 +123,24 @@ CREATE TABLE IF NOT EXISTS homework (
     FOREIGN KEY (student_key) REFERENCES students(key)
 );
 
+CREATE TABLE IF NOT EXISTS remarks (
+    student_key TEXT NOT NULL,
+    id INTEGER NOT NULL,
+    date TEXT NOT NULL,
+    category TEXT NOT NULL,
+    type INTEGER NOT NULL,
+    author TEXT NOT NULL,
+    content TEXT NOT NULL,
+    kind INTEGER NOT NULL,
+    points REAL,
+    url TEXT,
+    first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP,
+    PRIMARY KEY (student_key, id),
+    FOREIGN KEY (student_key) REFERENCES students(key)
+);
+
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY,
     api_global_key TEXT UNIQUE,
@@ -218,7 +237,7 @@ CREATE INDEX IF NOT EXISTS idx_sync_runs_started ON sync_runs(started_at);
 
 # Data sections a sync covers. Health is reported per section so a partial
 # outage names the broken part instead of just going red.
-SECTIONS = ("grades", "attendance", "exams", "homework", "schedule", "messages")
+SECTIONS = ("grades", "attendance", "exams", "homework", "schedule", "remarks", "messages")
 
 
 class Database:
@@ -664,6 +683,49 @@ class Database:
             f"UPDATE mqtt_outbox SET attempts = attempts + 1, last_error = ? "
             f"WHERE id IN ({placeholders})",
             [error, *ids],
+        )
+
+    async def upsert_remark(self, student_key: str, remark: Remark) -> None:
+        await self.db.execute(
+            "INSERT INTO remarks (student_key, id, date, category, type, author, content, "
+            "kind, points, url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(student_key, id) DO UPDATE SET date=excluded.date, "
+            "category=excluded.category, type=excluded.type, author=excluded.author, "
+            "content=excluded.content, kind=excluded.kind, points=excluded.points, "
+            "url=excluded.url, last_seen=CURRENT_TIMESTAMP, deleted_at=NULL",
+            (
+                student_key,
+                remark.id,
+                remark.date,
+                remark.category,
+                remark.type,
+                remark.author,
+                remark.content,
+                remark.kind,
+                remark.points,
+                remark.url,
+            ),
+        )
+
+    async def get_remarks_for_student(self, student_key: str) -> list[dict[str, Any]]:
+        cursor = await self.db.execute(
+            "SELECT * FROM remarks WHERE student_key = ? ORDER BY date DESC, id DESC",
+            (student_key,),
+        )
+        columns = [column[0] for column in cursor.description or []]
+        return [dict(zip(columns, row, strict=True)) for row in await cursor.fetchall()]
+
+    async def mark_missing_remarks(self, student_key: str, active_ids: set[int]) -> None:
+        """Retain history; an ID that reappears must not be announced as new."""
+        stored = await self.get_remarks_for_student(student_key)
+        missing = [
+            (student_key, row["id"])
+            for row in stored
+            if row["id"] not in active_ids and row["deleted_at"] is None
+        ]
+        await self.db.executemany(
+            "UPDATE remarks SET deleted_at=CURRENT_TIMESTAMP WHERE student_key=? AND id=?",
+            missing,
         )
 
     # ── Email outbox ────────────────────────────────────────────────
@@ -1272,9 +1334,7 @@ class Database:
         else:
             status = "ok"
 
-        fresh_ages = [
-            s["age_seconds"] for s in sections.values() if s["age_seconds"] is not None
-        ]
+        fresh_ages = [s["age_seconds"] for s in sections.values() if s["age_seconds"] is not None]
 
         return {
             "status": status,

@@ -17,6 +17,7 @@ Solves the problem of eduVulcan paywalling push notifications behind a subscript
 - **Exams** - upcoming tests and quizzes, with description and teacher
 - **Homework** - upcoming assignments, with full description
 - **Messages** - unread count and body, with optional sender whitelist filtering
+- **Praise and behavior notes** - per-student persistence, new-item events and separate emails with a link to the Pochwały i uwagi view
 - **Lesson schedule** - substitutions, cancellations, and extra lessons
 
 Supports multiple students under one parent account.
@@ -70,6 +71,11 @@ uv run vulcan-notify sync
 | `vulcan-notify calendar` | Force re-sync all exams/homework to macOS Calendar |
 | `vulcan-notify tui` | Interactive Textual browser for synced content (requires `uv sync --extra tui`) |
 | `vulcan-notify summarize [--type sync\|messages] [--days N]` | AI summary of recent changes or messages (requires `LLM_API_KEY`) |
+
+In the TUI, press `6` for **Remarks** (praise and behavior notes). The list shows
+date, student, category, author, optional points and a content preview. Press Enter
+for full content and the student's Vulcan URL; use `s` to cycle the student filter
+and `o` / `O` to sort. Soft-deleted notes are hidden. All views read local SQLite.
 
 ## ⚙️ How it works <a name="how-it-works"></a>
 
@@ -221,6 +227,7 @@ All settings are via environment variables or `.env` file:
 | `SMTP_USERNAME`, `SMTP_PASSWORD` | (none) | Optional SMTP credentials |
 | `EMAIL_AI_SUMMARY` | `false` | Replace the student-change digest body with an AI summary; also requires `LLM_API_KEY` |
 | `EMAIL_MESSAGE_SUBJECT_PREFIX` | `[Nowa wiadomość]` | Prefix for separate new-message notifications, followed by the original subject |
+| `EMAIL_REMARK_SUBJECT_PREFIX` | `[Uwagi]` | Prefix for separate praise/note emails, followed by student name and category; full note content is included |
 | `EMAIL_INCLUDE_MESSAGE_BODIES` | `false` | Include original message bodies in individual notifications; messages are excluded from digest AI input |
 | `NTFY_TOPIC` | `vulcan-notify` | ntfy.sh topic (if used) |
 | `NTFY_SERVER` | `https://ntfy.sh` | ntfy server base URL |

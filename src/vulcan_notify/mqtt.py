@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import aiomqtt
 
 from vulcan_notify.config import settings
-from vulcan_notify.models import AttendanceEntry, Exam, Grade, Homework, Lesson, Message
+from vulcan_notify.models import AttendanceEntry, Exam, Grade, Homework, Lesson, Message, Remark
 from vulcan_notify.text import strip_html
 
 if TYPE_CHECKING:
@@ -44,6 +44,7 @@ _TOPIC_SEGMENTS = {
     "substitution": "substitutions",
     "cancellation": "cancellations",
     "addition": "additions",
+    "remark": "remarks",
 }
 
 
@@ -132,6 +133,19 @@ def build_payload(change: Change) -> dict[str, object]:
             sub_type=raw.sub_type,
             absence_info=raw.absence_info,
             remarks=raw.remarks,
+        )
+
+    elif isinstance(raw, Remark):
+        base.update(
+            id=raw.id,
+            date=raw.date,
+            category=raw.category,
+            author=raw.author,
+            content=raw.content,
+            type=raw.type,
+            kind=raw.kind,
+            points=raw.points,
+            url=raw.url,
         )
 
     return base

@@ -96,6 +96,7 @@ class Settings(BaseSettings):
     email_to: list[str] = []
     email_subject_prefix: str = "eduVULCAN"
     email_message_subject_prefix: str = "[Nowa wiadomość]"
+    email_remark_subject_prefix: str = "[Uwagi]"
     email_include_message_bodies: bool = False
     email_ai_summary: bool = False
     email_ai_timeout_seconds: float = Field(default=30, gt=0)
@@ -121,7 +122,11 @@ class Settings(BaseSettings):
                 or any(char.isspace() or char in ",;<>" for char in address)
             ):
                 raise ValueError("EMAIL_TO must contain bare email addresses")
-        for name in ("email_subject_prefix", "email_message_subject_prefix"):
+        for name in (
+            "email_subject_prefix",
+            "email_message_subject_prefix",
+            "email_remark_subject_prefix",
+        ):
             prefix = getattr(self, name)
             if "\r" in prefix or "\n" in prefix:
                 raise ValueError(f"{name.upper()} must be a single line")

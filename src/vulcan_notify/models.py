@@ -89,6 +89,21 @@ class Homework:
 
 
 @dataclass
+class Remark:
+    """A praise or behavior note from /api/Uwagi; retain upstream numeric enums."""
+
+    id: int
+    date: str
+    category: str
+    type: int  # typ; meanings are not confirmed by the recorded API contract
+    author: str
+    content: str
+    kind: int  # rodzaj
+    points: float | None = None
+    url: str | None = None
+
+
+@dataclass
 class Message:
     id: int
     api_global_key: str  # apiGlobalKey (UUID for fetching detail)

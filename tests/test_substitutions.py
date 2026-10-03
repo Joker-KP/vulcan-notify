@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
-from vulcan_notify.db import Database
 from vulcan_notify.differ import diff_schedule
 from vulcan_notify.models import Lesson, Student
 from vulcan_notify.sync import sync_student
+
+if TYPE_CHECKING:
+    from vulcan_notify.db import Database
 
 STUDENT = Student(
     key="S1",
@@ -163,6 +166,7 @@ async def test_sync_student_persists_and_reports(db: Database) -> None:
     client.get_attendance = AsyncMock(return_value=[])
     client.get_exams = AsyncMock(return_value=[])
     client.get_homework = AsyncMock(return_value=[])
+    client.get_remarks = AsyncMock(return_value=[])
     baseline_lesson = make_lesson()
     client.get_schedule = AsyncMock(return_value=[baseline_lesson])
 

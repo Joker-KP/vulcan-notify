@@ -517,7 +517,7 @@ async def test_each_new_message_has_own_subject_and_body_separate_from_digest(
     }
     first_body = sent["[Nowa wiadomość] Zebranie rodziców"].get_body(("plain",)).get_content()
     assert "Private message body" in first_body
-    assert "Nadawca: Test Teacher" in first_body and "Skrzynka: Test Student" in first_body
+    assert "Autor: Test Teacher" in first_body and "Skrzynka: Test Student" in first_body
     assert "Different private content" not in first_body
     second_body = sent["[Nowa wiadomość] Plan wycieczki"].get_body(("plain",)).get_content()
     assert "Different private content" in second_body
@@ -627,7 +627,7 @@ async def test_message_footer_has_html_button_and_plain_link(db, email_config, s
     assert f'href="{url}"' in html
     assert html.count("Otwórz skrzynkę wiadomości") == 1
     assert "margin-top:24px" in html and "border-radius:6px" in html
-    assert "Nadawca: <strong>Teacher &amp; Parent</strong>" in html
+    assert "Autor: <strong>Teacher &amp; Parent</strong>" in html
     assert "Zebranie" not in html and "Zebranie" not in plain
     assert parsed["Subject"] == "[Nowa wiadomość] Zebranie <klasa> & rodzice"
     assert "<klasa>" not in html
@@ -757,7 +757,7 @@ def test_message_date_uses_configured_zone_and_minute_precision(
     email_config.quiet_hours_tz = zone
     body = email.format_message(replace(MESSAGE, date=timestamp), email_config)
     assert f"Data: {expected}\n" in body
-    assert "Nadawca: Test Teacher" in body
+    assert "Autor: Test Teacher" in body
     assert "Skrzynka: Test Student" in body
     assert "Załączniki: tak" in body
     assert MESSAGE.subject not in body
@@ -795,7 +795,7 @@ async def test_rich_message_body_and_bold_sender_survive_mime_serialization(db, 
     )
     html = parsed.get_body(("html",)).get_content()
     plain = parsed.get_body(("plain",)).get_content()
-    assert "Nadawca: <strong>Test Teacher</strong>" in html
+    assert "Autor: <strong>Test Teacher</strong>" in html
     assert "Data: 2026-09-29 18:23 (wtorek)" in html and "(wtorek)" in plain
     assert "<p style=" in html and "color:blue" in html
     assert "<strong>Ważne</strong>" in html

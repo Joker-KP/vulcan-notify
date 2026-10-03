@@ -10,7 +10,26 @@ for example `[Nowa wiadomość] Zebranie rodziców`. It includes the original se
 date and mailbox identity. Messages are excluded from the change digest. A run with
 only new messages sends individual notifications without an empty digest.
 
-Message metadata uses Polish labels: **Nadawca**, **Data**, **Skrzynka**, and
+Each new praise or behavior note also creates a separate email per recipient,
+with `EMAIL_REMARK_SUBJECT_PREFIX` (default `[Uwagi]`) followed by the student's
+name and upstream category, e.g. `[Uwagi] Jan: Pochwała`. The student name appears
+in the subject; the body contains
+the author, date, category, optional points and full note content,
+with locally sanitized HTML and a plain-text alternative. Note content is included
+regardless of `EMAIL_INCLUDE_MESSAGE_BODIES`, which controls inbox messages only.
+The **Otwórz pochwały i uwagi** button and text link open
+`<authenticated student base_url>/App/<URL-encoded student key>/pochwalyUwagi`.
+The browser may require authentication. Notes are excluded from the change digest
+and its AI input. Deduplication uses student key + upstream note ID + recipient;
+retries reuse the persisted content and Message-ID.
+
+The first successful notes sync per student stores a baseline without notifying,
+including after upgrading an existing installation. An empty successful list also
+initializes the baseline; a failed request does not. Subsequent unseen IDs notify.
+Edits update stored content without another email. Missing notes are soft-deleted,
+and restoring an already known ID does not create a new notification.
+
+Message metadata uses Polish labels: **Autor**, **Data**, **Skrzynka**, and
 **Załączniki** when present. The subject appears only in the email header and is
 not repeated as a metadata field in the body. The sender's value is bold in HTML.
 Dates use `YYYY-MM-DD HH:MM (dzień tygodnia)`, for example
@@ -93,6 +112,7 @@ settings unset for a relay that does not require authentication.
 | `EMAIL_TO` | `[]` | Required recipient list. |
 | `EMAIL_SUBJECT_PREFIX` | `eduVULCAN` | Subject is `<prefix>: <N> change(s)`. |
 | `EMAIL_MESSAGE_SUBJECT_PREFIX` | `[Nowa wiadomość]` | Separate message email subject is `<prefix> <original subject>`; upstream line breaks are flattened. |
+| `EMAIL_REMARK_SUBJECT_PREFIX` | `[Uwagi]` | Separate praise/note email subject is `<prefix> <student>: <category>`. |
 | `QUIET_HOURS_TZ` | `Europe/Warsaw` | Also controls displayed dates and weekdays; format is `YYYY-MM-DD HH:MM (dzień tygodnia)`. |
 | `EMAIL_INCLUDE_MESSAGE_BODIES` | `false` | Include formatted HTML content and a readable text alternative; attachment files are never sent. |
 | `EMAIL_AI_SUMMARY` | `false` | Replace the plain digest with an AI summary when `LLM_API_KEY` is also set. |

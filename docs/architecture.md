@@ -91,7 +91,7 @@ On first sync for a student, every item is treated as baseline: stored silently,
 | `api.py` | aiohttp HTTP server (port 8585). Grade aggregates, homework/messages/schedule endpoints, iCalendar feed. | `build_app()` |
 | `ics.py` | Zero-dependency RFC 5545 iCalendar writer. | `build_calendar()` |
 | `summarizer.py` | Optional AI digest via OpenAI-compatible APIs (profiles: `sync`, `messages`). | `summarize()` |
-| `tui.py` | Optional Textual TUI for browsing synced content (extra `tui` install). | `VulcanApp` |
+| `tui.py` | Optional Textual TUI for browsing synced content (extra `tui` install); Remarks tab (`6`) includes praise/notes, student filtering, sorting and full-content details with Vulcan URL. | `VulcanTuiApp` |
 
 ## Data model
 
@@ -104,6 +104,7 @@ SQLite lives at `DB_PATH` (default `vulcan_notify.db`). Tables:
 | `attendance` | `(student_key, date, lesson_number)` | Append-only in practice. |
 | `exams`, `homework` | `id` | `deleted_at` for soft-delete; `calendar_uid` for macOS Calendar dedup. |
 | `messages` | `id` with `UNIQUE(api_global_key)` | `content` is backfilled in batches of `SYNC_MESSAGE_BACKFILL_BATCH` per run for legacy rows. |
+| `remarks` | `(student_key, id)` | Praise and behavior notes, original content, category, author, numeric type/kind, optional points and student view URL; first/last seen and soft deletion. Created additively on startup. |
 | `schedule` | `(student_key, date, time_from, subject)` | Per-lesson schedule including substitutions (`sub_teacher`, `sub_room`), cancellations (`annotation`), and extra lessons (`is_extra`). |
 | `mqtt_outbox` | `id` AUTOINCREMENT | Every MQTT publish is enqueued first; drained on each run. Broker outages survive restarts. |
 | `email_outbox` | `delivery_key` | Digest per sync-run/recipient and notification per upstream message/recipient; pending envelopes persist across restarts. Successful rows retain deduplication metadata while clearing private content. |
@@ -124,6 +125,20 @@ The full entity diagram (students + primary entities) is in the [README](../READ
 - **Schedule** — keyed by `(date, time_from, subject)`. Three independent change types are emitted: `substitution` (teacher/room swap), `cancellation` (annotation flag set), `addition` (is_extra lesson inserted).
 
 First sync for a student writes a `sync_state` marker and suppresses all changes, so new installs don't flood channels with backlog noise.
+
+Praise/notes use `diff_remarks()` and a separate `last_sync:<student>:remarks`
+baseline, initialized only after successful fetching and persistence. This also
+suppresses history when the category is added to existing installations. Unknown
+IDs emit `Change(item_type="remark", change_type="new")`; edits are persisted
+silently, missing entries are soft-deleted and restored IDs remain known.
+Confirmed fetches update `last_success:<student>:remarks` and section outcomes.
+
+Notes have separate emails (`queue_remarks()`) prefixed by
+`EMAIL_REMARK_SUBJECT_PREFIX` (default `[Uwagi]`), containing the full note and a
+student-specific Pochwały i uwagi link. They are excluded from digest/AI input.
+Deduplication scopes note ID by student and recipient. Existing SMTP/outbox delivery
+limitations also apply to these emails. MQTT emits `school/<student>/remarks/new`
+(with the configurable topic prefix), including the raw numeric type/kind and URL.
 
 ## Notification channels
 
@@ -280,6 +295,7 @@ Long-running aiohttp server on port 8585, reading the same SQLite the sync write
 | `GET /api/homework?n=` | Recent homework. |
 | `GET /api/exams?student=&days=` | Upcoming exams. |
 | `GET /api/messages?n=` | Recent messages (with content once backfilled). |
+| `GET /api/remarks?student=&n=` | Latest active praise/notes per active student from SQLite; optional exact student name filter, default 20 rows per student, limit 1–1000. Includes remarks freshness metadata. |
 | `GET /api/schedule?student=&only_substitutions=&days=` | Lesson schedule including substitutions/cancellations. |
 | `GET /calendar/<student>.ics` | Per-student iCalendar feed (see below). |
 

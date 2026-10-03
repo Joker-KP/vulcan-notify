@@ -6,7 +6,7 @@ import asyncio
 import logging
 import random
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import aiohttp
 
@@ -20,6 +20,7 @@ from vulcan_notify.models import (
     Homework,
     Lesson,
     Message,
+    Remark,
     Student,
     SubjectSummary,
 )
@@ -221,6 +222,49 @@ class VulcanClient:
             for s in data["uczniowie"]
             if s.get("aktywny", True)
         ]
+
+    async def get_remarks(self, student: Student) -> list[Remark]:
+        """Fetch both praise and notes from the student's Pochwały i uwagi view."""
+        key = quote(student.key, safe="")
+        data = await self._request(f"/api/Uwagi?key={key}")
+        if not isinstance(data, list):
+            raise VulcanFetchError("/api/Uwagi response is not a list")
+        remarks: list[Remark] = []
+        required = {"id", "data", "kategoria", "typ", "autor", "tresc", "rodzaj", "liczbaPunktow"}
+        for item in data:
+            if not isinstance(item, dict) or not required.issubset(item):
+                raise VulcanFetchError("/api/Uwagi item is missing required fields")
+            if any(
+                not isinstance(item[name], str) for name in ("data", "kategoria", "autor", "tresc")
+            ):
+                raise VulcanFetchError("/api/Uwagi item has invalid text fields")
+            for name in ("id", "typ", "rodzaj"):
+                value = item[name]
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or value != int(value)
+                ):
+                    raise VulcanFetchError("/api/Uwagi item has invalid numeric fields")
+            points = item["liczbaPunktow"]
+            if points is not None and (
+                isinstance(points, bool) or not isinstance(points, (int, float))
+            ):
+                raise VulcanFetchError("/api/Uwagi item has invalid points")
+            remarks.append(
+                Remark(
+                    id=int(item["id"]),
+                    date=item["data"],
+                    category=item["kategoria"],
+                    type=int(item["typ"]),
+                    author=item["autor"],
+                    content=item["tresc"],
+                    kind=int(item["rodzaj"]),
+                    points=points,
+                    url=f"{self._base_url.rstrip('/')}/App/{key}/pochwalyUwagi",
+                )
+            )
+        return remarks
 
     # ── Grades ───────────────────────────────────────────────────────
 

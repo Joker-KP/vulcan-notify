@@ -83,8 +83,7 @@ The list above describes product direction. Current implementation status is:
 | Exams/tests/quizzes and homework | Implemented | Lists and detail backfill; new-item events and soft deletes. No update/delete events. |
 | Messages | Implemented with bounded coverage | Unified inbox, latest 50 messages per sync; new-message content and bounded historical content backfill. No full inbox pagination. |
 | Lesson schedule and substitutions/cancellations/additions | Implemented with bounded coverage | Previous 7 days through next 14 days; change semantics are described in section 5. |
-| Remarks / behavior notes | Documented endpoint, not synchronized | `/api/Uwagi` is documented in `docs/eduvulcan-api.md`; no complete client/model/persistence/diff flow. |
-| Praise / positive remarks | Planned | No dedicated synchronization flow. |
+| Remarks and praise | Implemented from recorded API contract | `/api/Uwagi`; per-student IDs, full content, independent category baseline, new-ID events, silent updates and soft deletes. Live behavior not verified during implementation. |
 
 Output-channel status is documented in section 6. Implemented coverage does not imply live eduVULCAN behavior has been verified in the current task.
 
@@ -201,7 +200,7 @@ First synchronization must not generate a flood of historical notifications.
 
 `sync_messages()` uses a separate account-level marker, `sync_state["last_sync:messages"]`, for the unified inbox and suppresses new-message notifications on its first sync.
 
-There are no per-category baseline markers. Adding a category for an already synchronized student does not automatically suppress historical notifications. New categories must explicitly provide baseline behavior for existing installations; do not assume the student marker is sufficient.
+`remarks` uses `last_sync:{student.key}:remarks`, initialized only after a successful fetch and persistence (including an empty list). It suppresses historical events when upgrading an existing installation. Other categories have no per-category baseline markers; adding them to an already synchronized student does not automatically suppress historical notifications. New categories must explicitly provide baseline behavior for existing installations; do not assume the student marker is sufficient.
 
 ### Current change semantics
 
@@ -210,6 +209,7 @@ There are no per-category baseline markers. Adding a category for an already syn
 | Grades | `column_id` within the student | `new` for an unknown column; `updated` only when `value` changes. Metadata changes do not emit events. |
 | Attendance | `(date, lesson_number)` within the student | `new` only for an unknown record with `category != 1`. Changes to an existing record's category do not emit events. |
 | Exams and homework | Upstream numeric `id`, checked against the student's stored IDs | New-item events only. Missing items are soft-deleted after baseline; updates and soft deletes do not emit `Change` events. |
+| Remarks/praise | `(student_key, id)` | New-ID events only; content/metadata updates are persisted silently, missing items are soft-deleted, restoration does not re-notify. |
 | Messages | Numeric `Message.id` in the unified inbox | New messages are returned separately in `FullSyncResult.new_messages`, not as `Change` objects. `api_global_key` has a DB uniqueness constraint and is used to fetch message detail. |
 | Schedule | `(date, time_from, subject)` within the student | New/updated substitutions when the fetched lesson is substituted; new extra lessons without substitution emit additions. Stored lessons missing within the diff window emit cancellations and are deleted from the DB. Ordinary lesson changes and complete removal of substitution fields do not emit substitution events. |
 
@@ -257,7 +257,7 @@ Useful for development, diagnostics, cron/container logs and manual synchronizat
 
 ### Email
 
-`email.py` prepares a plain digest of student changes in the current `FullSyncResult` when `EMAIL_ENABLED=true`, including partial results before session recovery. New messages are excluded from the digest and each creates a separate email with `EMAIL_MESSAGE_SUBJECT_PREFIX` (default `[Nowa wiadomość]`) plus the original subject. Baselines and unchanged runs create no email. Both notifications and the digest are committed to `email_outbox` before optional AI preparation or SMTP delivery. `EMAIL_AI_SUMMARY=true` also requires `LLM_API_KEY`; AI failure falls back to the plain digest. Message bodies require `EMAIL_INCLUDE_MESSAGE_BODIES=true`. Individual messages do not use AI and are excluded from digest AI input.
+`email.py` prepares a plain digest of student changes in the current `FullSyncResult` when `EMAIL_ENABLED=true`, including partial results before session recovery. New messages are excluded from the digest and each creates a separate email with `EMAIL_MESSAGE_SUBJECT_PREFIX` (default `[Nowa wiadomość]`) plus the original subject. New praise/notes each create a separate email with `EMAIL_REMARK_SUBJECT_PREFIX` (default `[Uwagi]`), student name and category. Full note content is always included; `EMAIL_INCLUDE_MESSAGE_BODIES` controls inbox messages only. These notes are excluded from the digest and AI input, use student/ID/recipient deduplication and link to the authenticated student base URL `/App/{URL-encoded student key}/pochwalyUwagi`. Baselines and unchanged runs create no email. Both notifications and the digest are committed to `email_outbox` before optional AI preparation or SMTP delivery. `EMAIL_AI_SUMMARY=true` also requires `LLM_API_KEY`; AI failure falls back to the plain digest. Message bodies require `EMAIL_INCLUDE_MESSAGE_BODIES=true`. Individual messages do not use AI and are excluded from digest AI input.
 
 Individual message bodies use Polish metadata labels without repeating the subject; the sender value is bold in HTML. Dates display as `YYYY-MM-DD HH:MM (dzień tygodnia)` in `QUIET_HOURS_TZ` (default `Europe/Warsaw`); weekday names are Polish and derived after timezone conversion. Source offsets and daylight-saving rules are respected. Naive source timestamps mean UTC. Invalid zones fall back to UTC and unparseable date strings are preserved.
 
@@ -694,6 +694,7 @@ Direct environment readers do not load `.env` themselves. Compose uses `env_file
 | `SMTP_USERNAME`, `SMTP_PASSWORD` | `Settings` | Unset; optional credentials, configured together. |
 | `EMAIL_SUBJECT_PREFIX` | `Settings` | `eduVULCAN`. |
 | `EMAIL_MESSAGE_SUBJECT_PREFIX` | `Settings` | `[Nowa wiadomość]`; followed by each original message subject. |
+| `EMAIL_REMARK_SUBJECT_PREFIX` | `Settings` | `[Uwagi]`; followed by student name and category for each new praise/note. |
 | `SMTP_TIMEOUT_SECONDS`, `EMAIL_AI_TIMEOUT_SECONDS` | `Settings` | Both `30`; socket-operation and AI-preparation timeouts. |
 | `POLL_INTERVAL` | `sync-loop.sh`; also declared in `Settings` | `1800` seconds in both readers. |
 | `QUIET_HOURS_START`, `QUIET_HOURS_END` | `sync-loop.sh` and `Settings` | `0`, `5`; equal values disable quiet hours. |

@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from vulcan_notify.config import parse_email_sender, settings
+from vulcan_notify.models import Remark
 from vulcan_notify.summarizer import summarize
 from vulcan_notify.text import message_html, message_text, strip_html
 
@@ -34,11 +35,12 @@ def format_summary(result: FullSyncResult) -> tuple[str, int]:
     lines = ["eduVULCAN — detected changes", ""]
     count = 0
     for student_result in result.student_results:
-        if student_result.is_first_sync or not student_result.all_changes:
+        changes = [change for change in student_result.all_changes if change.item_type != "remark"]
+        if student_result.is_first_sync or not changes:
             continue
         student = student_result.student
         lines.append(f"{student.name} ({student.class_name}, {student.school}):")
-        for change in student_result.all_changes:
+        for change in changes:
             count += 1
             lines.append(f"- [{change.item_type}/{change.change_type}] {strip_html(change.title)}")
             if change.body:
@@ -73,7 +75,7 @@ def _format_message_date(value: str, config: Settings) -> str:
 
 def _message_metadata(message: Message, config: Settings) -> list[str]:
     lines = [
-        f"Nadawca: {strip_html(message.sender)}",
+        f"Autor: {strip_html(message.sender)}",
         f"Data: {_format_message_date(message.date, config)}",
         f"Skrzynka: {message.mailbox}",
     ]
@@ -94,7 +96,7 @@ def _message_html(message: Message, config: Settings) -> str:
     """Render metadata, original body layout and the public inbox footer."""
     metadata = _message_metadata(message, config)
     sender = escape(strip_html(message.sender))
-    content = f"Nadawca: <strong>{sender}</strong><br>\n"
+    content = f"Autor: <strong>{sender}</strong><br>\n"
     content += "<br>\n".join(escape(line) for line in metadata[1:])
     if config.email_include_message_bodies and message.content:
         original = message_html(message.content, message.mailbox_url)
@@ -157,6 +159,45 @@ async def queue_messages(result: FullSyncResult, db: Database) -> None:
         if message.mailbox_url:
             body += f"\n\nOtwórz skrzynkę wiadomości:\n{message.mailbox_url}"
         await _queue_email(db, identity, subject, body, html_body)
+    await db.commit()
+
+
+async def queue_remarks(result: FullSyncResult, db: Database) -> None:
+    """One praise/note per recipient, using student-scoped upstream identity."""
+    if not settings.email_enabled:
+        return
+    for sr in result.student_results:
+        if sr.is_first_sync or sr.is_first_remarks_sync:
+            continue
+        for change in sr.new_remarks:
+            remark = change.raw
+            if not isinstance(remark, Remark):
+                continue
+            title = " ".join(strip_html(f"{sr.student.name}: {remark.category}").split())
+            subject = f"{settings.email_remark_subject_prefix} {title}".strip()
+            metadata = [
+                f"Autor: {strip_html(remark.author)}",
+                f"Data: {_format_message_date(remark.date, settings)}",
+                f"Kategoria: {strip_html(remark.category)}",
+            ]
+            if remark.points is not None:
+                metadata.append(f"Punkty: {remark.points:g}")
+            body = "\n".join(metadata) + "\n\n" + message_text(remark.content, remark.url)
+            html_body = '<html><body><div style="font-family:Arial,sans-serif">'
+            html_body += "<br>\n".join(escape(line) for line in metadata)
+            html_body += (
+                f'<div style="margin-top:16px">{message_html(remark.content, remark.url)}</div>'
+            )
+            if remark.url:
+                body += f"\n\nOtwórz pochwały i uwagi:\n{remark.url}"
+                html_body += (
+                    '<div style="margin-top:24px"><a style="display:inline-block;'
+                    "padding:10px 14px;border:1px solid #999;border-radius:6px;"
+                    'text-decoration:none;font-weight:600" '
+                    f'href="{escape(remark.url, quote=True)}">Otwórz pochwały i uwagi</a></div>'
+                )
+            html_body += "</div></body></html>"
+            await _queue_email(db, f"remark:{sr.student.key}:{remark.id}", subject, body, html_body)
     await db.commit()
 
 
@@ -271,6 +312,7 @@ async def publish_email(result: FullSyncResult, db: Database) -> None:
     try:
         # Persist individual messages before optional AI preparation of the digest.
         await queue_messages(result, db)
+        await queue_remarks(result, db)
         await queue_summary(result, db)
         await drain_email_outbox(db)
     except Exception as exc:

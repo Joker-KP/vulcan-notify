@@ -34,6 +34,7 @@ def _client(**overrides: object) -> AsyncMock:
     client.get_exams = AsyncMock(return_value=[])
     client.get_homework = AsyncMock(return_value=[])
     client.get_schedule = AsyncMock(return_value=[])
+    client.get_remarks = AsyncMock(return_value=[])
     client.get_dashboard = AsyncMock(return_value=DashboardData(unread_messages=0))
     client.get_messages = AsyncMock(return_value=[])
     client.get_message_detail = AsyncMock(return_value=None)
@@ -165,7 +166,15 @@ async def test_prune_respects_retention(db: Database, keep_days: int) -> None:
 
 @pytest.mark.parametrize(
     "method",
-    ["get_periods", "get_attendance", "get_exams", "get_homework", "get_schedule", "get_messages"],
+    [
+        "get_periods",
+        "get_attendance",
+        "get_exams",
+        "get_homework",
+        "get_schedule",
+        "get_remarks",
+        "get_messages",
+    ],
 )
 async def test_session_expiry_reaches_cli_recovery(db: Database, method: str) -> None:
     from vulcan_notify.client import SessionExpiredError

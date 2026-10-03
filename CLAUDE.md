@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-CLI tool that syncs data from the eduVulcan school e-journal (grades, attendance, exams, homework, messages) to a local SQLite database and detects changes between syncs. Uses HTTP cookie validation and persistent Chromium recovery before credential login. Manual headed authentication is available through the explicit `vulcan-auth` Compose profile. Read `AGENTS.md` for current local Docker/auth behavior.
+CLI tool that syncs data from the eduVulcan school e-journal (grades, attendance, exams, homework, praise/notes, messages) to a local SQLite database and detects changes between syncs. Uses HTTP cookie validation and persistent Chromium recovery before credential login. Manual headed authentication is available through the explicit `vulcan-auth` Compose profile. Read `AGENTS.md` for current local Docker/auth behavior.
 
 ## Sibling repos (cross-repo work is common)
 
@@ -53,15 +53,15 @@ The tool follows a linear pipeline: **Auth -> Client -> Sync -> Diff -> Display*
 
 - `models.py` - Dataclasses for all API response types: `Student`, `Grade`, `AttendanceEntry`, `Exam`, `Homework`, `ClassificationPeriod`, `DashboardData`.
 
-- `sync.py` - `sync_all()` orchestrates per-student sync: fetch data via client, diff against stored state, upsert into database. Returns `SyncResult` per student. First sync stores baseline without reporting changes.
+- `sync.py` - `sync_all()` orchestrates per-student sync: fetch data via client, diff against stored state, upsert into database. Returns `SyncResult` per student. First sync stores baseline without reporting changes. Praise/notes also use their own successful-fetch baseline (`last_sync:<student>:remarks`) for upgrades, with new-ID events and silent updates/soft deletes.
 
 - `differ.py` - Compares fetched API data against stored database rows. `diff_grades()` detects new/updated grades by column_id. `diff_attendance()` detects new records by (date, lesson_number). Returns `Change` dataclasses.
 
 - `display.py` - Formats `SyncResult` for terminal output with ANSI colors (auto-disabled when piped). Groups by student, then by data type.
 
-- `email.py` - Optional per-sync SMTP digest of student changes plus a separate email per new message, with persistent per-recipient retries. Message notifications include a text link and HTML inbox button derived from the session tenant, stored in the outbox for retries. AI replacement applies to the change digest only; message bodies are excluded by default. See `docs/email.md` for configuration and delivery limits.
+- `email.py` - Optional per-sync SMTP digest of student changes plus a separate email per new message or praise/note, with persistent per-recipient retries. `EMAIL_REMARK_SUBJECT_PREFIX` defaults to `[Uwagi]`; full note content and a student-specific Pochwały i uwagi link are included, excluded from digest/AI input. Message notifications include a text link and HTML inbox button derived from the session tenant, stored in the outbox for retries. AI replacement applies to the change digest only; message bodies are excluded by default. See `docs/email.md` for configuration and delivery limits.
 
-- `db.py` - `Database` class wrapping aiosqlite. Normalized tables: students, grades, attendance, exams, homework, messages, sync_state. Entity writes use ON CONFLICT DO UPDATE for idempotent upserts. Per-section outcomes and confirmed-fetch timestamps drive freshness checks.
+- `db.py` - `Database` class wrapping aiosqlite. Normalized tables: students, grades, attendance, exams, homework, remarks, messages, sync_state. The additive `remarks` table is keyed by `(student_key, id)` and retains original numeric type/kind, full content and soft-deleted history. Entity writes use ON CONFLICT DO UPDATE for idempotent upserts. Per-section outcomes and confirmed-fetch timestamps drive freshness checks.
 
 - `config.py` - `pydantic-settings` `Settings` singleton loaded from `.env`.
 
