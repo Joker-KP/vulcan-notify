@@ -355,7 +355,12 @@ independent of `SYNC_COMPLETED_LESSONS_DAYS`; AI sees only history already fetch
 so choose a synchronization window large enough to cover the desired period.
 The default prompt groups topics by student and subject, combines related topics
 and omits routine activities such as lunch, commuting and breaks. This selection
-is performed by the model and can be customized in `[default]` in `prompts.toml`.
+explicitly excludes daily **obiad**, weekly **Przejazd na basen** and
+**Przejazd na Jasną** (commuting to sports classes), including equivalent wording.
+Actual educational or sports lesson content is retained; summaries do not list
+the omitted routine activities. This applies to both `[default]` learning context
+and `[lessons]` standalone/mixed summaries. Selection is performed by the model
+and can be customized in the corresponding profile in `prompts.toml`.
 It describes recorded topics, without assuming skills or learning outcomes.
 
 Topics are additional AI context, rather than notification events. Baselines,
@@ -377,6 +382,65 @@ defaults to `LLM_LESSONS_DAYS`. It works independently of email and the
 context switch, reading active students' stored topics. CLI `--type sync` uses
 `LLM_INCLUDE_LESSONS` and `LLM_LESSONS_DAYS` for optional topic
 context; its `--days` continues to set the separate change-history range.
+
+### Mixed summary email
+
+```bash
+uv run vulcan-notify summarize --type mix --days 7
+```
+
+`mix` reads local SQLite without authentication or a new eduVULCAN sync. It
+independently runs the same AI profiles and inputs as `--type messages` and
+`--type lessons`, passing `--days` to both data queries. The default is 7 for both,
+independent of `LLM_LESSONS_DAYS`. Message selection retains the existing
+`messages` date query; lessons use local calendar days including today, in `TZ`.
+
+The command requires `LLM_API_KEY`, `EMAIL_ENABLED=true` and valid SMTP/sender/
+recipient settings. `EMAIL_AI_SUMMARY`, `LLM_INCLUDE_LESSONS`,
+`EMAIL_INCLUDE_MESSAGE_BODIES` and `EMAIL_DIGEST_GROUPS` do not control this
+explicit summary: stored message bodies are included in its messages AI input,
+just as for `--type messages`.
+The `[messages]` prompt requests one concise, practical overview across the whole
+batch, combining related facts by topic and highlighting dates, deadlines and
+required actions. It avoids separate per-message summaries/checklists and repeated recaps.
+
+Each configured recipient receives one email using `layout.html`, with at most
+two sections, in this order:
+
+1. **Wiadomości**, rendered by `summary_messages.html`.
+2. **Przeprowadzone zajęcia**, rendered by `summary_lessons.html`.
+
+Both subtemplates accept `$content` and `$footer`. The `[messages]` and `[lessons]`
+prompts request Markdown, also for their standalone CLI summaries. In mixed
+emails, `markdown-it-py` converts that Markdown into HTML with inline email styles
+for headings, lists, emphasis and tables. Raw HTML is escaped and the rendered
+fragment goes through the existing local sanitizer; active content, unsafe links
+and remote images are removed. AI headings cannot replace the card/section h1/h2.
+The readable text MIME alternative is derived from the same HTML, including URLs.
+
+Each section ends with ordinary links using `summary_footer.html` (`$url`, `$label`).
+The messages link opens the unified inbox. Completed lessons have a link
+for each active stored student, labeled **Otwórz przeprowadzone zajęcia** without
+student names/classes. URLs use stable profile keys; retired profiles are excluded.
+Public URLs come from the
+saved session's tenant/base URL: `/App/odebrane` on the messages host and
+`/App/<URL-encoded student key>/realizacjaZajec` on the student host. Reading the
+session does not validate it upstream or start a browser. If it is missing or
+invalid, summaries still work and the links are omitted. The browser may
+require authentication. URLs and formatted bodies persist for SMTP retries.
+
+Missing source data, empty AI results or a failed/timed-out AI request omit that
+section. Each AI request uses `EMAIL_AI_TIMEOUT_SECONDS`. If neither section has
+a result, no new email is queued and the command exits nonzero.
+
+For 7 days, the subject is `<EMAIL_SUBJECT_PREFIX> Podsumowanie tygodnia`;
+other ranges use `<EMAIL_SUBJECT_PREFIX> Podsumowanie (ostatnie N dni)`.
+The email body retains its original day-range context. Generated
+content is committed to the per-recipient outbox before SMTP delivery. Failed
+SMTP delivery leaves it queued and exits nonzero; use `vulcan-notify email-retry`
+to resend the saved bodies and Message-ID without another AI request. Running
+`summarize --type mix` again creates a fresh summary email. This command also
+drains any previously queued emails.
 
 ## Delivery and retries
 

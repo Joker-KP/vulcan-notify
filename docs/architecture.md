@@ -90,7 +90,7 @@ Each student's grades, attendance, exams, homework and schedule has a successful
 | `mqtt.py` | Maps `Change` → topic + JSON payload; writes to the `mqtt_outbox` table; drains outbox to Mosquitto on every sync and publishes a retained heartbeat + LWT on `<prefix>/status`. | `topic_for()`, `build_payload()`, `build_status_payload()`, `drain_outbox()` |
 | `api.py` | aiohttp HTTP server (port 8585). Grade aggregates, homework/messages/schedule endpoints, iCalendar feed. | `build_app()` |
 | `ics.py` | Zero-dependency RFC 5545 iCalendar writer. | `build_calendar()` |
-| `summarizer.py` | Optional AI digest via OpenAI-compatible APIs (profiles: `sync`, `messages`). | `summarize()` |
+| `summarizer.py` | Optional AI summaries via OpenAI-compatible APIs (profiles: `default`, `messages`, `lessons`). | `summarize()`, `lessons_context()` |
 | `tui.py` | Optional Textual TUI for browsing synced content (extra `tui` install); Remarks tab (`6`) includes praise/notes, student filtering, sorting and full-content details with Vulcan URL. | `VulcanTuiApp` |
 
 ## Data model
@@ -165,6 +165,15 @@ The standalone `summarize --type lessons [--days N]` command reads the
 same stored topics. Prompts group by student/subject and omit routine activities;
 lesson-only changes still create no email or AI request. Exams/homework
 calendar adapters and the scheduled-lesson iCalendar feed do not consume them.
+Explicit `summarize --type mix [--days N]` runs the messages and lessons AI
+profiles separately, using the same range argument (default 7). Nonempty results
+form at most two email sections through `summary_messages.html` and
+`summary_lessons.html`, sharing `layout.html`. It requires enabled email and AI,
+converts Markdown results to sanitized HTML with inline email styles, and adds
+inbox/active student lesson-list links from the saved session when available. It
+persists the final MIME bodies in the existing outbox, then drains SMTP retries.
+It operates independently of automatic digest AI/context switches and does not
+change synchronization notifications or the database schema.
 The recorded API contract and synthetic populated resource JSON are tested;
 live upstream behavior has not been verified in this implementation task.
 

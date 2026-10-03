@@ -13,11 +13,14 @@ from email.message import EmailMessage
 from email.utils import format_datetime, make_msgid
 from html import escape
 from typing import TYPE_CHECKING, Literal
+from urllib.parse import urlsplit
 from uuid import uuid4
 
+from vulcan_notify.auth import InvalidSessionError, load_session
+from vulcan_notify.client import VulcanClient
 from vulcan_notify.config import parse_email_sender, settings
 from vulcan_notify.email_digest import GROUPS, render_summary
-from vulcan_notify.email_rendering import render_email, render_template
+from vulcan_notify.email_rendering import markdown_html, render_email, render_template
 from vulcan_notify.models import Remark
 from vulcan_notify.summarizer import lessons_context, summarize
 from vulcan_notify.text import message_html, message_text, strip_html
@@ -256,6 +259,65 @@ async def _queue_email(
         if inserted:
             new_keys.append(key)
     return new_keys
+
+
+async def _mix_summary_footers(db: Database) -> tuple[str, str]:
+    """Use saved public tenant/profile URLs without validating or refreshing auth."""
+    try:
+        session = load_session(settings.session_file)
+    except (OSError, InvalidSessionError):
+        return "", ""
+    base = urlsplit(session["base_url"])
+    if base.query or base.fragment:
+        return "", ""
+    client = VulcanClient(session)
+    messages = render_template(
+        "summary_footer",
+        url=escape(client.message_inbox_url, quote=True),
+        label="Otwórz skrzynkę wiadomości",
+    )
+    students = await db.get_all_students(active_only=True)
+    lessons = "\n".join(
+        render_template(
+            "summary_footer",
+            url=escape(
+                client.student_module_url(str(student["key"]), "completed_lesson"), quote=True
+            ),
+            label="Otwórz przeprowadzone zajęcia",
+        )
+        for student in students
+    )
+    return messages, lessons
+
+
+async def queue_mix_summary(
+    db: Database, messages_summary: str | None, lessons_summary: str | None, days: int
+) -> None:
+    """Persist one mixed AI email per recipient; retries reuse the rendered results."""
+    if not settings.email_enabled:
+        return
+    if not any(summary and summary.strip() for summary in (messages_summary, lessons_summary)):
+        return
+    messages_footer, lessons_footer = await _mix_summary_footers(db)
+    sections = [
+        render_template(template, content=markdown_html(summary.strip()), footer=footer)
+        for template, summary, footer in (
+            ("summary_messages", messages_summary, messages_footer),
+            ("summary_lessons", lessons_summary, lessons_footer),
+        )
+        if summary and summary.strip()
+    ]
+    html = render_email(
+        "Podsumowanie Dziennika eduVULCAN",
+        "\n".join(sections),
+        heading_context=f"Ostatnie {days} dni",
+    )
+    title = "Podsumowanie tygodnia" if days == 7 else f"Podsumowanie (ostatnie {days} dni)"
+    subject = f"{settings.email_subject_prefix} {title}".strip()
+    await _queue_email(
+        db, f"summary:mix:{uuid4().hex}", subject, message_text(html, include_links=True), html
+    )
+    await db.commit()
 
 
 async def queue_messages(result: FullSyncResult, db: Database) -> None:

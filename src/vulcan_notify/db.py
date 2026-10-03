@@ -443,9 +443,10 @@ class Database:
         )
         return cursor.rowcount
 
-    async def get_all_students(self) -> list[dict[str, object]]:
+    async def get_all_students(self, *, active_only: bool = False) -> list[dict[str, object]]:
+        where = " WHERE active=1" if active_only else ""
         cursor = await self.db.execute(
-            "SELECT key, name, class_name, school FROM students ORDER BY name"
+            f"SELECT key, name, class_name, school FROM students{where} ORDER BY name"
         )
         rows = await cursor.fetchall()
         return [{"key": r[0], "name": r[1], "class_name": r[2], "school": r[3]} for r in rows]

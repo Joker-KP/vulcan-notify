@@ -38,6 +38,7 @@ STUDENT_PAGE_PATHS = {
     "addition": "planZajec",
     "exam": "sprawdzianyZadaniaDomowe",
     "homework": "sprawdzianyZadaniaDomowe",
+    "completed_lesson": "realizacjaZajec",
 }
 
 # Mimic a real Chrome browser to avoid bot detection
@@ -220,6 +221,18 @@ class VulcanClient:
         """Public student app URL, without session cookies or tokens."""
         return f"{self._base_url.rstrip('/')}/App/{quote(student.key, safe='')}"
 
+    def student_module_url(self, student_key: str, module: str) -> str:
+        """Public module URL for a locally stored student profile."""
+        return (
+            f"{self._base_url.rstrip('/')}/App/{quote(student_key, safe='')}/"
+            f"{STUDENT_PAGE_PATHS[module]}"
+        )
+
+    @property
+    def message_inbox_url(self) -> str:
+        """Public unified inbox URL for this tenant."""
+        return f"{self._messages_base}/App/odebrane"
+
     async def get_students(self) -> list[Student]:
         data = await self._request("/api/Context")
         # A 200 that doesn't carry the key we expect means the API shape moved under
@@ -335,7 +348,7 @@ class VulcanClient:
                 collections=item["kolekcjePoLekcji"],
                 has_collections=item["existsKolekcjePoLekcji"],
                 resources=item["zasoby"],
-                url=f"{self.student_portal_url(student)}/realizacjaZajec",
+                url=self.student_module_url(student.key, "completed_lesson"),
             )
             if lesson.id in lessons and lessons[lesson.id] != lesson:
                 raise VulcanFetchError(f"{endpoint} has conflicting duplicate IDs")
@@ -629,7 +642,7 @@ class VulcanClient:
                 mailbox=m.get("skrzynka", ""),
                 has_attachments=m.get("hasZalaczniki", False),
                 is_read=m.get("przeczytana", False),
-                mailbox_url=f"{self._messages_base}/App/odebrane",
+                mailbox_url=self.message_inbox_url,
                 mailbox_key=resolved_mailboxes.get(m.get("skrzynka", "").strip(), ""),
             )
             for m in data

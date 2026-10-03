@@ -71,7 +71,7 @@ uv run vulcan-notify sync
 | `vulcan-notify email-retry` | Retry queued SMTP digests without contacting eduVULCAN |
 | `vulcan-notify calendar` | Force re-sync all exams/homework to macOS Calendar |
 | `vulcan-notify tui` | Interactive Textual browser for synced content (requires `uv sync --extra tui`) |
-| `vulcan-notify summarize [--type sync\|messages\|lessons] [--days N]` | AI summary of stored changes, messages or lesson topics (requires `LLM_API_KEY`) |
+| `vulcan-notify summarize [--type sync\|messages\|lessons\|mix] [--days N]` | AI summary of stored changes, messages or lesson topics; `mix` emails messages and lessons together (requires `LLM_API_KEY`) |
 
 In the TUI, press `6` for **Remarks** (praise and behavior notes). The list shows
 date, student, category, author, optional points and a content preview. Press Enter
@@ -91,6 +91,13 @@ calendar days including today by default (`LLM_LESSONS_DAYS=7`).
 The prompt groups by student/subject and omits routine activities such as lunch
 or commuting. A standalone topic summary uses `summarize --type lessons
 --days 7`; see [AI configuration](docs/email.md#optional-ai-summary).
+Use `vulcan-notify summarize --type mix --days 7` to email separate AI summaries
+of messages and completed lessons in one styled email. Empty results are omitted.
+Markdown output is rendered as HTML with **Wiadomości** and **Przeprowadzone
+zajęcia** sections, each ending with links to the corresponding eduVULCAN views
+when the saved session is available.
+This requires `EMAIL_ENABLED=true` and configured SMTP; `--days` defaults to 7
+for both sections. See [mixed summary emails](docs/email.md#mixed-summary-email).
 The default window is the past 90 days plus today (`SYNC_COMPLETED_LESSONS_DAYS`).
 Missing entries are soft-deleted within the fetched window; older history is kept.
 The table is created automatically on startup. Recorded/synthetic responses are

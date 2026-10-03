@@ -18,6 +18,13 @@ trigger emails or form digest groups. `LLM_INCLUDE_LESSONS=true` optionally
 adds stored topics as AI context for email/CLI change summaries, with
 `LLM_LESSONS_DAYS=7` local calendar days including today. Standalone
 `summarize --type lessons [--days N]` uses `[lessons]` prompts.
+`summarize --type mix [--days N]` (default 7) separately uses `[messages]` and
+`[lessons]` to email at most two nonempty summaries through dedicated
+`summary_messages.html` / `summary_lessons.html` subtemplates and `layout.html`.
+Prompts request Markdown; mixed emails render sanitized HTML, with inbox and
+active student lesson-list links from the saved session (omitted if unavailable).
+Requires enabled SMTP email and an LLM key, independently of digest AI/context
+switches. Final bodies persist in the existing outbox; retries do not rerun AI.
 Default prompts group by student/subject and omit routine activities.
 Collections/resources retain JSON
 without assumptions about unverified populated upstream shapes. Live behavior

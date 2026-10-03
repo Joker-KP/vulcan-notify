@@ -212,6 +212,15 @@ emit events, while soft deletion and restoration stay silent. Missing records ar
 soft-deleted only within the successfully fetched UTC interval. Rolled-out history
 remains stored. Category events remain excluded from email; stored topics can
 optionally provide AI context with `LLM_INCLUDE_LESSONS=true`.
+Explicit `summarize --type mix [--days N]` separately summarizes stored messages
+and lesson topics with their existing AI profiles (default 7 days for both), then
+emails at most two nonempty sections using dedicated subtemplates and the shared
+layout. Markdown results are converted to sanitized HTML; section footers link
+to the inbox and each active student's completed lessons using the saved session.
+Missing/invalid session files omit links without blocking summaries.
+Requires enabled SMTP email and an LLM key, independently of automatic
+digest AI/context switches. Final bodies persist in the existing email outbox;
+retries reuse them without AI. This does not add lesson sync email events.
 
 ### Current change semantics
 

@@ -24,6 +24,7 @@ from vulcan_notify.email import (
     drain_email_outbox,
     publish_auth_failure,
     publish_email,
+    queue_mix_summary,
 )
 from vulcan_notify.mqtt import drain_outbox, publish_changes
 from vulcan_notify.summarizer import format_changes_for_llm, lessons_context, summarize
@@ -347,6 +348,9 @@ async def cmd_summarize(summary_type: str = "sync", days: int | None = None) -> 
     if not settings.llm_api_key:
         print("LLM_API_KEY not set. Configure it in .env to use AI summaries.")
         sys.exit(1)
+    if summary_type == "mix" and not settings.email_enabled:
+        print("EMAIL_ENABLED must be true to send a mixed summary email.")
+        sys.exit(1)
 
     db = Database(settings.db_path)
     await db.connect()
@@ -356,6 +360,8 @@ async def cmd_summarize(summary_type: str = "sync", days: int | None = None) -> 
             await _summarize_messages(db, days)
         elif summary_type == "lessons":
             await _summarize_lessons(db, days)
+        elif summary_type == "mix":
+            await _summarize_mix(db, days)
         else:
             await _summarize_changes(db, days)
     finally:
@@ -398,13 +404,9 @@ async def _summarize_lessons(db: Database, days: int) -> None:
         sys.exit(1)
 
 
-async def _summarize_messages(db: Database, days: int) -> None:
-    """Summarize recent messages from the database."""
+async def _messages_context(db: Database, days: int) -> tuple[str, int]:
+    """Share the messages AI input between standalone and mixed summaries."""
     messages = await db.get_recent_messages(days=days)
-    if not messages:
-        print(f"No messages in the last {days} days. Try a larger range with --days.")
-        sys.exit(1)
-
     lines: list[str] = []
     for msg in messages:
         lines.append(f"From: {msg['sender']}")
@@ -416,20 +418,58 @@ async def _summarize_messages(db: Database, days: int) -> None:
             lines.append(f"Content: {msg['content']}")
         lines.append("")
 
-    text = "\n".join(lines)
+    return "\n".join(lines), len(messages)
+
+
+async def _summarize_messages(db: Database, days: int) -> None:
+    """Summarize recent messages from the database."""
+    text, count = await _messages_context(db, days)
+    if not text:
+        print(f"No messages in the last {days} days. Try a larger range with --days.")
+        sys.exit(1)
     summary = await summarize(text, settings, profile="messages")
     if summary:
-        print(f"{BOLD}Messages Summary (last {days} days, {len(messages)} messages){RESET}")
+        print(f"{BOLD}Messages Summary (last {days} days, {count} messages){RESET}")
         print(summary)
     else:
         print("Failed to generate summary.")
         sys.exit(1)
 
 
+async def _summarize_mix(db: Database, days: int) -> None:
+    """Email independent messages/lessons AI results in at most two sections."""
+    messages, _ = await _messages_context(db, days)
+    lessons = await lessons_context(db, settings, days=days)
+    summaries: dict[str, str | None] = {}
+    for profile, text in (("messages", messages), ("lessons", lessons)):
+        summary = None
+        if text:
+            try:
+                summary = await asyncio.wait_for(
+                    summarize(text, settings, profile=profile),
+                    timeout=settings.email_ai_timeout_seconds,
+                )
+            except TimeoutError:
+                logger.warning("Mixed summary AI timed out (%s)", profile)
+            if not summary or not summary.strip():
+                print(f"Failed to generate {profile} summary; omitting its email section.")
+        summaries[profile] = summary.strip() if summary else None
+    if not any(summaries.values()):
+        print(f"No mixed summary to email for the last {days} day(s).")
+        sys.exit(1)
+    await queue_mix_summary(db, summaries["messages"], summaries["lessons"], days)
+    delivered, pending = await drain_email_outbox(db)
+    print(f"Summary email: SMTP accepted={delivered}, pending={pending}.")
+    if pending:
+        print("Queued emails can be retried with vulcan-notify email-retry.")
+        sys.exit(1)
+
+
 def _print_summary_help() -> None:
-    print("Usage: vulcan-notify summarize [--type sync|messages|lessons] [--days N]")
-    print("    --type sync|messages|lessons  (default: sync)")
+    print("Usage: vulcan-notify summarize [--type sync|messages|lessons|mix] [--days N]")
+    print("    --type sync|messages|lessons|mix  (default: sync; mix sends an email)")
     print("    --days N  (default: 7; lessons uses LLM_LESSONS_DAYS)")
+    print("    mix requires EMAIL_ENABLED=true and configured SMTP settings")
 
 
 def main() -> None:
@@ -472,8 +512,8 @@ def main() -> None:
                     except ValueError:
                         print("--days must be a positive integer.")
                         sys.exit(1)
-            if summary_type not in ("sync", "messages", "lessons"):
-                print("Invalid --type. Use 'sync', 'messages' or 'lessons'.")
+            if summary_type not in ("sync", "messages", "lessons", "mix"):
+                print("Invalid --type. Use 'sync', 'messages', 'lessons' or 'mix'.")
                 sys.exit(1)
             asyncio.run(cmd_summarize(summary_type=summary_type, days=days))
         case _:
@@ -490,7 +530,7 @@ def main() -> None:
             print("  email-retry - Retry queued SMTP digests without an upstream sync")
             print("  calendar  - Force re-sync all events to macOS Calendar")
             print("  tui       - Interactive message browser")
-            print("  summarize - AI summary of recent changes, messages or completed lesson topics")
+            print("  summarize - AI summary of changes, messages or lessons; mix emails both")
             _print_summary_help()
             sys.exit(1)
 
