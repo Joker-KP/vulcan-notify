@@ -12,6 +12,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
+EmailDigestGroup = Literal[
+    "grade", "attendance", "substitution", "cancellation", "addition", "exam", "homework"
+]
+
 
 def parse_email_sender(value: str) -> Address:
     """Parse one sender mailbox, optionally including a display name."""
@@ -123,7 +127,9 @@ class Settings(BaseSettings):
     email_enabled: bool = False
     email_from: str = ""
     email_to: list[str] = []
-    email_subject_prefix: str = "eduVULCAN"
+    email_subject_prefix: str = "[eduVulcan]"
+    # Omitted groups are enabled; JSON object in .env, e.g. {"attendance": false}.
+    email_digest_groups: dict[EmailDigestGroup, bool] = Field(default_factory=dict)
     email_message_subject_prefix: str = "[Nowa wiadomość]"
     email_remark_subject_prefix: str = "[Uwagi]"
     email_include_message_bodies: bool = False

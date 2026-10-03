@@ -1,6 +1,6 @@
 """Integration tests for the sync pipeline."""
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 from vulcan_notify.db import Database
 from vulcan_notify.models import (
@@ -56,6 +56,9 @@ def _make_mock_client(
     homework: list[Homework] | None = None,
 ) -> AsyncMock:
     client = AsyncMock()
+    client.student_portal_url = MagicMock(
+        side_effect=lambda student: f"https://uczen.eduvulcan.pl/example/App/{student.key}"
+    )
     client.get_students = AsyncMock(return_value=[STUDENT_A] if students is None else students)
     client.get_periods = AsyncMock(return_value=[PERIOD])
     grade_list = [] if grades is None else grades
@@ -81,6 +84,7 @@ async def test_first_sync_stores_baseline(db: Database) -> None:
     result = await sync_student(client, db, STUDENT_A)
 
     assert result.is_first_sync is True
+    assert result.portal_url == "https://uczen.eduvulcan.pl/example/App/KEYA"
     assert result.has_changes is False
 
     # Data should be stored

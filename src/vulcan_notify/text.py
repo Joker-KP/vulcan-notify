@@ -152,12 +152,14 @@ class _MessageTextParser(HTMLParser):
     )
     _VOID = frozenset({"br", "hr", "wbr", "col", "area"})
 
-    def __init__(self) -> None:
+    def __init__(self, *, include_links: bool = False) -> None:
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
         self.stack: list[tuple[str, bool]] = []
         self.lists: list[int | None] = []
         self.list_marker_pending = False
+        self.include_links = include_links
+        self.links: list[str] = []
 
     def _break(self, count: int = 1) -> None:
         text = "".join(self.parts)
@@ -168,6 +170,8 @@ class _MessageTextParser(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         values = dict(attrs)
+        if tag == "a" and self.include_links:
+            self.links.append(values.get("href") or "")
         inherited = self.stack[-1][1] if self.stack else False
         preserve = (
             inherited
@@ -205,6 +209,10 @@ class _MessageTextParser(HTMLParser):
             self.list_marker_pending = True
 
     def handle_endtag(self, tag: str) -> None:
+        if tag == "a" and self.include_links and self.links:
+            url = self.links.pop()
+            if url:
+                self.parts.append(f" ({url})")
         if tag in self._BLOCKS or tag in {"p", "pre"}:
             self._break()
         elif tag in {"td", "th"}:
@@ -234,9 +242,9 @@ class _MessageTextParser(HTMLParser):
                 self.list_marker_pending = False
 
 
-def message_text(content: str, base_url: str | None = None) -> str:
+def message_text(content: str, base_url: str | None = None, *, include_links: bool = False) -> str:
     """Keep paragraph, list, table and explicit line breaks in the plain version."""
-    parser = _MessageTextParser()
+    parser = _MessageTextParser(include_links=include_links)
     parser.feed(message_html(content, base_url))
     parser.close()
     return "\n".join(line.rstrip() for line in "".join(parser.parts).splitlines()).strip("\n")

@@ -751,10 +751,13 @@ class Database:
         )
         return cursor.rowcount == 1
 
-    async def update_email_body(self, delivery_key: str, body: str) -> None:
+    async def update_email_body(
+        self, delivery_key: str, body: str, *, html_body: str | None = None
+    ) -> None:
         await self.db.execute(
-            "UPDATE email_outbox SET body = ? WHERE delivery_key = ? AND sent_at IS NULL",
-            (body, delivery_key),
+            "UPDATE email_outbox SET body = ?, html_body = COALESCE(?, html_body) "
+            "WHERE delivery_key = ? AND sent_at IS NULL",
+            (body, html_body, delivery_key),
         )
 
     async def list_email_outbox(self) -> list[dict[str, str]]:

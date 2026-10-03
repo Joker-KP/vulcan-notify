@@ -27,6 +27,17 @@ from vulcan_notify.models import (
 
 logger = logging.getLogger(__name__)
 
+# Public student-app modules used by notification links (not API endpoints).
+STUDENT_PAGE_PATHS = {
+    "grade": "oceny",
+    "attendance": "frekwencja",
+    "substitution": "planZajec",
+    "cancellation": "planZajec",
+    "addition": "planZajec",
+    "exam": "sprawdzianyZadaniaDomowe",
+    "homework": "sprawdzianyZadaniaDomowe",
+}
+
 # Mimic a real Chrome browser to avoid bot detection
 _BROWSER_HEADERS = {
     "User-Agent": (
@@ -203,6 +214,10 @@ class VulcanClient:
 
     # ── Student context ──────────────────────────────────────────────
 
+    def student_portal_url(self, student: Student) -> str:
+        """Public student app URL, without session cookies or tokens."""
+        return f"{self._base_url.rstrip('/')}/App/{quote(student.key, safe='')}"
+
     async def get_students(self) -> list[Student]:
         data = await self._request("/api/Context")
         # A 200 that doesn't carry the key we expect means the API shape moved under
@@ -261,7 +276,7 @@ class VulcanClient:
                     content=item["tresc"],
                     kind=int(item["rodzaj"]),
                     points=points,
-                    url=f"{self._base_url.rstrip('/')}/App/{key}/pochwalyUwagi",
+                    url=f"{self.student_portal_url(student)}/pochwalyUwagi",
                 )
             )
         return remarks
@@ -523,6 +538,26 @@ class VulcanClient:
         if not data:
             return []
 
+        # Inbox labels need not match Context's pupil/school display names.
+        # Resolve the mailbox's stable identity before notification rendering.
+        mailbox_keys: dict[str, set[str]] = {}
+        try:
+            mailboxes = await self._request_url(f"{self._messages_base}/api/Skrzynki")
+            if not isinstance(mailboxes, list):
+                raise VulcanFetchError("/api/Skrzynki response is not a list")
+            for mailbox in mailboxes:
+                name = mailbox.get("nazwa")
+                key = mailbox.get("globalKey")
+                if isinstance(name, str) and isinstance(key, str) and key:
+                    mailbox_keys.setdefault(name.strip(), set()).add(key)
+        except SessionExpiredError:
+            raise
+        except Exception as exc:
+            logger.warning("Mailbox context unavailable (%s)", type(exc).__name__)
+        resolved_mailboxes = {
+            name: next(iter(keys)) for name, keys in mailbox_keys.items() if len(keys) == 1
+        }
+
         return [
             Message(
                 id=m["id"],
@@ -534,6 +569,7 @@ class VulcanClient:
                 has_attachments=m.get("hasZalaczniki", False),
                 is_read=m.get("przeczytana", False),
                 mailbox_url=f"{self._messages_base}/App/odebrane",
+                mailbox_key=resolved_mailboxes.get(m.get("skrzynka", "").strip(), ""),
             )
             for m in data
         ]

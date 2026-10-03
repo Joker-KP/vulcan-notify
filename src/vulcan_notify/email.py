@@ -15,6 +15,8 @@ from html import escape
 from typing import TYPE_CHECKING
 
 from vulcan_notify.config import parse_email_sender, settings
+from vulcan_notify.email_digest import render_summary
+from vulcan_notify.email_rendering import render_email, render_template
 from vulcan_notify.models import Remark
 from vulcan_notify.summarizer import summarize
 from vulcan_notify.text import message_html, message_text, strip_html
@@ -22,7 +24,7 @@ from vulcan_notify.text import message_html, message_text, strip_html
 if TYPE_CHECKING:
     from vulcan_notify.config import Settings
     from vulcan_notify.db import Database
-    from vulcan_notify.models import Message
+    from vulcan_notify.models import Message, Student
     from vulcan_notify.sync import FullSyncResult
 
 log = logging.getLogger(__name__)
@@ -30,30 +32,9 @@ _WEEKDAYS_PL = ("poniedziałek", "wtorek", "środa", "czwartek", "piątek", "sob
 
 
 def format_summary(result: FullSyncResult) -> tuple[str, int]:
-    """Describe only this run's student changes, respecting baselines."""
-    lines = ["eduVULCAN — detected changes", ""]
-    count = 0
-    for student_result in result.student_results:
-        changes = [change for change in student_result.all_changes if change.item_type != "remark"]
-        if student_result.is_first_sync or not changes:
-            continue
-        student = student_result.student
-        lines.append(f"{student.name} ({student.class_name}, {student.school}):")
-        for change in changes:
-            count += 1
-            lines.append(f"- [{change.item_type}/{change.change_type}] {strip_html(change.title)}")
-            if change.body:
-                lines.append(f"  {strip_html(change.body)}")
-            date = getattr(change.raw, "date", None)
-            if date:
-                lines.append(f"  Date: {date}")
-        lines.append("")
-
-    if result.has_failures:
-        lines.append(
-            "Some sections failed; this summary covers successfully detected changes only."
-        )
-    return "\n".join(lines).strip(), count
+    """Text preview of the HTML digest, also used as input to optional AI."""
+    _, body, _, count = render_summary(result, settings)
+    return body, count
 
 
 def _format_message_date(value: str, config: Settings) -> str:
@@ -79,38 +60,101 @@ def _message_metadata(message: Message, config: Settings) -> list[str]:
     return lines
 
 
-def format_message(message: Message, config: Settings) -> str:
+def _message_student(message: Message, result: FullSyncResult) -> Student | None:
+    """Use mailbox identity; retain unambiguous label matching for older results."""
+    if message.mailbox_key:
+        matches = [
+            sr.student
+            for sr in result.student_results
+            if sr.student.mailbox_key == message.mailbox_key
+        ]
+        return matches[0] if len(matches) == 1 else None
+    mailbox = message.mailbox.strip()
+    parts = mailbox.rsplit(" - ", 2)
+    matches = []
+    for sr in result.student_results:
+        student = sr.student
+        if mailbox == student.name.strip() or (
+            len(parts) == 3
+            and parts[1].strip() == student.name.strip()
+            and parts[2].strip() == f"({student.school.strip()})"
+        ):
+            matches.append(student)
+    return matches[0] if len(matches) == 1 else None
+
+
+def _message_heading(student: Student | None) -> tuple[str, str]:
+    if student:
+        return strip_html(student.name), strip_html(f"{student.class_name} · {student.school}")
+    return "Wiadomość z eduVULCAN", ""
+
+
+def format_message(message: Message, config: Settings, student: Student | None = None) -> str:
     """One upstream message, retaining its sender, date and mailbox identity."""
-    lines = _message_metadata(message, config)
+    heading, context = _message_heading(student)
+    lines = [heading]
+    if context:
+        lines.append(context)
+    lines.extend(["", message.subject, "", *_message_metadata(message, config)])
     if config.email_include_message_bodies and message.content:
         lines.extend(["", message_text(message.content, message.mailbox_url)])
     return "\n".join(lines)
 
 
-def _message_html(message: Message, config: Settings) -> str:
+def _message_html(message: Message, config: Settings, student: Student | None = None) -> str:
     """Render metadata, original body layout and the public inbox footer."""
     metadata = _message_metadata(message, config)
     sender = escape(strip_html(message.sender))
-    content = f"Autor: <strong>{sender}</strong><br>\n"
-    content += "<br>\n".join(escape(line) for line in metadata[1:])
+    metadata_html = f"Autor: <strong>{sender}</strong><br>\n"
+    metadata_html += "<br>\n".join(escape(line) for line in metadata[1:])
+    content = ""
     if config.email_include_message_bodies and message.content:
-        original = message_html(message.content, message.mailbox_url)
-        content += f'<div style="margin-top:16px">{original}</div>'
-    footer = ""
-    if message.mailbox_url:
-        url = escape(message.mailbox_url, quote=True)
-        footer = (
-            '<div style="margin-top:24px;padding-top:16px;border-top:1px solid #d0d0d0;'
-            'font-family:Arial,sans-serif">'
-            f'<a href="{url}" style="display:inline-block;padding:10px 14px;'
-            'border:1px solid #999;border-radius:6px;text-decoration:none;font-weight:600">'
-            "Otwórz skrzynkę wiadomości</a></div>"
-        )
-    return (
-        '<html><body><div style="font-family:Arial,sans-serif">'
-        f"{content}</div>\n"
-        f"{footer}</body></html>"
+        content = message_html(message.content, message.mailbox_url)
+    heading, context = _message_heading(student)
+    return render_email(
+        heading,
+        render_template(
+            "message",
+            subject=escape(message.subject),
+            metadata=metadata_html,
+            content=content,
+            footer=_notification_footer(message.mailbox_url, "Otwórz skrzynkę wiadomości"),
+        ),
+        heading_context=context,
     )
+
+
+def _notification_footer(url: str | None, label: str) -> str:
+    if not url:
+        return ""
+    return render_template("notification_footer", url=escape(url, quote=True), label=escape(label))
+
+
+def format_remark(remark: Remark, student: Student, config: Settings) -> tuple[str, str]:
+    """Text and templated HTML for one note, retaining its full sanitized content."""
+    metadata = [
+        f"Autor: {strip_html(remark.author)}",
+        f"Data: {_format_message_date(remark.date, config)}",
+        f"Kategoria: {strip_html(remark.category)}",
+    ]
+    if remark.points is not None:
+        metadata.append(f"Punkty: {remark.points:g}")
+    body = "\n".join(metadata) + "\n\n" + message_text(remark.content, remark.url)
+    if remark.url:
+        body += f"\n\nOtwórz pochwały i uwagi:\n{remark.url}"
+    html = render_email(
+        "Pochwały i uwagi",
+        render_template(
+            "remark",
+            student_name=escape(strip_html(student.name)),
+            student_context=escape(strip_html(f"{student.class_name} · {student.school}")),
+            category=escape(strip_html(remark.category)),
+            metadata="<br>\n".join(escape(line) for line in metadata),
+            content=message_html(remark.content, remark.url),
+            footer=_notification_footer(remark.url, "Otwórz pochwały i uwagi"),
+        ),
+    )
+    return body, html
 
 
 async def _queue_email(
@@ -149,8 +193,9 @@ async def queue_messages(result: FullSyncResult, db: Database) -> None:
         title = " ".join(message.subject.split())
         subject = f"{settings.email_message_subject_prefix} {title}".strip()
         identity = f"message:{message.api_global_key or message.id}"
-        body = format_message(message, settings)
-        html_body = _message_html(message, settings)
+        student = _message_student(message, result)
+        body = format_message(message, settings, student)
+        html_body = _message_html(message, settings, student)
         if message.mailbox_url:
             body += f"\n\nOtwórz skrzynkę wiadomości:\n{message.mailbox_url}"
         await _queue_email(db, identity, subject, body, html_body)
@@ -170,45 +215,23 @@ async def queue_remarks(result: FullSyncResult, db: Database) -> None:
                 continue
             title = " ".join(strip_html(f"{sr.student.name}: {remark.category}").split())
             subject = f"{settings.email_remark_subject_prefix} {title}".strip()
-            metadata = [
-                f"Autor: {strip_html(remark.author)}",
-                f"Data: {_format_message_date(remark.date, settings)}",
-                f"Kategoria: {strip_html(remark.category)}",
-            ]
-            if remark.points is not None:
-                metadata.append(f"Punkty: {remark.points:g}")
-            body = "\n".join(metadata) + "\n\n" + message_text(remark.content, remark.url)
-            html_body = '<html><body><div style="font-family:Arial,sans-serif">'
-            html_body += "<br>\n".join(escape(line) for line in metadata)
-            html_body += (
-                f'<div style="margin-top:16px">{message_html(remark.content, remark.url)}</div>'
-            )
-            if remark.url:
-                body += f"\n\nOtwórz pochwały i uwagi:\n{remark.url}"
-                html_body += (
-                    '<div style="margin-top:24px"><a style="display:inline-block;'
-                    "padding:10px 14px;border:1px solid #999;border-radius:6px;"
-                    'text-decoration:none;font-weight:600" '
-                    f'href="{escape(remark.url, quote=True)}">Otwórz pochwały i uwagi</a></div>'
-                )
-            html_body += "</div></body></html>"
+            body, html_body = format_remark(remark, sr.student, settings)
             await _queue_email(db, f"remark:{sr.student.key}:{remark.id}", subject, body, html_body)
     await db.commit()
 
 
 async def queue_summary(result: FullSyncResult, db: Database) -> None:
-    """Persist the plain digest before attempting optional AI or SMTP."""
+    """Persist both digest alternatives before attempting optional AI or SMTP."""
     if not settings.email_enabled:
         return
-    body, count = format_summary(result)
+    subject, body, html_body, count = render_summary(result, settings)
     if not count:
         return
-    subject = f"{settings.email_subject_prefix}: {count} change(s)"
-    new_keys = await _queue_email(db, result.notification_id, subject, body)
+    new_keys = await _queue_email(db, result.notification_id, subject, body, html_body)
     await db.commit()
 
-    # Retry uses the stored body. If preparation is interrupted, the queued plain
-    # version survives; an AI failure never prevents delivery of the facts.
+    # Retry uses stored bodies. AI adds a summary while retaining every group,
+    # its facts and student-specific links in both alternatives.
     if new_keys and settings.email_ai_summary and settings.llm_api_key:
         try:
             replacement = await asyncio.wait_for(
@@ -216,11 +239,18 @@ async def queue_summary(result: FullSyncResult, db: Database) -> None:
                 timeout=settings.email_ai_timeout_seconds,
             )
         except Exception as exc:
-            log.warning("Email AI summary failed (%s); using plain summary", type(exc).__name__)
+            log.warning("Email AI summary failed (%s); using grouped digest", type(exc).__name__)
             replacement = None
         if replacement and replacement.strip():
+            ai_text = replacement.strip()
+            ai_html = (
+                '<section style="margin:20px 0;padding:16px;background:#f8fafc">'
+                '<h2 style="margin:0 0 12px;font-size:20px">Podsumowanie AI</h2>'
+                f"<p>{escape(ai_text).replace(chr(10), '<br>')}</p></section>"
+            )
+            html_body = html_body.replace("</h1>", "</h1>\n" + ai_html, 1)
             for key in new_keys:
-                await db.update_email_body(key, replacement.strip())
+                await db.update_email_body(key, f"{ai_text}\n\n{body}", html_body=html_body)
             await db.commit()
 
 

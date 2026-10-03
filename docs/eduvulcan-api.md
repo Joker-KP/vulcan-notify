@@ -458,6 +458,13 @@ Messages live on `wiadomosci.eduvulcan.pl/{tenant}/api/`, not on the main `uczen
 
 Returns mailboxes for all students. The `globalKey` matches `globalKeySkrzynka` from the Context endpoint.
 
+The client fetches this list for a non-empty inbox and resolves each message's
+`skrzynka` label against `nazwa`. Only labels with a single distinct `globalKey`
+are mapped. `Message.mailbox_key` carries that key in memory for student-specific
+email headings, avoiding assumptions about name order or school display names.
+Mailbox lookup errors other than session expiry retain message acquisition;
+session expiry requests the usual authentication recovery.
+
 ```json
 [
   {"globalKey": "aaaaaaaa-...", "nazwa": "Parent Name - R - Child Name - (School)", "typUzytkownika": 2},

@@ -15,21 +15,53 @@ async def test_message_inbox_link_uses_session_tenant(tenant):
         session["tenant"] = tenant
     client = VulcanClient(session)
     client._request_url = AsyncMock(
-        return_value=[
-            {
-                "id": 1,
-                "apiGlobalKey": "synthetic-message-key",
-                "temat": "Zebranie rodziców",
-                "skrzynka": "Test mailbox",
-            }
+        side_effect=[
+            [
+                {
+                    "id": 1,
+                    "apiGlobalKey": "synthetic-message-key",
+                    "temat": "Zebranie rodziców",
+                    "skrzynka": "Test mailbox",
+                }
+            ],
+            [{"nazwa": "Test mailbox", "globalKey": "test-mailbox-key"}],
         ]
     )
     messages = await client.get_messages()
     district = tenant or "legacydistrict"
     assert messages[0].mailbox_url == f"https://wiadomosci.eduvulcan.pl/{district}/App/odebrane"
-    client._request_url.assert_awaited_once_with(
+    assert messages[0].mailbox_key == "test-mailbox-key"
+    assert client._request_url.await_count == 2
+    client._request_url.assert_any_await(
         f"https://wiadomosci.eduvulcan.pl/{district}/api/Odebrane?idLastWiadomosc=0&pageSize=50"
     )
+    client._request_url.assert_any_await(f"https://wiadomosci.eduvulcan.pl/{district}/api/Skrzynki")
+
+
+@pytest.mark.parametrize(
+    "mailboxes",
+    [
+        [],
+        None,
+        RuntimeError("synthetic failure"),
+        [{"nazwa": "Mailbox", "globalKey": "a"}, {"nazwa": "Mailbox", "globalKey": "b"}],
+    ],
+)
+async def test_mailbox_mapping_failure_or_ambiguity_preserves_messages(mailboxes):
+    client = VulcanClient({"base_url": "https://uczen.eduvulcan.pl/testdistrict"})
+    client._request_url = AsyncMock(side_effect=[[{"id": 1, "skrzynka": "Mailbox"}], mailboxes])
+    messages = await client.get_messages()
+    assert len(messages) == 1
+    assert messages[0].mailbox_key == ""
+
+
+async def test_mailbox_mapping_session_expiry_requests_recovery():
+    client = VulcanClient({"base_url": "https://uczen.eduvulcan.pl/testdistrict"})
+    client._request_url = AsyncMock(
+        side_effect=[[{"id": 1}], SessionExpiredError("synthetic expiry")]
+    )
+    with pytest.raises(SessionExpiredError):
+        await client.get_messages()
 
 
 @pytest.fixture

@@ -1,6 +1,7 @@
 """SMTP digests: current changes, durable retries, privacy and optional AI."""
 
 import asyncio
+import re
 import smtplib
 from dataclasses import replace
 from email import policy
@@ -12,10 +13,21 @@ from pydantic import ValidationError
 
 from vulcan_notify import __main__ as cli
 from vulcan_notify import email
+from vulcan_notify.client import VulcanClient
 from vulcan_notify.config import Settings
 from vulcan_notify.db import Database
 from vulcan_notify.differ import Change
-from vulcan_notify.models import Message, Student
+from vulcan_notify.email_digest import render_summary
+from vulcan_notify.models import (
+    AttendanceEntry,
+    Exam,
+    Grade,
+    Homework,
+    Lesson,
+    Message,
+    Remark,
+    Student,
+)
 from vulcan_notify.sync import FullSyncResult, SyncResult, SyncSessionExpiredError
 
 STUDENT = Student("fixture-key", "Test Student", "3A", "Test School", 1, "mailbox-key")
@@ -63,6 +75,360 @@ def changed_result():
     return FullSyncResult([SyncResult(STUDENT, new_grades=[change])])
 
 
+@pytest.mark.parametrize(
+    "disabled,label",
+    [
+        ("grade", "Oceny"),
+        ("attendance", "Frekwencja"),
+        ("substitution", "Zastępstwa"),
+        ("cancellation", "Anulowane zajęcia"),
+        ("addition", "Dodatkowe zajęcia"),
+        ("exam", "Sprawdziany"),
+        ("homework", "Zadania domowe"),
+    ],
+)
+def test_each_digest_group_can_be_disabled_for_all_students(email_config, disabled, label):
+    kinds = ["grade", "attendance", "substitution", "cancellation", "addition", "exam", "homework"]
+    changes = [Change("new", kind, STUDENT.name, f"Private-{kind}", "") for kind in kinds]
+    other = replace(STUDENT, key="other-key", name="Other Student")
+    result = FullSyncResult(
+        [
+            SyncResult(STUDENT, new_grades=changes),
+            SyncResult(other, new_grades=changes),
+        ]
+    )
+    email_config.email_digest_groups = {disabled: False}
+    subject, plain, html, count = render_summary(result, email_config)
+    assert count == 12
+    assert "(sumarycznie 12 zmian)" in subject
+    assert label not in subject and label not in html
+    assert f"Private-{disabled}" not in plain and f"Private-{disabled}" not in html
+    for kind in kinds:
+        if kind != disabled:
+            assert plain.count(f"Private-{kind}") == 2
+    assert len(result.student_results[0].all_changes) == 7  # Acquisition/state stay unchanged.
+
+
+async def test_digest_filter_applies_before_ai_and_counts_only_included_changes(
+    db, email_config, monkeypatch
+):
+    email_config.email_digest_groups = {"homework": False, "grade": True}
+    email_config.email_ai_summary = True
+    email_config.llm_api_key = "synthetic-key"
+    result = changed_result()
+    result.student_results[0].new_homework = [
+        Change("new", "homework", STUDENT.name, "Private excluded assignment", "Excluded content")
+    ]
+    ai = AsyncMock(return_value="AI: included grade only")
+    monkeypatch.setattr(email, "summarize", ai)
+    await email.queue_summary(result, db)
+    ai.assert_awaited_once()
+    assert "Math: 3 → 4" in ai.call_args.args[0]
+    assert "Private excluded assignment" not in ai.call_args.args[0]
+    row = (await db.list_email_outbox())[0]
+    assert row["subject"] == "[eduVulcan] Oceny"
+    for content in [row["body"], row["html_body"]]:
+        assert "Excluded content" not in content and "Zadania domowe" not in content
+
+
+async def test_disabling_all_digest_groups_keeps_individual_notifications_and_queued_retry(
+    db, email_config, smtp, monkeypatch
+):
+    await email.queue_summary(changed_result(), db)
+    old_digest = (await db.list_email_outbox())[0]
+    email_config.email_digest_groups = dict.fromkeys(
+        ["grade", "attendance", "substitution", "cancellation", "addition", "exam", "homework"],
+        False,
+    )
+    email_config.email_ai_summary = True
+    email_config.llm_api_key = "synthetic-key"
+    ai = AsyncMock()
+    monkeypatch.setattr(email, "summarize", ai)
+    result = changed_result()
+    result.student_results[0].new_grades[0].title = "Excluded new grade"
+    remark = Remark(1, "2026-10-02T08:00:00Z", "Uwaga", 2, "Teacher", "Private note", 1)
+    result.student_results[0].new_remarks = [
+        Change("new", "remark", STUDENT.name, "Uwaga", "", raw=remark)
+    ]
+    result.new_messages = [MESSAGE]
+    await email.publish_email(result, db)
+    ai.assert_not_awaited()
+    sent = {str(call.args[0]["Subject"]): call.args[0] for call in smtp.send_message.call_args_list}
+    assert set(sent) == {
+        "[eduVulcan] Oceny",
+        "[Uwagi] Test Student: Uwaga",
+        "[Nowa wiadomość] Trip details",
+    }
+    retried = sent[old_digest["subject"]]
+    assert retried["Message-ID"] == old_digest["message_id"]
+    assert retried.get_body(("html",)).get_content().strip() == old_digest["html_body"].strip()
+    assert "Excluded new grade" not in "\n".join(message.as_string() for message in sent.values())
+    assert await db.list_email_outbox() == []
+
+
+@pytest.mark.parametrize(
+    "count,expected",
+    [
+        (1, "[eduVulcan] Oceny"),
+        (2, "[eduVulcan] Oceny (sumarycznie 2 zmiany)"),
+        (5, "[eduVulcan] Oceny (sumarycznie 5 zmian)"),
+    ],
+)
+def test_digest_subject_omits_total_for_one_change(email_config, count, expected):
+    result = changed_result()
+    result.student_results[0].new_grades *= count
+    assert render_summary(result, email_config)[0] == expected
+
+
+def test_digest_group_selection_loads_from_dotenv_and_rejects_unknown_groups(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text('EMAIL_DIGEST_GROUPS={"attendance":false,"grade":true}\n')
+    config = Settings(_env_file=env)
+    assert config.email_digest_groups == {"attendance": False, "grade": True}
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, email_digest_groups={"unknown": False})
+
+
+async def test_digest_groups_have_student_links_and_unique_subject_names(db, email_config, smtp):
+    client = VulcanClient({"base_url": "https://uczen.eduvulcan.pl/testdistrict/"})
+    student = replace(STUDENT, key="key/with+reserved=")
+    first = SyncResult(student, portal_url=client.student_portal_url(student))
+    first.new_grades = [Change("new", "grade", student.name, "Math: 5", "Test")]
+    first.new_attendance = [Change("new", "attendance", student.name, "Absent", "Lesson 3")]
+    first.new_substitutions = [
+        Change("new", kind, student.name, kind, "2026-10-03")
+        for kind in ["substitution", "cancellation", "addition"]
+    ]
+    first.new_exams = [Change("new", "exam", student.name, "Science quiz", "Monday")]
+    first.new_homework = [Change("new", "homework", student.name, "Read chapter", "Tuesday")]
+    other = replace(STUDENT, key="other-key", name="Other Student")
+    second = SyncResult(
+        other,
+        new_grades=[Change("updated", "grade", other.name, "Math: 3 → 4", "Test")],
+        portal_url=client.student_portal_url(other),
+    )
+    result = FullSyncResult([first, second], [MESSAGE])
+    await email.queue_summary(result, db)
+    row = (await db.list_email_outbox())[0]
+    assert row["subject"] == (
+        "[eduVulcan] Oceny, Frekwencja, Zastępstwa, Anulowane zajęcia, "
+        "Dodatkowe zajęcia, Sprawdziany, Zadania domowe (sumarycznie 8 zmian)"
+    )
+    groups = re.findall(r"<section\b.*?</section>", row["html_body"], re.S)
+    assert len(groups) == 8
+    paths = [
+        "oceny",
+        "frekwencja",
+        "planZajec",
+        "planZajec",
+        "planZajec",
+        "sprawdzianyZadaniaDomowe",
+        "sprawdzianyZadaniaDomowe",
+    ]
+    for group, path in zip(groups[:7], paths, strict=True):
+        assert f'href="{first.portal_url}/{path}"' in group
+        assert "<h3 " in group
+        assert group.index("</ul>") < group.index("<a ")
+        assert "other-key" not in group
+    assert f'href="{second.portal_url}/oceny"' in groups[-1]
+    assert "key%2Fwith%2Breserved%3D" in row["html_body"]
+    assert "Trip details" not in row["html_body"]
+    await email.drain_email_outbox(db)
+    parsed = BytesParser(policy=policy.default).parsebytes(
+        smtp.send_message.call_args.args[0].as_bytes()
+    )
+    assert parsed.get_body(("html",)).get_content().strip() == row["html_body"].strip()
+    assert f"{first.portal_url}/oceny" in parsed.get_body(("plain",)).get_content()
+
+
+async def test_digest_retry_keeps_html_subject_links_and_escaped_ai(
+    db, email_config, smtp, monkeypatch
+):
+    email_config.email_ai_summary = True
+    email_config.llm_api_key = "synthetic-key"
+    ai = AsyncMock(return_value='AI: <script>alert("x")</script> & summary')
+    monkeypatch.setattr(email, "summarize", ai)
+    result = changed_result()
+    result.student_results[0].portal_url = "https://uczen.eduvulcan.pl/test/App/fixture-key"
+    smtp.send_message.side_effect = TimeoutError()
+    await email.publish_email(result, db)
+    queued = (await db.list_email_outbox())[0]
+    assert "&lt;script&gt;" in queued["html_body"]
+    assert "<script>" not in queued["html_body"]
+    assert "Math: 3 → 4" in queued["html_body"]
+    assert "/fixture-key/oceny" in queued["html_body"]
+    await db.close()
+    await db.connect()
+    email_config.email_subject_prefix = "Changed prefix"
+    smtp.send_message.side_effect = None
+    await email.publish_email(result, db)
+    sent = smtp.send_message.call_args.args[0]
+    assert ai.await_count == 1
+    assert str(sent["Subject"]) == queued["subject"]
+    assert sent["Message-ID"] == queued["message_id"]
+    assert sent.get_body(("html",)).get_content().strip() == queued["html_body"].strip()
+
+
+def test_digest_escapes_school_text_and_excludes_baselines_and_notes(email_config):
+    result = changed_result()
+    sr = result.student_results[0]
+    sr.student = replace(STUDENT, name="Uczeń & rodzic")
+    sr.new_grades[0].title = "<script>private</script><b>Matematyka & fizyka</b>"
+    sr.new_grades[0].body = '<img src="https://remote.invalid/pixel">Treść'
+    sr.new_remarks = [Change("new", "remark", STUDENT.name, "Uwaga", "Private note")]
+    result.student_results.append(
+        SyncResult(
+            STUDENT, new_homework=[Change("new", "homework", "", "OLD", "")], is_first_sync=True
+        )
+    )
+    subject, plain, html, count = render_summary(result, email_config)
+    assert subject == "[eduVulcan] Oceny" and count == 1
+    assert "Uczeń &amp; rodzic" in html and "Matematyka &amp; fizyka" in html
+    assert "Uczeń & rodzic" in plain
+    for unwanted in ["<script>", "<img", "Private note", "OLD", "Zadania domowe"]:
+        assert unwanted not in html
+
+
+@pytest.mark.parametrize(
+    "kind,raw,expected",
+    [
+        ("grade", Grade(1, "5", "02.10.2026", "Math", "Test", "", 2, "Teacher", False), "Waga: 2"),
+        (
+            "attendance",
+            AttendanceEntry(3, 2, "2026-10-02T23:00:00Z", "Math", "Teacher", "", ""),
+            "Data: 2026-10-03",
+        ),
+        ("exam", Exam(1, "2026-10-05", "Math", 1, "Chapter 2", "Teacher"), "Chapter 2"),
+        ("homework", Homework(1, "2026-10-05", "Math", "Read chapter", "Teacher"), "Read chapter"),
+        (
+            "substitution",
+            Lesson(
+                "2026-10-05",
+                "2026-10-05T08:00:00",
+                "2026-10-05T08:45:00",
+                "Math",
+                "Teacher",
+                "10",
+                None,
+                1,
+                False,
+                sub_teacher="Other",
+            ),
+            "Other → Teacher",
+        ),
+    ],
+)
+def test_digest_renders_typed_details_in_polish(email_config, kind, raw, expected):
+    change = Change("new", kind, STUDENT.name, "Technical title", "", raw=raw)
+    result = FullSyncResult([SyncResult(STUDENT, new_grades=[change])])
+    _, plain, html, count = render_summary(result, email_config)
+    assert count == 1
+    assert expected in plain and expected in html
+    assert "Technical title" not in html
+
+
+@pytest.mark.parametrize(
+    "value,color",
+    [
+        ("1", "#991b1b"),
+        ("2", "#f97316"),
+        ("3+", "#facc15"),
+        ("4-", "#7fb446"),
+        ("5", "#32c167"),
+        ("6", "#15AD4F"),
+        ("np", None),
+        ("+", None),
+        ("10", None),
+    ],
+)
+def test_grade_color_applies_only_to_value(email_config, value, color):
+    grade = Grade(1, value, "02.10.2026", "Math & Science", "Test", "", 2, "Teacher", False)
+    change = Change("new", "grade", STUDENT.name, "", "", raw=grade)
+    _, plain, html, _ = render_summary(
+        FullSyncResult([SyncResult(STUDENT, new_grades=[change])]), email_config
+    )
+    title = re.search(r"<strong>(.*?)</strong>", html).group(1)
+    assert f"Math & Science: {value}" in plain
+    if color:
+        assert title == f'Math &amp; Science: <span style="color:{color}">{value}</span>'
+    else:
+        assert title == f"Math &amp; Science: {value}"
+
+
+def test_updated_grade_colors_both_values_and_escapes_unknown_marks(email_config):
+    grade = Grade(1, "6", "02.10.2026", "Math", "Test", "", 2, "Teacher", False)
+    change = Change("updated", "grade", STUDENT.name, "", "", old_value="1", raw=grade)
+    result = FullSyncResult([SyncResult(STUDENT, new_grades=[change])])
+    _, plain, html, _ = render_summary(result, email_config)
+    assert "Math: 1 → 6" in plain
+    assert '<span style="color:#991b1b">1</span> → <span style="color:#15AD4F">6</span>' in html
+    grade.value = 'np & "?"'
+    assert "np &amp; &quot;?&quot;" in render_summary(result, email_config)[2]
+
+
+async def test_message_heading_matches_full_mailbox_to_correct_student(db, email_config, smtp):
+    other = replace(
+        STUDENT, key="other", name="Other Student", class_name="5B", school="Other School"
+    )
+    message = replace(MESSAGE, mailbox="Parent - R - Other Student - (Other School)")
+    result = FullSyncResult([SyncResult(STUDENT), SyncResult(other)], [message])
+    await email.publish_email(result, db)
+    sent = smtp.send_message.call_args.args[0]
+    for kind in ["plain", "html"]:
+        body = sent.get_body((kind,)).get_content()
+        assert "Other Student" in body and "5B · Other School" in body
+        assert "Test Student" not in body and "3A · Test School" not in body
+        assert MESSAGE.subject in body
+
+
+@pytest.mark.parametrize(
+    "mailbox", ["Unknown mailbox", "", "Test Student", "Parent - R - Test Student - (Test School)"]
+)
+def test_unknown_or_ambiguous_mailbox_does_not_select_a_student(email_config, mailbox):
+    duplicate = replace(STUDENT, key="duplicate", class_name="5B")
+    result = FullSyncResult([SyncResult(STUDENT), SyncResult(duplicate)])
+    message = replace(MESSAGE, mailbox=mailbox)
+    student = email._message_student(message, result)
+    assert student is None
+    html = email._message_html(message, email_config, student)
+    assert "3A · Test School" not in html and "5B · Test School" not in html
+    assert '<h1 style="margin:0;font-size:26px">Wiadomość z eduVULCAN</h1>' in html
+
+
+async def test_message_header_uses_mailbox_key_despite_different_display_names(
+    db, email_config, smtp
+):
+    other = replace(
+        STUDENT,
+        key="other",
+        name="Other Student",
+        class_name="5B",
+        school="Other School",
+        mailbox_key="other-mailbox-key",
+    )
+    message = replace(
+        MESSAGE,
+        mailbox="Parent - R - Student Other - (School abbreviation)",
+        mailbox_key=other.mailbox_key,
+    )
+    result = FullSyncResult([SyncResult(STUDENT), SyncResult(other)], [message])
+    await email.publish_email(result, db)
+    parsed = BytesParser(policy=policy.default).parsebytes(
+        smtp.send_message.call_args.args[0].as_bytes()
+    )
+    html = parsed.get_body(("html",)).get_content()
+    assert '<h1 style="margin:0;font-size:26px">Other Student</h1>' in html
+    assert '<p style="margin:4px 0;color:#64748b;font-size:14px">5B · Other School</p>' in html
+    plain = parsed.get_body(("plain",)).get_content()
+    assert plain.startswith("Other Student\n5B · Other School\n")
+    assert "3A · Test School" not in html
+
+
+def test_message_unknown_mailbox_key_does_not_fall_back_to_matching_name():
+    message = replace(MESSAGE, mailbox_key="unrecognized-key")
+    assert email._message_student(message, FullSyncResult([SyncResult(STUDENT)])) is None
+
+
 async def test_disabled_output_does_not_access_db_or_smtp(monkeypatch):
     monkeypatch.setattr(email, "settings", Settings(_env_file=None, email_enabled=False))
     db = MagicMock()
@@ -107,12 +473,20 @@ def test_digest_covers_every_student_change_and_excludes_messages():
     body, count = email.format_summary(result)
     assert count == 7
     assert "Math: 3 → 4" in body
-    assert "Test Student (3A, Test School)" in body
-    assert "Other Student (3A, Test School)" in body
+    assert "Test Student" in body
+    assert "Other Student" in body
     assert "Trip details" not in body
     assert "Private message body" not in body
-    for kind in ["substitution", "cancellation", "addition", "attendance", "homework", "exam"]:
-        assert f"[{kind}/new]" in body
+    for group in [
+        "Oceny",
+        "Frekwencja",
+        "Zastępstwa",
+        "Anulowane zajęcia",
+        "Dodatkowe zajęcia",
+        "Sprawdziany",
+        "Zadania domowe",
+    ]:
+        assert f"{group} (1)" in body
 
 
 def test_message_bodies_opt_in_and_partial_failure_notice(email_config):
@@ -125,7 +499,7 @@ def test_message_bodies_opt_in_and_partial_failure_notice(email_config):
     assert "Skrzynka: Test Student" in body
     assert "Załączniki: tak" in body
     summary, _ = email.format_summary(result)
-    assert "Some sections failed" in summary
+    assert "Nie udało się pobrać części danych" in summary
     assert "Sensitive upstream failure details" not in summary
 
 
@@ -147,7 +521,7 @@ async def test_student_and_account_baselines_are_independent(
     await email.publish_email(result, db)
     assert smtp.send_message.call_count == count
     subject = str(smtp.send_message.call_args.args[0]["Subject"])
-    assert subject.startswith("[Nowa wiadomość]" if student_baseline else "eduVULCAN:")
+    assert subject.startswith("[Nowa wiadomość]" if student_baseline else "[eduVulcan] Oceny")
 
 
 async def test_durable_per_recipient_retry_and_deduplication(db, email_config, smtp, caplog):
@@ -211,12 +585,12 @@ async def test_smtp_transport_headers_and_utf8(db, email_config, smtp, security)
         )
         assert context.check_hostname
     message = smtp.send_message.call_args.args[0]
-    assert message["Subject"] == "eduVULCAN: 1 change(s)"
+    assert message["Subject"] == "[eduVulcan] Oceny"
     assert message["From"] == "school@example.org"
     assert message["To"] == "parent@example.org"
-    assert "Math: 3 → 4" in message.get_content()
-    assert "Trip details" not in message.get_content()
-    assert "Private message body" not in message.get_content()
+    assert "Math: 3 → 4" in message.get_body(("plain",)).get_content()
+    assert "Trip details" not in message.get_body(("plain",)).get_content()
+    assert "Private message body" not in message.get_body(("plain",)).get_content()
     assert message["Message-ID"] and message["Date"]
 
 
@@ -278,7 +652,7 @@ async def test_refused_recipient_return_keeps_digest(db, email_config, smtp):
     assert len(await db.list_email_outbox()) == 1
 
 
-async def test_ai_replaces_plain_body_once_and_retry_reuses_it(db, email_config, smtp, monkeypatch):
+async def test_ai_adds_summary_once_and_retry_reuses_it(db, email_config, smtp, monkeypatch):
     email_config.email_ai_summary = True
     email_config.llm_api_key = "synthetic-key"
     ai = AsyncMock(return_value="AI: Grade improved; trip details available.")
@@ -290,10 +664,11 @@ async def test_ai_replaces_plain_body_once_and_retry_reuses_it(db, email_config,
     assert "Math: 3 → 4" in ai.call_args.args[0]
     assert "Private message body" not in ai.call_args.args[0]
     assert (await db.list_email_outbox())[0]["body"].startswith("AI:")
+    assert "Math: 3 → 4" in (await db.list_email_outbox())[0]["html_body"]
     smtp.send_message.side_effect = None
     await email.publish_email(result, db)
     assert ai.await_count == 1
-    assert smtp.send_message.call_args.args[0].get_content().startswith("AI:")
+    assert smtp.send_message.call_args.args[0].get_body(("plain",)).get_content().startswith("AI:")
 
 
 @pytest.mark.parametrize("replacement", [None, "", "   ", TimeoutError(), RuntimeError("secret")])
@@ -316,7 +691,7 @@ async def test_ai_failure_uses_already_persisted_plain_digest(
 
     monkeypatch.setattr(email, "summarize", ai)
     await email.publish_email(changed_result(), db)
-    assert "Math: 3 → 4" in smtp.send_message.call_args.args[0].get_content()
+    assert "Math: 3 → 4" in smtp.send_message.call_args.args[0].get_body(("plain",)).get_content()
     assert await db.list_email_outbox() == []
 
 
@@ -330,7 +705,7 @@ async def test_ai_timeout_is_bounded(db, email_config, smtp, monkeypatch):
 
     monkeypatch.setattr(email, "summarize", never_finishes)
     await email.publish_email(changed_result(), db)
-    assert "Math: 3 → 4" in smtp.send_message.call_args.args[0].get_content()
+    assert "Math: 3 → 4" in smtp.send_message.call_args.args[0].get_body(("plain",)).get_content()
 
 
 async def test_interrupted_ai_preparation_preserves_plain_digest(
@@ -513,7 +888,7 @@ async def test_each_new_message_has_own_subject_and_body_separate_from_digest(
     assert set(sent) == {
         "[Nowa wiadomość] Zebranie rodziców",
         "[Nowa wiadomość] Plan wycieczki",
-        "eduVULCAN: 1 change(s)",
+        "[eduVulcan] Oceny",
     }
     first_body = sent["[Nowa wiadomość] Zebranie rodziców"].get_body(("plain",)).get_content()
     assert "Private message body" in first_body
@@ -523,9 +898,9 @@ async def test_each_new_message_has_own_subject_and_body_separate_from_digest(
     assert "Different private content" in second_body
     assert "Skrzynka: Other Student" in second_body
     assert "Math: 3 → 4" not in first_body + second_body
-    assert "Zebranie rodziców" not in first_body
-    assert "Plan wycieczki" not in second_body
-    digest = sent["eduVULCAN: 1 change(s)"].get_content()
+    assert "Zebranie rodziców" in first_body
+    assert "Plan wycieczki" in second_body
+    digest = sent["[eduVulcan] Oceny"].get_body(("plain",)).get_content()
     assert "Math: 3 → 4" in digest
     assert "Zebranie rodziców" not in digest and "Plan wycieczki" not in digest
 
@@ -597,7 +972,12 @@ async def test_individual_messages_are_durable_before_ai_and_excluded_from_ai_in
     monkeypatch.setattr(email, "summarize", ai)
     await email.publish_email(result, db)
     sent = {str(call.args[0]["Subject"]): call.args[0] for call in smtp.send_message.call_args_list}
-    assert sent["eduVULCAN: 1 change(s)"].get_content().startswith("AI: Grade improved.")
+    assert (
+        sent["[eduVulcan] Oceny"]
+        .get_body(("plain",))
+        .get_content()
+        .startswith("AI: Grade improved.")
+    )
     assert (
         "Private message body"
         in sent["[Nowa wiadomość] Trip details"].get_body(("plain",)).get_content()
@@ -627,8 +1007,13 @@ async def test_message_footer_has_html_button_and_plain_link(db, email_config, s
     assert f'href="{url}"' in html
     assert html.count("Otwórz skrzynkę wiadomości") == 1
     assert "margin-top:24px" in html and "border-radius:6px" in html
+    assert '<h1 style="margin:0;font-size:26px">Test Student</h1>' in html
+    assert "3A · Test School" in html and "3A · Test School" in plain
+    assert "background:#f1f5f9" in html and "max-width:680px" in html
+    assert "Dane wiadomości" not in html and "Nowa wiadomość" not in html
     assert "Autor: <strong>Teacher &amp; Parent</strong>" in html
-    assert "Zebranie" not in html and "Zebranie" not in plain
+    assert "Zebranie &lt;klasa&gt; &amp; rodzice</h2>" in html
+    assert "Zebranie <klasa> & rodzice" in plain
     assert parsed["Subject"] == "[Nowa wiadomość] Zebranie <klasa> & rodzice"
     assert "<klasa>" not in html
     assert html.index("Skrzynka:") < html.index("Otwórz skrzynkę wiadomości")
@@ -637,8 +1022,8 @@ async def test_message_footer_has_html_button_and_plain_link(db, email_config, s
     assert ("Private message body" in plain) is include_body
     assert ("Private message body" in html) is include_body
     digest = smtp.send_message.call_args_list[1].args[0]
-    assert not digest.is_multipart()
-    assert url not in digest.get_content()
+    assert digest.is_multipart()
+    assert url not in digest.get_body(("plain",)).get_content()
     cursor = await db.db.execute("SELECT body, html_body FROM email_outbox")
     assert all(tuple(row) == (None, None) for row in await cursor.fetchall())
 
@@ -760,7 +1145,7 @@ def test_message_date_uses_configured_zone_and_minute_precision(
     assert "Autor: Test Teacher" in body
     assert "Skrzynka: Test Student" in body
     assert "Załączniki: tak" in body
-    assert MESSAGE.subject not in body
+    assert MESSAGE.subject in body
     for label in ["New message:", "From:", "Date:", "Mailbox:", "Attachments:", "Temat:"]:
         assert label not in body
 

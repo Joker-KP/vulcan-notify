@@ -135,7 +135,7 @@ Important modules include, or may include depending on the current branch:
   - MQTT publication and a persistent retry outbox, with delivery limitations described in section 6.
 
 - `src/vulcan_notify/email.py`
-  - Per-sync SMTP digest, optional AI replacement and a persistent per-recipient outbox.
+  - Per-sync SMTP digest, optional AI summary and a persistent per-recipient outbox.
 
 - `src/vulcan_notify/api.py`
   - HTTP API, currently expected on port `8585`.
@@ -248,7 +248,7 @@ Current output status:
 | HTTP API | Implemented | Reads local SQLite state in the separate `vulcan-api` service; liveness at `/api/alive`, freshness at `/api/health` (`?soft=1` forces HTTP 200). |
 | iCalendar feed | Implemented | Lesson schedule at `/calendar/{student}.ics`; currently excludes exams and homework. |
 | macOS Calendar | Implemented, optional, macOS only | Exams/homework via AppleScript, enabled by `CALENDAR_MAP`. |
-| Email | Implemented, optional | Per-sync digest of student changes, with optional AI replacement; separate email per new message; persistent retries. |
+| Email | Implemented, optional | Per-sync digest of student changes, with optional AI summary; separate email per new message; persistent retries. |
 | ntfy | Deployment-only | Used by `deploy/vulcan-deploy.sh`; no adapter for synchronized school changes. |
 
 ### Terminal / logs
@@ -257,9 +257,11 @@ Useful for development, diagnostics, cron/container logs and manual synchronizat
 
 ### Email
 
-`email.py` prepares a plain digest of student changes in the current `FullSyncResult` when `EMAIL_ENABLED=true`, including partial results before session recovery. New messages are excluded from the digest and each creates a separate email with `EMAIL_MESSAGE_SUBJECT_PREFIX` (default `[Nowa wiadomość]`) plus the original subject. New praise/notes each create a separate email with `EMAIL_REMARK_SUBJECT_PREFIX` (default `[Uwagi]`), student name and category. Full note content is always included; `EMAIL_INCLUDE_MESSAGE_BODIES` controls inbox messages only. These notes are excluded from the digest and AI input, use student/ID/recipient deduplication and link to the authenticated student base URL `/App/{URL-encoded student key}/pochwalyUwagi`. Baselines and unchanged runs create no email. Both notifications and the digest are committed to `email_outbox` before optional AI preparation or SMTP delivery. `EMAIL_AI_SUMMARY=true` also requires `LLM_API_KEY`; AI failure falls back to the plain digest. Message bodies require `EMAIL_INCLUDE_MESSAGE_BODIES=true`. Individual messages do not use AI and are excluded from digest AI input.
+`email.py` prepares an HTML digest with a derived text alternative of student changes in the current `FullSyncResult` when `EMAIL_ENABLED=true`, including partial results before session recovery. New messages are excluded from the digest and each creates a separate email with `EMAIL_MESSAGE_SUBJECT_PREFIX` (default `[Nowa wiadomość]`) plus the original subject. New praise/notes each create a separate email with `EMAIL_REMARK_SUBJECT_PREFIX` (default `[Uwagi]`), student name and category. Full note content is always included; `EMAIL_INCLUDE_MESSAGE_BODIES` controls inbox messages only. These notes are excluded from the digest and AI input, use student/ID/recipient deduplication and link to the authenticated student base URL `/App/{URL-encoded student key}/pochwalyUwagi`. Baselines and unchanged runs create no email. Both notifications and the digest are committed to `email_outbox` before optional AI preparation or SMTP delivery. `EMAIL_AI_SUMMARY=true` also requires `LLM_API_KEY`; AI failure keeps the grouped digest. Successful AI output appears above the groups, retaining their details and links. Message bodies require `EMAIL_INCLUDE_MESSAGE_BODIES=true`. Individual messages do not use AI and are excluded from digest AI input.
 
-Individual message bodies use Polish metadata labels without repeating the subject; the sender value is bold in HTML. Dates display as `YYYY-MM-DD HH:MM (dzień tygodnia)` in the shared `TZ` (default `Europe/Warsaw`); weekday names are Polish and derived after timezone conversion. Source offsets and daylight-saving rules are respected. Naive source timestamps mean UTC. Invalid configured zones fail startup validation; defensive rendering falls back to UTC if settings are later modified. Unparseable date strings are preserved.
+Digest groups are Oceny, Frekwencja, Zastępstwa, Anulowane zajęcia, Dodatkowe zajęcia, Sprawdziany and Zadania domowe, in that order, separately per student. Empty groups are omitted. `email_templates/` contains one HTML template per group and a shared `layout.html` wrapper; `email_digest.py` renders category-specific items and derives the text alternative. Each group ends with a student-specific module link using `SyncResult.portal_url` from the authenticated client. The subject lists included, present groups once across all students, then their total count for two or more changes. One change has no count suffix. `EMAIL_DIGEST_GROUPS` is a JSON object of per-group switches (omitted keys remain enabled); filtering happens before rendering, counting and AI preparation. If no included changes remain, no digest or AI request is created. Synchronization, persisted data, individual notifications, other channels and existing queued retries are unaffected. Individual inbox and praise/note emails use separate `message.html` and `remark.html` content templates, the same shared layout and a common button footer loaded by `email_rendering.py`. See `docs/email.md` for template variables and module paths.
+
+Individual message bodies show the subject as their section heading and the student name/class/school as the card heading, resolved through `/api/Skrzynki` globalKey and the Context student mailbox key (unknown or ambiguous identities use a generic heading and retain the mailbox in metadata). Metadata uses Polish labels; the sender value is bold in HTML. Dates display as `YYYY-MM-DD HH:MM (dzień tygodnia)` in the shared `TZ` (default `Europe/Warsaw`); weekday names are Polish and derived after timezone conversion. Source offsets and daylight-saving rules are respected. Naive source timestamps mean UTC. Invalid configured zones fail startup validation; defensive rendering falls back to UTC if settings are later modified. Unparseable date strings are preserved.
 
 With message bodies enabled, HTML preserves original paragraphs, breaks, lists, tables and allowed inline formatting through the local `nh3` sanitizer in `text.py`. Paragraph top/bottom margins default to zero, with explicit author styles retained; plain text uses single paragraph boundaries and preserves explicit blank lines. Active content and remote images are removed; links are restricted to HTTP/HTTPS/mailto. A separate HTML parser creates readable plain text with block boundaries and decoded entities. Keep the original stored content unchanged; rendering belongs in the email adapter. Existing `strip_html()` behavior for MQTT, display and TUI remains separate.
 
@@ -688,11 +690,12 @@ Direct environment readers do not load `.env` themselves. Compose uses `env_file
 | `MQTT_TOPIC_PREFIX`, `MQTT_STATUS_SUFFIX` | `Settings` | `school`, `status`. |
 | `CALENDAR_MAP` | `Settings` | Empty map disables macOS Calendar integration. |
 | `LLM_API_KEY` | `Settings` | Unset; AI summaries are optional. |
-| `EMAIL_ENABLED`, `EMAIL_AI_SUMMARY`, `EMAIL_INCLUDE_MESSAGE_BODIES` | `Settings` | All `false`; email, AI replacement and message content require explicit opt-in. |
+| `EMAIL_ENABLED`, `EMAIL_AI_SUMMARY`, `EMAIL_INCLUDE_MESSAGE_BODIES` | `Settings` | All `false`; email, AI summary and message content require explicit opt-in. |
 | `SMTP_HOST`, `EMAIL_FROM`, `EMAIL_TO` | `Settings` | Empty; required for enabled email. Sender accepts a bare address or `Name <address>`; SMTP uses only the address. Recipients use a JSON array of bare addresses. |
 | `SMTP_PORT`, `SMTP_SECURITY` | `Settings` | `587`, `starttls`; implicit TLS (`ssl`) and plain relay (`none`) supported. |
 | `SMTP_USERNAME`, `SMTP_PASSWORD` | `Settings` | Unset; optional credentials, configured together. |
-| `EMAIL_SUBJECT_PREFIX` | `Settings` | `eduVULCAN`. |
+| `EMAIL_SUBJECT_PREFIX` | `Settings` | `[eduVulcan]`; followed by included, present groups and the total change count when greater than one. |
+| `EMAIL_DIGEST_GROUPS` | `Settings` | `{}`; JSON object of individual digest group switches, omitted keys enabled. |
 | `EMAIL_MESSAGE_SUBJECT_PREFIX` | `Settings` | `[Nowa wiadomość]`; followed by each original message subject. |
 | `EMAIL_REMARK_SUBJECT_PREFIX` | `Settings` | `[Uwagi]`; followed by student name and category for each new praise/note. |
 | `SMTP_TIMEOUT_SECONDS`, `EMAIL_AI_TIMEOUT_SECONDS` | `Settings` | Both `30`; socket-operation and AI-preparation timeouts. |

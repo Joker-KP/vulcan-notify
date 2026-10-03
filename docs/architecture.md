@@ -86,7 +86,7 @@ On first sync for a student, every item is treated as baseline: stored silently,
 | `db.py` | Async SQLite persistence via aiosqlite. All writes are `ON CONFLICT ... DO UPDATE`. | `Database` |
 | `display.py` | Terminal output with ANSI colors (auto-disabled when piped). | `format_result()` |
 | `calendar.py` | macOS Calendar integration via AppleScript. Dedup by stored UID; soft-deleted items remove events. | `sync_calendar()` |
-| `email.py` | Per-sync student-change digest with optional AI replacement; separate notifications per new message; per-recipient durable retries. | `format_summary()`, `queue_summary()`, `queue_messages()`, `drain_email_outbox()`, `publish_email()` |
+| `email.py`, `email_digest.py`, `email_rendering.py`, `email_templates/` | Per-sync HTML student-change groups with optional AI summary; separate templated notifications per new message or note; per-recipient durable retries. | `render_summary()`, `format_summary()`, `format_remark()`, `queue_summary()`, `queue_messages()`, `drain_email_outbox()`, `publish_email()` |
 | `mqtt.py` | Maps `Change` → topic + JSON payload; writes to the `mqtt_outbox` table; drains outbox to Mosquitto on every sync and publishes a retained heartbeat + LWT on `<prefix>/status`. | `topic_for()`, `build_payload()`, `build_status_payload()`, `drain_outbox()` |
 | `api.py` | aiohttp HTTP server (port 8585). Grade aggregates, homework/messages/schedule endpoints, iCalendar feed. | `build_app()` |
 | `ics.py` | Zero-dependency RFC 5545 iCalendar writer. | `build_calendar()` |
@@ -150,9 +150,21 @@ Primary, always on. Groups output by student, then data type. ANSI colors are au
 
 Optional (`EMAIL_ENABLED=true`). The CLI passes each completed or interrupted
 `FullSyncResult` to the email adapter before other optional outputs. Baseline events
-are suppressed independently for students and messages. A plain digest is committed
-before optional AI preparation; `EMAIL_AI_SUMMARY=true` and `LLM_API_KEY` enable the
-existing summarizer's default prompt. AI failures fall back to the plain digest.
+are suppressed independently for students and messages. HTML and its derived text
+alternative are committed before optional AI preparation. Each of seven change
+groups has its own bundled template, heading and student-specific module link;
+the subject lists present groups and their total count. `SyncResult.portal_url`
+comes from the client's authenticated base URL and URL-encoded student key.
+`EMAIL_AI_SUMMARY=true` and `LLM_API_KEY` enable the existing summarizer's default
+prompt; its output appears above the groups without removing facts or links.
+AI failures keep the original grouped digest.
+`EMAIL_DIGEST_GROUPS` filters categories before rendering and AI preparation;
+omitted switches default to enabled. Only included changes count toward the
+subject, and one change has no count suffix. An empty filtered digest queues
+nothing. Acquisition, persisted state, other outputs and individual emails are
+unaffected, as are already queued retries. `email_rendering.py` loads the bundled
+templates; `layout.html` supplies the shared card/background/typography, with
+separate `message.html` and `remark.html` content and a shared button footer.
 New messages are queued separately before digest AI preparation, with subjects
 `<EMAIL_MESSAGE_SUBJECT_PREFIX> <original subject>` (default `[Nowa wiadomość]`).
 Their bodies require `EMAIL_INCLUDE_MESSAGE_BODIES=true`; individual messages do

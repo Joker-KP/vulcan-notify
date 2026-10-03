@@ -192,6 +192,10 @@ async def test_individual_mail_content_links_no_ai_and_retries(db, email_setting
     assert "Pomoc w zajęciach" in rows[0]["body"]
     assert REMARK.url in rows[0]["body"] and REMARK.url in rows[0]["html_body"]
     assert "Otwórz pochwały i uwagi" in rows[0]["html_body"]
+    assert "background:#f1f5f9" in rows[0]["html_body"]
+    assert "max-width:680px" in rows[0]["html_body"]
+    assert '<h1 style="margin:0;font-size:26px">Pochwały i uwagi</h1>' in rows[0]["html_body"]
+    assert '<h2 style="margin:0;font-size:22px">Jan</h2>' in rows[0]["html_body"]
     assert "wiadomosci.eduvulcan" not in rows[0]["html_body"]
     ai.assert_not_awaited()
     assert email.format_summary(result)[1] == 0
@@ -232,7 +236,7 @@ async def test_mixed_digest_keeps_notes_out_of_ai_input(db, email_settings, monk
     assert "Pomoc w zajęciach" not in prompt and "Pochwała" not in prompt
     rows = await db.list_email_outbox()
     assert len(rows) == 4  # One note and one grade digest, each to two recipients.
-    assert sum(row["body"] == "Grade summary" for row in rows) == 2
+    assert sum(row["body"].startswith("Grade summary\n") for row in rows) == 2
 
 
 @pytest.mark.parametrize("baseline_field", ["is_first_sync", "is_first_remarks_sync"])
@@ -265,6 +269,28 @@ async def test_email_sanitizes_original_content_and_headers(db, email_settings):
             email_to=["b@example.org"],
             email_remark_subject_prefix="[Uwagi]\nInjected",
         )
+
+
+async def test_note_template_preserves_rich_content_and_escapes_student_metadata(
+    db, email_settings
+):
+    email_settings.email_include_message_bodies = False
+    student = replace(STUDENT_A, name="Jan & rodzic", school="<b>Test School</b>")
+    item = replace(
+        REMARK,
+        content="<p><strong>Ważne</strong> informacje.</p><ul><li>Punkt 1</li></ul>"
+        '<script>bad()</script><img src="https://example.org/pixel">',
+    )
+    result = await _remark_result(db, student=student, items=[item])
+    await email.queue_remarks(result, db)
+    row = (await db.list_email_outbox())[0]
+    assert "Jan &amp; rodzic" in row["html_body"]
+    assert "Test School" in row["html_body"] and "<b>Test School</b>" not in row["html_body"]
+    assert "<strong>Ważne</strong>" in row["html_body"]
+    assert "<ul><li>Punkt 1</li></ul>" in row["html_body"]
+    assert "<script" not in row["html_body"] and "<img" not in row["html_body"]
+    assert "Ważne informacje." in row["body"]
+    assert "- Punkt 1" in row["body"]
 
 
 async def test_mqtt_payload_and_outbox(db, monkeypatch):

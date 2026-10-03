@@ -54,6 +54,7 @@ class SyncResult:
     failed_sections: dict[str, str] = field(default_factory=dict)
     new_remarks: list[Change] = field(default_factory=list)
     is_first_remarks_sync: bool = False
+    portal_url: str | None = None
 
     @property
     def has_failures(self) -> bool:
@@ -124,7 +125,9 @@ async def sync_student(
     last_sync = await db.get_state(f"last_sync:{student.key}")
     is_first = last_sync is None
 
-    result = SyncResult(student=student, is_first_sync=is_first)
+    result = SyncResult(
+        student=student, is_first_sync=is_first, portal_url=client.student_portal_url(student)
+    )
 
     async def section_ok(section: str, item_count: int) -> None:
         if run_id is not None:

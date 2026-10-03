@@ -227,7 +227,8 @@ Python settings load `.env`; Compose exports it to the containers. Direct auth/A
 | `SMTP_HOST`, `EMAIL_FROM`, `EMAIL_TO` | (empty) | Required email server, sender, and JSON recipient list |
 | `SMTP_PORT`, `SMTP_SECURITY` | `587`, `starttls` | SMTP port and TLS mode (`starttls`, `ssl`, `none`) |
 | `SMTP_USERNAME`, `SMTP_PASSWORD` | (none) | Optional SMTP credentials |
-| `EMAIL_AI_SUMMARY` | `false` | Replace the student-change digest body with an AI summary; also requires `LLM_API_KEY` |
+| `EMAIL_AI_SUMMARY` | `false` | Add an AI summary above the HTML change groups; also requires `LLM_API_KEY` |
+| `EMAIL_DIGEST_GROUPS` | `{}` (all enabled) | Individual digest group switches, e.g. `{"attendance":false,"homework":false}`; omitted keys stay enabled |
 | `EMAIL_MESSAGE_SUBJECT_PREFIX` | `[Nowa wiadomość]` | Prefix for separate new-message notifications, followed by the original subject |
 | `EMAIL_REMARK_SUBJECT_PREFIX` | `[Uwagi]` | Prefix for separate praise/note emails, followed by student name and category; full note content is included |
 | `EMAIL_INCLUDE_MESSAGE_BODIES` | `false` | Include original message bodies in individual notifications; messages are excluded from digest AI input |
@@ -241,6 +242,6 @@ Python settings load `.env`; Compose exports it to the containers. Direct auth/A
 ## 📚 Documentation <a name="documentation"></a>
 
 - [`docs/architecture.md`](docs/architecture.md) - internal architecture, pipeline, database schema, MQTT payloads, endpoint reference
-- [`docs/email.md`](docs/email.md) - SMTP digests, optional AI replacement, configuration and retries
+- [`docs/email.md`](docs/email.md) - HTML groups/templates, SMTP digests, optional AI summary, configuration and retries
 - [`docs/deployment.md`](docs/deployment.md) - Docker + Proxmox LXC + systemd setup
 - [`docs/eduvulcan-api.md`](docs/eduvulcan-api.md) - reverse-engineered eduVulcan web API reference

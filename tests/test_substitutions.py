@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 from vulcan_notify.differ import diff_schedule
 from vulcan_notify.models import Lesson, Student
@@ -160,6 +160,7 @@ async def test_diff_schedule_ignores_missing_lessons_outside_window(db: Database
 async def test_sync_student_persists_and_reports(db: Database) -> None:
     # First sync: baseline, no reports
     client = AsyncMock()
+    client.student_portal_url = MagicMock(return_value=None)
     client.get_students = AsyncMock(return_value=[STUDENT])
     client.get_periods = AsyncMock(return_value=[])
     client.get_grades = AsyncMock(return_value=[])

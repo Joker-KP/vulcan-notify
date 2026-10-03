@@ -4,7 +4,7 @@ These cover the silent-failure chain that used to run all the way from a Vulcan
 500 to a green dashboard tile. Each test asserts on a link in that chain.
 """
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -27,6 +27,7 @@ PERIOD = ClassificationPeriod(id=1, number=2, date_from="2026-02-01", date_to="2
 
 def _client(**overrides: object) -> AsyncMock:
     client = AsyncMock()
+    client.student_portal_url = MagicMock(return_value=None)
     client.get_students = AsyncMock(return_value=[STUDENT])
     client.get_periods = AsyncMock(return_value=[PERIOD])
     client.get_grades_and_summaries = AsyncMock(return_value=([], []))
