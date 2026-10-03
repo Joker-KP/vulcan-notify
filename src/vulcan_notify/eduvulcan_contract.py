@@ -19,7 +19,6 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urljoin, urlsplit
-from zoneinfo import ZoneInfo
 
 import aiohttp
 import yaml
@@ -27,6 +26,7 @@ from jsonschema import Draft202012Validator
 
 from vulcan_notify.auth import _make_ssl_context, cookies_for_url, load_session
 from vulcan_notify.client import _BROWSER_HEADERS
+from vulcan_notify.config import settings
 
 HOSTS = {"student": "uczen.eduvulcan.pl", "messages": "wiadomosci.eduvulcan.pl"}
 ROUTE = re.compile(r"/api/[A-Za-z][A-Za-z0-9]*$")
@@ -788,9 +788,7 @@ def register_browser_gets(
 
 
 def date_params(days: int) -> dict[str, str]:
-    today = datetime.now(ZoneInfo("Europe/Warsaw")).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
+    today = datetime.now(settings.timezone).replace(hour=0, minute=0, second=0, microsecond=0)
     start, end = today - timedelta(days=days), today + timedelta(days=14)
     return {
         "dataOd": start.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
@@ -959,7 +957,7 @@ def write_gather(
         )["schema"] = public_schema(merge_schema(response_schema(operation), observed))
         operation["x-evidence"] = {
             "source": "live-session",
-            "observed-at": datetime.now(UTC).isoformat(),
+            "observed-at": datetime.now(settings.timezone).isoformat(),
             "samples": len(values),
         }
         # Never overwrite useful nonempty fixtures with an empty-only observation.
@@ -1090,7 +1088,7 @@ async def run_job(args: argparse.Namespace) -> int:
     failed_discovery = [result for result in discovery if result["status"] != "ok"]
     report = {
         "command": args.command,
-        "checked_at": datetime.now(UTC).isoformat(),
+        "checked_at": datetime.now(settings.timezone).isoformat(),
         "results": results,
         "changes": changes,
         "new_routes": new_routes,

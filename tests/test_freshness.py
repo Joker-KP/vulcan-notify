@@ -7,6 +7,7 @@ actually stopped is still caught.
 """
 
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -115,7 +116,7 @@ def test_effective_age_never_goes_negative() -> None:
 def test_next_wakeup_reports_the_resume_time_during_the_pause() -> None:
     # 00:30 UTC is 02:30 Warsaw, inside the window.
     resume = next_wakeup(_utc(16, 0, 30))
-    assert resume == datetime(2026, 9, 16, 5, 0)
+    assert resume == datetime(2026, 9, 16, 5, 0, tzinfo=ZoneInfo("Europe/Warsaw"))
 
 
 def test_next_wakeup_is_none_outside_the_pause() -> None:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import datetime
 from importlib.metadata import PackageNotFoundError, version
 from typing import TYPE_CHECKING
 
@@ -33,7 +33,7 @@ _ATTENDANCE_CATEGORIES = {2: "absent", 3: "late", 4: "excused"}
 
 
 def _now_iso() -> str:
-    return datetime.now(UTC).isoformat()
+    return datetime.now(settings.timezone).isoformat()
 
 
 _TOPIC_SEGMENTS = {

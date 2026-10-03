@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
+from zoneinfo import ZoneInfo
 
-from vulcan_notify.db import Database
 from vulcan_notify.differ import Change
 from vulcan_notify.models import AttendanceEntry, Exam, Grade, Homework, Message, Student
 from vulcan_notify.mqtt import (
@@ -16,6 +17,10 @@ from vulcan_notify.mqtt import (
     topic_for,
 )
 from vulcan_notify.sync import FullSyncResult, SyncResult
+
+if TYPE_CHECKING:
+    from vulcan_notify.db import Database
+
 
 STUDENT = Student(
     key="KEY1",
@@ -124,6 +129,15 @@ def test_build_payload_new_grade() -> None:
     assert payload["date"] == "07.04.2026"
     assert "timestamp" in payload
     assert "old_value" not in payload
+
+
+def test_payload_timestamp_uses_shared_timezone(monkeypatch) -> None:
+    from vulcan_notify.config import settings
+
+    monkeypatch.setattr(settings, "tz", "Asia/Tokyo")
+    payload = build_payload(_make_change("grade", GRADE))
+    assert str(payload["timestamp"]).endswith("+09:00")
+    assert str(build_status_payload(0)["ts"]).endswith("+09:00")
 
 
 def test_build_payload_updated_grade() -> None:
@@ -277,6 +291,7 @@ def test_build_message_payload_truncates_long_body() -> None:
 async def test_publish_skipped_when_disabled(db: Database) -> None:
     result = FullSyncResult(student_results=[])
     with patch("vulcan_notify.mqtt.settings") as mock_settings:
+        mock_settings.timezone = ZoneInfo("Europe/Warsaw")
         mock_settings.mqtt_enabled = False
         with patch("vulcan_notify.mqtt.aiomqtt.Client") as mock_client:
             await publish_changes(result, db)
@@ -293,6 +308,7 @@ async def test_publish_status_heartbeat_even_without_changes(db: Database) -> No
     mock_client_ctx.__aexit__ = AsyncMock(return_value=False)
 
     with patch("vulcan_notify.mqtt.settings") as mock_settings:
+        mock_settings.timezone = ZoneInfo("Europe/Warsaw")
         mock_settings.mqtt_enabled = True
         mock_settings.mqtt_broker = "localhost"
         mock_settings.mqtt_port = 1883
@@ -321,6 +337,7 @@ async def test_publish_sends_changes(db: Database) -> None:
     mock_client_ctx.__aexit__ = AsyncMock(return_value=False)
 
     with patch("vulcan_notify.mqtt.settings") as mock_settings:
+        mock_settings.timezone = ZoneInfo("Europe/Warsaw")
         mock_settings.mqtt_enabled = True
         mock_settings.mqtt_broker = "localhost"
         mock_settings.mqtt_port = 1883
@@ -351,6 +368,7 @@ async def test_publish_skips_first_sync(db: Database) -> None:
     mock_client_ctx.__aexit__ = AsyncMock(return_value=False)
 
     with patch("vulcan_notify.mqtt.settings") as mock_settings:
+        mock_settings.timezone = ZoneInfo("Europe/Warsaw")
         mock_settings.mqtt_enabled = True
         mock_settings.mqtt_broker = "localhost"
         mock_settings.mqtt_port = 1883
@@ -391,6 +409,7 @@ async def test_drain_outbox_sets_lwt(db: Database) -> None:
     mock_client_ctx.__aexit__ = AsyncMock(return_value=False)
 
     with patch("vulcan_notify.mqtt.settings") as mock_settings:
+        mock_settings.timezone = ZoneInfo("Europe/Warsaw")
         mock_settings.mqtt_enabled = True
         mock_settings.mqtt_broker = "localhost"
         mock_settings.mqtt_port = 1883
@@ -417,6 +436,7 @@ async def test_publish_retains_on_failure(db: Database) -> None:
     result = FullSyncResult(student_results=[sr])
 
     with patch("vulcan_notify.mqtt.settings") as mock_settings:
+        mock_settings.timezone = ZoneInfo("Europe/Warsaw")
         mock_settings.mqtt_enabled = True
         mock_settings.mqtt_broker = "unreachable"
         mock_settings.mqtt_port = 1883
@@ -444,6 +464,7 @@ async def test_outbox_drains_on_retry(db: Database) -> None:
     mock_client_ctx.__aexit__ = AsyncMock(return_value=False)
 
     with patch("vulcan_notify.mqtt.settings") as mock_settings:
+        mock_settings.timezone = ZoneInfo("Europe/Warsaw")
         mock_settings.mqtt_enabled = True
         mock_settings.mqtt_broker = "localhost"
         mock_settings.mqtt_port = 1883

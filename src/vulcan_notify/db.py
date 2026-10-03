@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import aiosqlite
 
+from vulcan_notify.config import settings
 from vulcan_notify.freshness import ages
+from vulcan_notify.time_utils import local_storage_timestamps
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -1250,7 +1252,7 @@ class Database:
         if status == "ok":
             await self.set_state(
                 f"last_success:{student_key}:{section}",
-                datetime.now().isoformat(),
+                datetime.now(UTC).isoformat(),
             )
         await self.commit()
 
@@ -1293,7 +1295,7 @@ class Database:
         data endpoint. It answers "when did this data last come back from Vulcan for
         real", which is a different question from "did the loop run".
         """
-        now = datetime.now()
+        now = datetime.now(UTC)
         last_run = await self.get_last_sync_run()
 
         cursor = await self.db.execute("SELECT key FROM students WHERE active = 1")
@@ -1343,6 +1345,6 @@ class Database:
             "age_seconds": max(fresh_ages) if fresh_ages else None,
             "stale_after_seconds": stale_after_seconds,
             "sections": sections,
-            "last_run": last_run,
-            "generated_at": now.isoformat(),
+            "last_run": local_storage_timestamps(last_run),
+            "generated_at": now.astimezone(settings.timezone).isoformat(),
         }

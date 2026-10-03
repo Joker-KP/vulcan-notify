@@ -13,7 +13,6 @@ from email.message import EmailMessage
 from email.utils import format_datetime, make_msgid
 from html import escape
 from typing import TYPE_CHECKING
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from vulcan_notify.config import parse_email_sender, settings
 from vulcan_notify.models import Remark
@@ -65,11 +64,7 @@ def _format_message_date(value: str, config: Settings) -> str:
         return value
     if stamp.tzinfo is None:
         stamp = stamp.replace(tzinfo=UTC)
-    try:
-        local = stamp.astimezone(ZoneInfo(config.quiet_hours_tz))
-    except (ZoneInfoNotFoundError, ValueError):
-        log.warning("Unknown message display timezone; using UTC")
-        local = stamp.astimezone(UTC)
+    local = stamp.astimezone(config.timezone)
     return f"{local:%Y-%m-%d %H:%M} ({_WEEKDAYS_PL[local.weekday()]})"
 
 
@@ -126,7 +121,7 @@ async def _queue_email(
     html_body: str | None = None,
 ) -> list[str]:
     """Queue one email per recipient, returning only newly inserted delivery keys."""
-    date_header = format_datetime(datetime.now(UTC))
+    date_header = format_datetime(datetime.now(settings.timezone))
     new_keys: list[str] = []
     for recipient in dict.fromkeys(settings.email_to):
         key = hashlib.sha256(f"{identity}\0{recipient}".encode()).hexdigest()

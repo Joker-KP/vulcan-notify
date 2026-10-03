@@ -2,7 +2,7 @@
 Description=Daily vulcan-notify database backup
 
 [Timer]
-OnCalendar=*-*-* 03:00:00
+OnCalendar=*-*-* 03:00:00 Europe/Warsaw
 RandomizedDelaySec=600
 Persistent=true
 

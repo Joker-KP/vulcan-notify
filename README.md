@@ -198,7 +198,9 @@ When configured, `vulcan-notify sync` automatically creates and updates calendar
 
 ## 🔧 Configuration <a name="configuration"></a>
 
-All settings are via environment variables or `.env` file:
+Set `TZ=Europe/Warsaw` in `.env` (the default) for all Docker services, application logs, Chromium, quiet hours, email dates, MQTT timestamps and API diagnostics. The IANA zone applies daylight-saving rules automatically. `TZ` takes precedence over the legacy `QUIET_HOURS_TZ` alias. SQLite timestamps remain explicitly UTC; old UTC history needs no migration. UTC encodings in upstream requests and iCalendar preserve the same instants. Docker daemon log metadata (`docker logs --timestamps`) is managed by Docker and remains UTC; timestamps inside application log lines use `TZ`.
+
+Python settings load `.env`; Compose exports it to the containers. Direct auth/API/shell readers need exported variables outside Docker. See the commented [`.env.example`](.env.example) for all settings:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -211,8 +213,8 @@ All settings are via environment variables or `.env` file:
 | `POLL_INTERVAL` | `1800` | Seconds between polls when run as a service |
 | `QUIET_HOURS_START` | `0` | Hour (0-23) to start quiet window, sync paused |
 | `QUIET_HOURS_END` | `5` | Hour (0-23) to end quiet window, sync resumes |
-| `QUIET_HOURS_TZ` | `Europe/Warsaw` | Zone the quiet window is read in. Not the container clock, which stays UTC |
-| `MESSAGE_SENDER_WHITELIST` | (empty) | Comma-separated sender names to filter messages |
+| `TZ` | `Europe/Warsaw` | Shared runtime, log, scheduling and display timezone; `QUIET_HOURS_TZ` is a legacy fallback |
+| `MESSAGE_SENDER_WHITELIST` | `[]` | JSON list of sender substrings to filter displayed messages |
 | `CALENDAR_MAP` | (empty) | JSON dict mapping student names to macOS calendar names |
 | `CALENDAR_REMINDER_HOURS` | `24` | Hours before event for calendar alarm |
 | `MQTT_ENABLED` | `false` | Enable MQTT publishing |

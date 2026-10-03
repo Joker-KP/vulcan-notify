@@ -86,4 +86,4 @@ See `docs/eduvulcan-api.md` for the reverse-engineered eduVulcan web API documen
 
 ## Docker startup
 
-`vulcan-api` serves port 8585 independently. `vulcan-sync` runs `sync-loop.sh` through `entrypoint-xvfb.sh`; the wrapper forwards its supplied command. `vulcan-auth` is an explicit GUI service with noVNC at loopback port 6080. All share `./data:/app/data`. The image uses CMD and has no ENTRYPOINT; `entrypoint.sh` was removed. Quiet hours use Europe/Warsaw separately from the UTC database clock. Stop the worker during manual auth or a one-off sync.
+`vulcan-api` serves port 8585 independently. `vulcan-sync` runs `sync-loop.sh` through `entrypoint-xvfb.sh`; the wrapper forwards its supplied command. `vulcan-auth` is an explicit GUI service with noVNC at loopback port 6080. All share `./data:/app/data`. The image uses CMD and has no ENTRYPOINT; `entrypoint.sh` was removed. TZ defaults to Europe/Warsaw for all runtime clocks, logs, Chromium, scheduling and displayed dates; QUIET_HOURS_TZ is a legacy fallback. SQLite and Python persistence explicitly use UTC, preserving existing history. Stop the worker during manual auth or a one-off sync.

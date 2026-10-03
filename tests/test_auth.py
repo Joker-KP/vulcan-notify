@@ -53,6 +53,7 @@ async def test_persistent_context_can_force_headed_mode(tmp_path, monkeypatch):
     kwargs = playwright.chromium.launch_persistent_context.call_args.kwargs
     assert kwargs["user_data_dir"] == str(tmp_path / "profile")
     assert kwargs["headless"] is False
+    assert kwargs["timezone_id"] == auth.settings.tz
 
 
 @pytest.mark.parametrize("interactive", [False, True])

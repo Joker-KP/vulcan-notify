@@ -200,7 +200,7 @@ Optional (`MQTT_ENABLED=true`). Every `Change` is enqueued in `mqtt_outbox` afte
   "student": "Alice Smith",
   "title": "New grade: Math",
   "message": "5 (Sprawdzian, weight 3)",
-  "timestamp": "2026-04-14T09:12:03+00:00",
+  "timestamp": "2026-04-14T11:12:03+02:00",
   "subject": "Math",
   "value": "5",
   "category": "Sprawdzian",
@@ -331,10 +331,14 @@ ages past the threshold before midnight, so real failures are not forgiven; only
 pause the loop was told to take is. `/api/health` also returns a `quiet_hours` block so
 an idle-but-green service explains itself.
 
-The window is evaluated in `QUIET_HOURS_TZ`, not the container clock. The clock stays UTC
-deliberately: every timestamp in the database is a naive `datetime.now()`, so moving it
-would reinterpret every existing row and produce a phantom age jump on the first health
-check after deploy.
+The shared `TZ` (default `Europe/Warsaw`) controls container and Python clocks, logs,
+Chromium, quiet hours and displayed timestamps. The legacy `QUIET_HOURS_TZ` is a fallback
+alias only. SQLite timestamps and Python persistence use explicit UTC; naive historical
+stamps continue to mean UTC. Freshness normalizes both naive and offset-bearing stamps
+to UTC before calculating age, so changing the runtime zone does not reinterpret history.
+API health diagnostics and MQTT timestamps include the local UTC offset. Local-day API
+request bounds are converted to UTC with the correct offset at each bound. iCalendar
+encodes instants in UTC and uses `TZ` for warning dates and descriptions.
 
 Errors are structured rather than tracebacks: a bad query param is a 400, a locked or
 missing database is a 503.

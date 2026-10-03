@@ -1,6 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
+export TZ="${TZ:-${QUIET_HOURS_TZ:-Europe/Warsaw}}"
 export DISPLAY="${DISPLAY:-:99}"
 
 echo "[xvfb] Starting Xvfb on ${DISPLAY}"

@@ -103,7 +103,9 @@ docker compose up -d vulcan-sync
 
 Open `http://127.0.0.1:6080/vnc.html` locally, or use an SSH tunnel to that loopback port on the Docker host. The auth service starts Xvfb, Openbox, x11vnc and noVNC; interactive auth always forces headed Chromium and reuses the same profile/session. Normal sync never launches interactive auth automatically.
 
-Quiet hours use `QUIET_HOURS_TZ=Europe/Warsaw` while container/database time remains UTC. Windows crossing midnight are supported; equal start/end disables the window. `/api/health` excludes these pauses from freshness age and reports stale until the first confirmed fetch populates the new section timestamps. The default `SYNC_HISTORY_KEEP_DAYS=90` prunes sync-run/section diagnostics, preserving school data and baseline markers.
+Set `TZ=Europe/Warsaw` in `.env` to use one timezone for all three containers, shell/Python logs, Chromium, quiet hours and rendered timestamps. This is also the standalone image default; `tzdata` supplies IANA/DST rules. `QUIET_HOURS_TZ` remains a legacy fallback when `TZ` is unset. Database writes explicitly use UTC and existing naive UTC timestamps keep their meaning, so no database migration is required. Windows crossing midnight are supported; equal start/end disables the window. `/api/health` excludes these pauses from freshness age and reports stale until the first confirmed fetch populates the new section timestamps. The default `SYNC_HISTORY_KEEP_DAYS=90` prunes sync-run/section diagnostics, preserving school data and baseline markers.
+
+The deployment and backup scripts default to the same `TZ`, and their systemd services read `/opt/vulcan-notify/.env`. The backup timer explicitly runs at 03:00 Europe/Warsaw, regardless of the host timezone. If you choose another `TZ`, update its `OnCalendar` timezone through a systemd override as well; timer expressions cannot interpolate environment variables. Reload systemd and restart the timer after installing updated units. Host journal timestamps and Docker daemon timestamp prefixes remain host/daemon metadata; application log timestamps use `TZ`.
 
 ## 4. Remote access
 

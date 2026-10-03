@@ -24,6 +24,8 @@ from playwright.async_api import (
     async_playwright,
 )
 
+from vulcan_notify.config import settings
+
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
@@ -440,6 +442,7 @@ async def _launch_browser_context(
             "height": 900,
         },
         locale="pl-PL",
+        timezone_id=settings.tz,
         args=[
             "--no-sandbox",
             "--disable-gpu",

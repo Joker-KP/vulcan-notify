@@ -34,10 +34,12 @@ Message metadata uses Polish labels: **Autor**, **Data**, **Skrzynka**, and
 not repeated as a metadata field in the body. The sender's value is bold in HTML.
 Dates use `YYYY-MM-DD HH:MM (dzień tygodnia)`, for example
 `2026-09-29 18:23 (wtorek)`, in
-`QUIET_HOURS_TZ` (default `Europe/Warsaw`), including daylight-saving changes.
-Source offsets are respected; timestamps without an offset are interpreted as UTC,
-independently of the container timezone. An unknown timezone falls back to UTC;
-unparseable source dates are retained so the notification can still be delivered.
+`TZ` (default `Europe/Warsaw`, shared with logs, Docker and scheduling), including
+daylight-saving changes. Source offsets are respected; timestamps without an offset
+are interpreted as UTC, independently of the container timezone. Invalid configured
+IANA zones fail startup validation. Defensive rendering falls back to UTC if the
+settings object is later modified. Unparseable source dates are retained so the
+notification can still be delivered.
 
 When `EMAIL_INCLUDE_MESSAGE_BODIES=true`, the HTML alternative retains the
 original paragraphs, explicit line breaks, lists, tables, emphasis and supported
@@ -113,7 +115,7 @@ settings unset for a relay that does not require authentication.
 | `EMAIL_SUBJECT_PREFIX` | `eduVULCAN` | Subject is `<prefix>: <N> change(s)`. |
 | `EMAIL_MESSAGE_SUBJECT_PREFIX` | `[Nowa wiadomość]` | Separate message email subject is `<prefix> <original subject>`; upstream line breaks are flattened. |
 | `EMAIL_REMARK_SUBJECT_PREFIX` | `[Uwagi]` | Separate praise/note email subject is `<prefix> <student>: <category>`. |
-| `QUIET_HOURS_TZ` | `Europe/Warsaw` | Also controls displayed dates and weekdays; format is `YYYY-MM-DD HH:MM (dzień tygodnia)`. |
+| `TZ` | `Europe/Warsaw` | Shared runtime/display timezone; dates use `YYYY-MM-DD HH:MM (dzień tygodnia)`. `QUIET_HOURS_TZ` remains a legacy fallback. |
 | `EMAIL_INCLUDE_MESSAGE_BODIES` | `false` | Include formatted HTML content and a readable text alternative; attachment files are never sent. |
 | `EMAIL_AI_SUMMARY` | `false` | Replace the plain digest with an AI summary when `LLM_API_KEY` is also set. |
 | `EMAIL_AI_TIMEOUT_SECONDS` | `30` | Maximum time allowed for AI preparation before using the plain digest. |

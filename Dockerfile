@@ -1,7 +1,10 @@
 FROM python:3.12-slim
 
+ENV TZ=Europe/Warsaw
+
 # Playwright Chromium dependencies + virtual X display + optional noVNC.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    tzdata \
     libnss3 \
     libnspr4 \
     libatk1.0-0 \

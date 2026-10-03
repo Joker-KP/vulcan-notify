@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -26,6 +26,17 @@ if TYPE_CHECKING:
     from vulcan_notify.models import Grade, Message, Student
 
 logger = logging.getLogger(__name__)
+
+
+def _api_date_window(now: datetime, days_past: int, days_future: int) -> tuple[str, str]:
+    """Serialize full local days as UTC instants, respecting DST at each bound."""
+    midnight = now.astimezone(settings.timezone).replace(hour=0, minute=0, second=0, microsecond=0)
+    start = midnight - timedelta(days=days_past)
+    end = midnight + timedelta(days=days_future + 1) - timedelta(milliseconds=1)
+    return (
+        start.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        end.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+    )
 
 
 @dataclass
@@ -173,11 +184,8 @@ async def sync_student(
 
     # ── Attendance ───────────────────────────────────────────────
     try:
-        now = datetime.now()
-        date_from = (now - timedelta(days=settings.sync_attendance_days)).strftime(
-            "%Y-%m-%dT00:00:00.000Z"
-        )
-        date_to = now.strftime("%Y-%m-%dT23:59:59.999Z")
+        now = datetime.now(settings.timezone)
+        date_from, date_to = _api_date_window(now, settings.sync_attendance_days, 0)
 
         attendance = await client.get_attendance(student, date_from, date_to)
 
@@ -268,10 +276,9 @@ async def sync_student(
 
     # ── Schedule / Substitutions ─────────────────────────────────
     try:
-        now = datetime.now()
-        # Previous week + next two weeks, expressed as UTC ISO for the API.
-        date_from_api = (now - timedelta(days=7)).strftime("%Y-%m-%dT00:00:00.000Z")
-        date_to_api = (now + timedelta(days=14)).strftime("%Y-%m-%dT23:59:59.999Z")
+        now = datetime.now(settings.timezone)
+        # Whole local days, converted to UTC ISO for the API.
+        date_from_api, date_to_api = _api_date_window(now, 7, 14)
 
         lessons = await client.get_schedule(student, date_from_api, date_to_api)
 
@@ -310,7 +317,7 @@ async def sync_student(
         for remark in remarks:
             await db.upsert_remark(student.key, remark)
         await db.mark_missing_remarks(student.key, {remark.id for remark in remarks})
-        await db.set_state(marker, datetime.now().isoformat())
+        await db.set_state(marker, datetime.now(UTC).isoformat())
         await db.commit()
         result.new_remarks = changes
         await section_ok("remarks", len(remarks))
@@ -325,7 +332,7 @@ async def sync_student(
     # last_success:<student>:<section>, which only advances on a confirmed fetch.
     await db.set_state(
         f"last_sync:{student.key}",
-        datetime.now().isoformat(),
+        datetime.now(UTC).isoformat(),
     )
     await db.commit()
 
@@ -398,7 +405,7 @@ async def sync_messages(
     if backfill:
         logger.info("Backfilled content for %d message(s)", len(backfill))
 
-    await db.set_state("last_sync:messages", datetime.now().isoformat())
+    await db.set_state("last_sync:messages", datetime.now(UTC).isoformat())
     await db.commit()
 
     if run_id is not None:

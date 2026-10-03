@@ -13,6 +13,7 @@ from aiohttp import web
 
 from vulcan_notify.config import settings
 from vulcan_notify.freshness import ages, next_wakeup
+from vulcan_notify.time_utils import local_storage_timestamps
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,7 @@ def _get_health(student_filter: str | None = None) -> dict[str, Any]:
     run" -- the loop running while every fetch returns nothing is the failure this
     whole endpoint exists to catch.
     """
-    now = datetime.now()
+    now = datetime.now(UTC)
     stale_after = settings.stale_after_seconds
 
     try:
@@ -47,7 +48,7 @@ def _get_health(student_filter: str | None = None) -> dict[str, Any]:
             "status": "failed",
             "stale": True,
             "error": f"cannot open database: {exc}",
-            "generated_at": now.isoformat(),
+            "generated_at": now.astimezone(settings.timezone).isoformat(),
         }
 
     try:
@@ -122,8 +123,8 @@ def _get_health(student_filter: str | None = None) -> dict[str, Any]:
             "resumes_at": resume_at.isoformat() if resume_at else None,
         },
         "sections": sections,
-        "last_run": last_run,
-        "generated_at": now.isoformat(),
+        "last_run": local_storage_timestamps(last_run),
+        "generated_at": now.astimezone(settings.timezone).isoformat(),
     }
 
 
@@ -870,7 +871,9 @@ def _get_remarks(student_filter: str | None = None, n: int = 20) -> dict[str, An
                 "WHERE student_key = ? AND deleted_at IS NULL ORDER BY date DESC, id DESC LIMIT ?",
                 (student["key"], n),
             ).fetchall()
-            result[student["name"]] = {"remarks": [dict(row) for row in rows]}
+            result[student["name"]] = {
+                "remarks": [local_storage_timestamps(dict(row)) for row in rows]
+            }
         return result
     finally:
         db.close()
@@ -960,7 +963,7 @@ if __name__ == "__main__":
     import os
 
     logging.basicConfig(
-        level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper()),
+        level=getattr(logging, settings.log_level.upper()),
         format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )

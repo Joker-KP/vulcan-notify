@@ -1,11 +1,15 @@
 """Configuration via environment variables and .env file."""
 
+import logging
+import os
+import time
 from email.errors import HeaderParseError
 from email.headerregistry import Address, AddressHeader, HeaderRegistry
 from pathlib import Path
 from typing import Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -38,7 +42,41 @@ class Settings(BaseSettings):
         "env_file_encoding": "utf-8",
         "extra": "ignore",
         "hide_input_in_errors": True,
+        "populate_by_name": True,
     }
+
+    # One zone for process clocks, logs, scheduling and rendered timestamps.
+    # QUIET_HOURS_TZ is accepted only as a legacy alias; TZ takes precedence.
+    tz: str = Field(
+        default="Europe/Warsaw",
+        validation_alias=AliasChoices("TZ", "QUIET_HOURS_TZ", "quiet_hours_tz"),
+    )
+
+    @field_validator("tz")
+    @classmethod
+    def validate_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError):
+            raise ValueError("TZ must be a valid IANA timezone name") from None
+        return value
+
+    @property
+    def timezone(self) -> ZoneInfo:
+        try:
+            return ZoneInfo(self.tz)
+        except (ZoneInfoNotFoundError, ValueError):
+            logging.getLogger(__name__).warning("Unknown timezone; using UTC")
+            return ZoneInfo("UTC")
+
+    @property
+    def quiet_hours_tz(self) -> str:
+        """Compatibility accessor; there is no independent quiet-hours zone."""
+        return self.tz
+
+    @quiet_hours_tz.setter
+    def quiet_hours_tz(self, value: str) -> None:
+        self.tz = value
 
     # Session file path (cookies from browser login)
     session_file: Path = Path("session.json")
@@ -57,19 +95,10 @@ class Settings(BaseSettings):
     sync_message_backfill_batch: int = 10  # messages to backfill per cycle
     sync_history_keep_days: int = 90  # sync_runs / sync_sections retention
 
-    # Polling. sync-loop.sh reads POLL_INTERVAL from the environment, so this is the
-    # single source of truth for both the loop and the staleness threshold below.
+    # sync-loop.sh independently reads POLL_INTERVAL; keep its default aligned.
     poll_interval: int = 1800  # seconds
 
-    # Quiet window, in the container's local time. sync-loop.sh reads these same two
-    # env vars to decide when to pause; they live here too so /api/health can subtract
-    # the pause from data age. Without that the two disagreed and a normal overnight
-    # sleep read as an outage -- see freshness.py.
-    # Evaluated in this zone, not the container's. The LXC runs on UTC, which quietly
-    # turned a 00:00-05:00 window into 02:00-07:00 local -- the loop went quiet two
-    # hours after midnight and resumed half an hour before the kids left, so the
-    # morning schedule was always five hours stale.
-    quiet_hours_tz: str = "Europe/Warsaw"  # also the display zone for message email dates
+    # Quiet hours use TZ in both sync-loop.sh and freshness.py.
     quiet_hours_start: int = Field(default=0, ge=0, le=23)
     quiet_hours_end: int = Field(default=5, ge=0, le=23)
 
@@ -156,3 +185,9 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+# Settings also loads TZ from .env for standalone Python commands. Apply it before
+# clocks/loggers/browser subprocesses are used; database writes use explicit UTC.
+os.environ["TZ"] = settings.tz
+if hasattr(time, "tzset"):
+    time.tzset()

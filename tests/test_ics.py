@@ -143,7 +143,7 @@ def test_stale_feed_announces_itself() -> None:
     since = datetime(2026, 4, 10, 6, 30, tzinfo=UTC)
     ics = build_calendar("Solomiia", [_lesson()], "S1", stale=True, stale_since=since)
 
-    assert "School sync stale since 2026-04-10 06:30" in ics
+    assert "School sync stale since 2026-04-10 08:30 +0200" in ics
     assert ics.count("BEGIN:VEVENT") == 2
 
 
