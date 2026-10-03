@@ -1,0 +1,13 @@
+
+docker compose up -d --build && docker compose logs -f vulcan-sync
+
+docker compose run --rm --no-deps --entrypoint uv vulcan-api    run --extra tui vulcan-notify tui
+docker compose run --rm --no-deps --entrypoint uv vulcan-sync   run python -m vulcan_notify.demo_email   --db /app/data/email-demo.db --send
+
+docker compose run --rm --no-deps --entrypoint uv vulcan-sync   run vulcan-notify summarize --type messages --days 10
+docker compose run --rm --no-deps --entrypoint uv vulcan-sync   run vulcan-notify summarize --type completed-lessons --days 7
+docker compose run --rm --no-deps --entrypoint uv vulcan-sync   run vulcan-notify summarize --type mix --days 7
+
+
+docker buildx build --platform linux/amd64 --tag macjoker/vulcan-notify:1.0.0 --push .
+docker buildx build --platform linux/amd64,linux/arm64 -t macjoker/vulcan-notify:1.0.0 --push .

@@ -88,6 +88,26 @@ source. With the Docker build cache available, changes under `src/` reuse those
 layers and rerun only the source copy and application installation. Changes to
 `pyproject.toml` or `uv.lock` invalidate the dependency and browser layers.
 
+If an ARM64 build appears to stall during `apt-get install`, capture the full
+build output to identify whether it stops downloading, unpacking or configuring:
+
+```bash
+docker buildx build --platform linux/arm64 --progress=plain --load -t vulcan-notify:arm64 .
+docker buildx inspect --bootstrap
+```
+
+Package configuration runs with `DEBIAN_FRONTEND=noninteractive`, so `tzdata`
+and other debconf packages use defaults without requesting input. This setting
+applies only during installation, not to the running container.
+
+If output stops at a `Get:` line, investigate download connectivity first;
+that line does not confirm the package finished downloading. When building
+ARM64 on an AMD64 builder, QEMU emulation can make unpacking and configuration
+much slower; prefer a native ARM64 builder when available. See
+[Docker's multi-platform build guidance](https://docs.docker.com/build/building/multi-platform/).
+The last build log lines and the builder's native architecture are needed to
+distinguish slow emulation from a network or package-script hang.
+
 Synchronization first validates `data/session.json` over HTTP. With credentials configured, an expired or missing session starts persistent Chromium under Xvfb, imports stored cookies and tries to restore browser access before entering credentials. Browser recovery is headed by default; set `VULCAN_BROWSER_HEADLESS=true` to opt into headless recovery. Automatic profile selection opens the first available journal; synchronization then covers all students returned by the API.
 
 The Chromium profile, its lock file, session and database remain under the shared `./data:/app/data` bind mount. Rebuilding the image does not replace these files. The API runs independently from the sync worker; normal HTTP synchronization does not start a browser.
