@@ -12,7 +12,7 @@ import ssl
 import subprocess
 import tempfile
 import time
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse, urlunparse
@@ -20,10 +20,12 @@ from urllib.parse import urlparse, urlunparse
 import aiohttp
 from playwright.async_api import (
     BrowserContext,
+    Locator,
     Page,
     Playwright,
     async_playwright,
 )
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from vulcan_notify.config import settings
 
@@ -35,6 +37,10 @@ logger = logging.getLogger(__name__)
 
 class InvalidSessionError(ValueError):
     """Saved session cannot be safely reused; never includes private file data."""
+
+
+class SessionValidationError(RuntimeError):
+    """Upstream is unavailable; the saved session's validity is unknown."""
 
 
 def _write_session(session_path: Path, session_data: dict[str, Any]) -> None:
@@ -1047,6 +1053,35 @@ async def login_and_save_session(
 # ---------------------------------------------------------------------------
 
 
+async def _submit_login_form(page: Page, button: Locator, login_complete: asyncio.Event) -> None:
+    """Submit once and recognize the final redirect, independent of the POST URL."""
+
+    def reached_portal(url: str) -> bool:
+        parsed = urlparse(url)
+        return _is_student_dashboard_url(url) or (
+            parsed.hostname == "eduvulcan.pl" and "/logowanie" not in parsed.path.lower()
+        )
+
+    try:
+        await button.click(timeout=10000)
+    except PlaywrightTimeoutError:
+        # The click may have submitted successfully before a navigation timed out.
+        # Inspect the outcome without sending the credentials a second time.
+        logger.info("Auto-login: submit timed out; checking login redirect")
+
+    if login_complete.is_set():
+        return
+
+    try:
+        await page.wait_for_url(reached_portal, wait_until="domcontentloaded", timeout=30000)
+    except PlaywrightTimeoutError:
+        # The student journal can open in a separate tab tracked by the context.
+        if not login_complete.is_set():
+            raise RuntimeError(
+                "eduVULCAN login did not reach the portal or student journal"
+            ) from None
+
+
 async def auto_login(
     session_path: Path,
     login: str,
@@ -1190,58 +1225,15 @@ async def auto_login(
                 logger.info("Auto-login: submitting login form")
 
                 try:
-                    async with page.expect_response(
-                        lambda response: (
-                            response.request.method.upper() == "POST"
-                            and "/logowanie" in response.url.lower()
-                        ),
-                        timeout=15000,
-                    ) as response_info:
-                        await login_button.click(
-                            timeout=10000,
-                        )
-
-                    login_response = await response_info.value
-
-                    logger.info(
-                        "Auto-login: login POST response status=%d url=%s",
-                        login_response.status,
-                        _safe_url(login_response.url),
-                    )
-
-                except Exception as exc:
+                    await _submit_login_form(page, login_button, login_complete)
+                except RuntimeError:
+                    logger.error("Auto-login: login redirect failed; URL=%s", _safe_url(page.url))
                     await _save_screenshot(
                         page,
                         diagnostics_dir,
-                        "login-post-error",
+                        "login-redirect-error",
                     )
-
-                    raise RuntimeError("No login POST response observed") from exc
-
-                with suppress(Exception):
-                    await page.wait_for_load_state(
-                        "domcontentloaded",
-                        timeout=15000,
-                    )
-
-                await asyncio.sleep(1)
-
-                # Server rejected full login.
-                if "/logowanie" in urlparse(page.url).path.lower():
-                    logger.error("Auto-login: server returned login page")
-
-                    await _log_page_text(
-                        page,
-                        "Login response",
-                    )
-
-                    await _save_screenshot(
-                        page,
-                        diagnostics_dir,
-                        "login-post-rejected",
-                    )
-
-                    raise RuntimeError("eduVULCAN rejected the automated credential login")
+                    raise
 
                 logger.info(
                     "Auto-login: credentials accepted; URL=%s",
@@ -1395,7 +1387,12 @@ def _make_ssl_context() -> ssl.SSLContext:
 async def test_session(
     session_data: dict[str, Any],
 ) -> bool:
-    """Test the short-lived API session."""
+    """Test the API session; transient failures do not prove session expiry.
+
+    Retry once for connectivity/server failures, then raise SessionValidationError.
+    Return False for authentication failure, HTML login or a Context conflict (409)
+    that needs a fresh browser session context.
+    """
 
     base_url = session_data["base_url"]
 
@@ -1424,46 +1421,62 @@ async def test_session(
     }
 
     ssl_context = _make_ssl_context()
+    last_reason = "unknown response"
 
-    try:
-        async with (
-            aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30, connect=10)) as session,
-            session.get(
-                url,
-                ssl=ssl_context,
-                headers=headers,
-                allow_redirects=True,
-            ) as response,
-        ):
-            text = await response.text()
-
-            content_type = response.headers.get(
-                "content-type",
-                "",
-            )
-
-            logger.debug(
-                "Session test: status=%d content-type=%s len=%d",
-                response.status,
-                content_type,
-                len(text),
-            )
-
-            if response.status != 200:
-                return False
-
-            if "text/html" in content_type.lower():
-                return False
-
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=30, connect=10)
+    ) as session:
+        for attempt in range(2):
             try:
-                json.loads(text)
+                async with session.get(
+                    url, ssl=ssl_context, headers=headers, allow_redirects=True
+                ) as response:
+                    if response.status == 409:
+                        # A Context conflict is eligible for bounded browser
+                        # recovery; it is not proof of a transient server outage.
+                        logger.warning(
+                            "Session validation: HTTP 409 from Context; session recovery required"
+                        )
+                        return False
+                    if response.status in (401, 403):
+                        return False
+                    if response.status != 200:
+                        raise SessionValidationError(
+                            f"Session validation returned HTTP {response.status}"
+                        )
 
-                return True
+                    text = await response.text()
+                    content_type = response.headers.get("content-type", "")
+                    if "text/html" in content_type.lower():
+                        return False
 
-            except json.JSONDecodeError:
-                return False
+                    data = json.loads(text)
+                    if not isinstance(data, dict):
+                        raise SessionValidationError(
+                            f"Session validation returned JSON {type(data).__name__}; "
+                            "expected student context object"
+                        )
+                    return True
+            except (
+                aiohttp.ClientError,
+                TimeoutError,
+                json.JSONDecodeError,
+                SessionValidationError,
+            ) as exc:
+                # Our validation errors contain only fixed descriptions, numeric
+                # HTTP status or JSON type names. Other exceptions may embed URLs,
+                # cookies or response content, so log only their class name.
+                last_reason = (
+                    str(exc) if isinstance(exc, SessionValidationError) else type(exc).__name__
+                )
+                logger.warning(
+                    "Session validation unavailable (attempt %d/2, %s)",
+                    attempt + 1,
+                    last_reason,
+                )
+                if attempt == 0:
+                    await asyncio.sleep(2)
 
-    except Exception:
-        logger.exception("Session validation failed")
-
-        return False
+    raise SessionValidationError(
+        f"Could not validate the saved session ({last_reason}); try again later"
+    )

@@ -420,7 +420,28 @@ The entry profile is not a synchronization filter. `sync_all()` synchronizes all
 
 ### Authentication failures
 
-`test_session()` has a 30-second total and 10-second connection timeout. A failed validation returns false without replacing session.json. Mid-sync `SessionExpiredError` propagates to the CLI for one credential-backed recovery attempt. Partial results carry already persisted changes to the CLI for output delivery before retry, so a fresh diff does not silently discard them. A degraded sync exits nonzero after publishing successful changes; the loop counts it as a failure. HTML server failures are retried as fetch failures, rather than interpreted as expired sessions.
+`test_session()` has a 30-second total and 10-second connection timeout per attempt.
+Connectivity, server and malformed-response failures retry once after two seconds,
+then raise `SessionValidationError`. The CLI exits nonzero without browser recovery,
+session replacement or an authentication-failure email when validity remains unknown;
+the poll loop retries on its next cycle. HTTP 401/403 or an HTTP 200 HTML response
+return false and follow normal authentication recovery.
+The observed HTTP 409 from upstream `/api/Context` also requests session recovery
+without an HTTP retry. This is a recovery policy for a Context conflict, not a
+claim that every HTTP 409 proves session expiry. The client's student discovery
+uses the same policy so a conflict between validation and synchronization reaches
+the existing single mid-sync recovery/retry. A repeated conflict after that retry
+exits nonzero; other module conflicts remain fetch errors.
+Validation failures log the HTTP status or unexpected JSON type, while transport
+and parsing failures log only the exception class. Response bodies, cookies and
+raw transport exception messages are never included in these diagnostics.
+
+Credential submission waits up to 30 seconds for the final portal/student redirect
+and handles student access in another tab; it does not require a POST to a specific
+URL or resubmit credentials after an ambiguous click timeout. Session saving still
+requires reaching the student application.
+
+Mid-sync `SessionExpiredError` propagates to the CLI for one credential-backed recovery attempt. Partial results carry already persisted changes to the CLI for output delivery before retry, so a fresh diff does not silently discard them. A degraded sync exits nonzero after publishing successful changes; the loop counts it as a failure. HTML server failures are retried as fetch failures, rather than interpreted as expired sessions.
 
 Automatic recovery failures print instructions for manual authentication without launching a GUI. Interactive recovery remains explicit: stop `vulcan-sync`, run `docker compose --profile auth up vulcan-auth`, then restart `vulcan-sync`. The API can continue serving stored state during this process. Do not automatically launch interactive authentication from normal sync.
 

@@ -35,6 +35,14 @@ https://uczen.eduvulcan.pl/{tenant}/api/
 
 Returns all students linked to the logged-in parent account.
 
+A deployment log on 2026-10-04 showed this endpoint returning HTTP 409 for a
+saved session. The response body and the server's exact conflict semantics were
+not captured. The application treats this Context conflict as eligible for session
+recovery, first through persistent Chromium, with the existing bounded mid-sync
+retry. This policy applies to student Context only; it does not assert that all
+409 responses mean authentication expiry. Successful live recovery from this
+specific conflict has not yet been verified.
+
 ```json
 {
   "uczniowie": [

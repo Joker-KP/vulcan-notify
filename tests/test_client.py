@@ -182,6 +182,28 @@ async def test_session_expired_raises(session_data: dict) -> None:
         await client.get_students()
 
 
+async def test_context_conflict_requests_session_recovery(session_data, monkeypatch):
+    client = VulcanClient(session_data)
+    client._jitter = AsyncMock()
+    client._http = _mock_session(_mock_response({"private": "private-detail"}, status=409))
+    with pytest.raises(SessionExpiredError, match=r"Context conflict.*409"):
+        await client.get_students()
+    client._http.get.assert_called_once()
+
+
+@pytest.mark.parametrize("path", ["/api/Uwagi", "/api/Odebrane", "/api/Contextual"])
+async def test_other_endpoint_conflicts_do_not_request_session_recovery(session_data, path):
+    from vulcan_notify.client import VulcanFetchError
+
+    client = VulcanClient(session_data)
+    client._jitter = AsyncMock()
+    client._http = _mock_session(_mock_response(None, status=409))
+    with pytest.raises(VulcanFetchError) as failure:
+        await client._request(path)
+    assert failure.value.status == 409
+    client._http.get.assert_called_once()
+
+
 async def test_get_grades(session_data: dict, student: Student) -> None:
     from vulcan_notify.models import ClassificationPeriod
 

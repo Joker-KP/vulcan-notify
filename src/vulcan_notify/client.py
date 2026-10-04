@@ -74,7 +74,7 @@ _TIMEOUT = aiohttp.ClientTimeout(total=60, connect=15)
 
 
 class SessionExpiredError(Exception):
-    """Raised when the session cookies are no longer valid."""
+    """Session access needs recovery, including a conflict at the Context endpoint."""
 
 
 class VulcanFetchError(Exception):
@@ -149,6 +149,19 @@ class VulcanClient:
             try:
                 async with session.get(url, ssl=self._ssl_ctx, headers=extra_headers or {}) as resp:
                     content_type = resp.headers.get("content-type", "")
+
+                    if (
+                        resp.status == 409
+                        and url.split("?", 1)[0] == f"{self._base_url}/api/Context"
+                    ):
+                        # Limit this policy to student Context. Conflicts in other
+                        # modules can have meanings unrelated to authentication.
+                        logger.warning(
+                            "Student Context returned HTTP 409; session recovery required"
+                        )
+                        raise SessionExpiredError(
+                            "Student Context conflict (HTTP 409); session recovery required"
+                        )
 
                     if resp.status in (401, 403) or (
                         resp.status == 200 and "text/html" in content_type.lower()

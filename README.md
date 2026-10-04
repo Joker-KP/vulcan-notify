@@ -214,6 +214,17 @@ When credentials are available, `vulcan-notify sync` detects expired sessions, i
 
 Session files are replaced atomically with permissions 0600. Invalid saved sessions use the same recovery policy, preserving the file until authentication succeeds.
 
+Session checks retry connectivity/server failures once (30 seconds per attempt,
+with a two-second delay). If validation remains unavailable, synchronization exits
+nonzero and keeps the saved session for the next cycle, without browser login or
+an authentication-failure email. Confirmed expired sessions still trigger recovery.
+Credential login recognizes the final portal/student redirect without requiring
+a POST to a particular URL; it never resubmits credentials after a submit timeout.
+An HTTP 409 from upstream `/api/Context` requests recovery of the session context
+instead of treating it as an outage. The same rule applies during student discovery;
+the existing mid-sync recovery retries only once. Conflicts from other modules do
+not trigger this rule. Timeout, 429 and 5xx handling remains unchanged.
+
 Student API endpoints keep existing name-based response keys when names are unique. `/api/students` lists stable keys; use `?student_key=KEY` for one profile or `?keyed=1` for responses keyed by profile. Each student payload includes `name` and `student_key`. Ambiguous name lookups return HTTP 409. Calendar subscriptions can use `/calendar/<name>.ics?student_key=KEY`; historical profiles are combined by name only when their nonempty mailbox identity matches.
 
 ## 📅 Calendar integration <a name="calendar-integration"></a>

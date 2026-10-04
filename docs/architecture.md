@@ -442,6 +442,22 @@ and forwards to Telegram.
 
 Session writes flush/fsync a mode-0600 temporary file in the same directory before atomic replacement. Failed writes leave the previous session intact. JSON and structure validation raises a sanitized error; normal sync attempts existing credential-backed recovery, or asks for explicit manual authentication when credentials are unavailable. No browser starts merely to validate a corrupt file.
 
+`test_session()` returns false for HTTP 401/403 or HTTP 200 HTML. An observed
+HTTP 409 from upstream `/api/Context` also returns false to request session-context
+recovery, without assuming every 409 means expired authentication. Student
+discovery applies the same policy through `SessionExpiredError`, allowing the
+existing bounded mid-sync recovery/retry; a repeated conflict ends the run.
+Other module conflicts remain fetch errors. Transient
+connection/server failures and malformed JSON retry once after two seconds;
+each request has a 30-second total and 10-second connection timeout. Exhaustion
+raises `SessionValidationError`, so `sync` and `test` exit nonzero while preserving
+the session, without browser recovery or an authentication-failure alert. The
+poll loop retries on a later cycle. Credential submission uses Playwright's
+final-URL wait (30 seconds), with context tracking for student tabs, instead of
+requiring a POST response from `/logowanie`. An ambiguous click timeout checks
+the redirect without resubmitting credentials; the student application must
+still be reached before a session is saved.
+
 ## Home Assistant integration
 
 Two ingress paths:

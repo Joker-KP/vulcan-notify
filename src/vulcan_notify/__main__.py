@@ -8,6 +8,7 @@ from typing import Any
 
 from vulcan_notify.auth import (
     InvalidSessionError,
+    SessionValidationError,
     auto_login,
     get_keychain_credentials,
     load_session,
@@ -79,9 +80,13 @@ async def cmd_test() -> None:
     except (FileNotFoundError, InvalidSessionError):
         print("No usable session. Run 'vulcan-notify auth' to authenticate.")
         sys.exit(1)
-    valid = await test_session(session)
+    try:
+        valid = await test_session(session)
+    except SessionValidationError:
+        print("Session validation unavailable. Saved session preserved; try again later.")
+        sys.exit(1)
     if not valid:
-        print("Session expired. Run 'vulcan-notify auth' to re-authenticate.")
+        print("Session is not usable. Run 'vulcan-notify auth' to restore access.")
         sys.exit(1)
     print("Session is valid.")
 
@@ -119,19 +124,24 @@ async def _ensure_session() -> dict[str, Any]:
         )
         session = None
 
-    if session and await test_session(session):
-        return session
+    if session:
+        try:
+            if await test_session(session):
+                return session
+        except SessionValidationError:
+            print("Session validation unavailable. Saved session preserved; try again later.")
+            sys.exit(1)
 
     # Session missing or expired - try auto-login
     creds = _get_credentials()
     if creds:
-        logger.info("Session expired, auto-logging in...")
+        logger.info("Saved session requires recovery; restoring eduVULCAN access...")
         return await _recover_session(creds[0], creds[1])
 
     if session is None:
         print("No usable session. Run 'vulcan-notify auth' to authenticate.")
     else:
-        print("Session expired. Run 'vulcan-notify auth' to re-authenticate.")
+        print("Session is not usable. Run 'vulcan-notify auth' to restore access.")
     print(
         "Tip: set VULCAN_LOGIN/VULCAN_PASSWORD in .env, "
         "or store in macOS Keychain (service: vulcan-notify)."
@@ -246,7 +256,7 @@ async def cmd_sync() -> None:
         # Try auto-reauth once if it fails mid-sync
         creds = _get_credentials()
         if creds:
-            logger.info("Session expired mid-sync, re-authenticating...")
+            logger.info("Student access requires recovery during sync; restoring session...")
             await client.close()
             session = await _recover_session(creds[0], creds[1])
             client = VulcanClient(session)
@@ -258,7 +268,7 @@ async def cmd_sync() -> None:
                     await publish_email(retry_exc.partial_result, db)
                     await _sync_calendar(db)
                     await publish_changes(retry_exc.partial_result, db)
-                print("Session still expired after recovery. Run 'vulcan-notify auth'.")
+                print("Session still unusable after recovery. Run 'vulcan-notify auth'.")
                 await publish_auth_failure(db, "session_expired")
                 sys.exit(1)
             await clear_auth_failure(db)

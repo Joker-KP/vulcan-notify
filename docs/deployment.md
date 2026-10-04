@@ -110,6 +110,26 @@ distinguish slow emulation from a network or package-script hang.
 
 Synchronization first validates `data/session.json` over HTTP. With credentials configured, an expired or missing session starts persistent Chromium under Xvfb, imports stored cookies and tries to restore browser access before entering credentials. Browser recovery is headed by default; set `VULCAN_BROWSER_HEADLESS=true` to opt into headless recovery. Automatic profile selection opens the first available journal; synchronization then covers all students returned by the API.
 
+Timeouts and server/malformed-response failures during session validation retry
+once after two seconds, with a 30-second total/10-second connection timeout per
+attempt. If both checks fail, sync exits nonzero without replacing the session,
+starting Chromium or sending an authentication-failure email. The worker tries
+again on its next cycle. Credential login recognizes the final portal/student
+redirect instead of requiring a POST response at a specific URL.
+
+Validation warnings include the HTTP status (for example `HTTP 503`) or unexpected
+JSON type (for example `JSON NoneType`), rather than only `SessionValidationError`.
+Transport/parsing failures still show only the exception class to avoid exposing
+tokens or response content. Check these warnings before assuming session expiry.
+
+The observed HTTP 409 from upstream `/api/Context` now requests session recovery
+immediately. With configured credentials, recovery first tries the persistent
+browser profile, then the normal credential flow if required. Student discovery
+uses the same rule for conflicts that occur after validation; its mid-sync retry
+remains limited to one. A repeated conflict exits nonzero. This is a recovery
+policy for Context, not proof that every HTTP 409 is an authentication failure;
+other module conflicts and transient 429/5xx/timeouts retain their existing handling.
+
 The Chromium profile, its lock file, session and database remain under the shared `./data:/app/data` bind mount. Rebuilding the image does not replace these files. The API runs independently from the sync worker; normal HTTP synchronization does not start a browser.
 
 If automatic recovery fails, authenticate manually:

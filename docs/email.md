@@ -179,6 +179,15 @@ recovery was not attempted. Explicit interactive `auth` failures also notify;
 cancelling the command does not create an alert. The diagnostic `test` command
 does not send alerts.
 
+Connectivity/server failures and malformed responses during the initial session
+check retry once. If validation remains unavailable, sync exits nonzero without
+browser recovery or an authentication-failure alert, preserving the saved session
+for a later cycle. These failures do not establish that authentication is needed.
+An observed HTTP 409 from upstream `/api/Context` instead requests session-context
+recovery. Failed recovery or a repeated conflict after the existing mid-sync retry
+uses the authentication-failure alert path; the 409 itself sends no alert when
+recovery succeeds. Other module conflicts do not trigger this policy.
+
 `auth_failure.html` shares `layout.html` with the other notifications; its text
 alternative is derived from the same HTML. It includes the detection time in `TZ`,
 the effect on synchronization, noVNC commands, an SSH tunnel example, opening
