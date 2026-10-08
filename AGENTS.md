@@ -475,6 +475,18 @@ Never log:
 
 Docker is the primary deployment model.
 
+The default documented deployment pulls `macjoker/vulcan-notify` using
+`deploy/docker/compose.yml`, optionally managed by `deploy/ansible/deploy.yml`.
+The root `docker-compose.yml` remains the local source-build configuration and
+must not be switched to registry images. `docs/deployment.md` covers the default;
+`docs/deployment-proxmox.md` retains the existing homelab alternative.
+The image workflow in `.github/workflows/docker-hub.yml` is manual-only, with
+publishing disabled by default. Do not run publishing/deployment without an
+explicit request. See `docs/publishing.md` and `docs/deployment-ansible.md`.
+The new deployment binds the API to loopback by default, configurable with
+`VULCAN_API_BIND`; local Compose retains its existing port mapping. All services
+retain `/app/data` persistence and explicit interactive authentication.
+
 Keep the application fully containerized unless there is a strong technical reason not to.
 
 The current Docker image has been extended beyond upstream to support the interactive authentication environment.

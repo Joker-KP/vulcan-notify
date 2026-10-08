@@ -130,4 +130,13 @@ See `docs/eduvulcan-api.md` for the reverse-engineered eduVulcan web API documen
 
 ## Docker startup
 
+Default deployment documentation uses the Docker Hub image
+`macjoker/vulcan-notify` via `deploy/docker/compose.yml`, optionally through
+`deploy/ansible/deploy.yml`. Root `docker-compose.yml` remains the local source
+build. See `docs/deployment.md`, `docs/deployment-ansible.md` and
+`docs/publishing.md`; the old homelab setup is in `docs/deployment-proxmox.md`.
+The image publishing workflow is manual-only and defaults to no push. Do not
+run it or deploy hosts without an explicit request. The new API bind defaults
+to loopback; choose a trusted LAN address for remote consumers.
+
 `vulcan-api` serves port 8585 independently. `vulcan-sync` runs `sync-loop.sh` through `entrypoint-xvfb.sh`; the wrapper forwards its supplied command. `vulcan-auth` is an explicit GUI service with noVNC at loopback port 6080. All share `./data:/app/data`. The image uses CMD and has no ENTRYPOINT; `entrypoint.sh` was removed. TZ defaults to Europe/Warsaw for all runtime clocks, logs, Chromium, scheduling and displayed dates; QUIET_HOURS_TZ is a legacy fallback. SQLite and Python persistence explicitly use UTC, preserving existing history. Stop the worker during manual auth or a one-off sync.

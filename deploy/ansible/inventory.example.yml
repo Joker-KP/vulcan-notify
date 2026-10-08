@@ -1,0 +1,8 @@
+all:
+  children:
+    vulcan_hosts:
+      hosts:
+        school:
+          ansible_host: 192.0.2.10
+          ansible_user: deploy
+          ansible_python_interpreter: /usr/bin/python3

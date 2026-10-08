@@ -11,7 +11,7 @@ docker compose run --rm --no-deps --entrypoint uv vulcan-sync   run vulcan-notif
 docker compose run --rm --no-deps --entrypoint uv vulcan-sync   run vulcan-notify summarize --type mix --days 7
 
 
-docker buildx build --platform linux/amd64,linux/arm64 -t macjoker/vulcan-notify:1.0.0 --push .
+docker buildx build --platform linux/amd64,linux/arm64 -t macjoker/vulcan-notify:1.1.0 -t macjoker/vulcan-notify:latest --push .
 
 
 

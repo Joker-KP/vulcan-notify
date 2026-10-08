@@ -30,3 +30,6 @@ playwright-report/
 test-results/
 
 *.log
+
+# Controller-local deployment configuration and credentials (including Vault files).
+deploy/ansible/private/

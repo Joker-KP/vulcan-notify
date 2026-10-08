@@ -2,7 +2,10 @@
 
 This document explains how `vulcan-notify` is put together: the sync pipeline, persistence, change detection, and the fan-out to notification channels (terminal, SMTP email, macOS Calendar, MQTT, HTTP/iCalendar).
 
-For deployment topology (Docker + Proxmox LXC + systemd), see [`deployment.md`](deployment.md). For the reverse-engineered upstream API, see [`eduvulcan-api.md`](eduvulcan-api.md).
+For the default Docker Hub deployment, see [`deployment.md`](deployment.md) and
+the [Ansible example](deployment-ansible.md). The existing Proxmox setup is an
+[alternative](deployment-proxmox.md). For the reverse-engineered upstream API,
+see [`eduvulcan-api.md`](eduvulcan-api.md).
 
 ## Overview
 
@@ -469,11 +472,20 @@ The iCalendar feed is orthogonal — it's meant to be consumed directly by calen
 
 ## Deployment topology
 
-Production runs on a Proxmox LXC (Ubuntu 24.04) as separate Docker API and sync services, with persistent Chromium under Xvfb for automatic recovery and an explicit noVNC auth service. Two systemd timers on the host handle CI/CD (poll GitHub, rebuild on new commits) and daily backups of the SQLite file. The MQTT broker runs inside the Home Assistant OS VM on the same Proxmox node. Full details: [`deployment.md`](deployment.md).
+The default deployment pulls `macjoker/vulcan-notify` on a Linux Docker host,
+using separate API and sync services plus an explicit noVNC auth profile. All
+share `/app/data` for SQLite, session and persistent Chromium state. Ansible can
+install configuration and converge the services; image publication and upgrades
+are explicit maintainer/operator actions. See [`deployment.md`](deployment.md).
+
+The diagram below shows the existing Proxmox homelab alternative. Its systemd
+timers poll GitHub/rebuild source and back up SQLite, while Mosquitto runs in the
+Home Assistant OS VM. Those timers are not part of the default deployment.
+See [`deployment-proxmox.md`](deployment-proxmox.md).
 
 ```plantuml
 @startuml
-title Deployment (production)
+title Deployment (Proxmox homelab alternative)
 
 node "Proxmox host" {
   node "LXC: tools" {

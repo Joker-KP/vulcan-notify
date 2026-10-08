@@ -1,264 +1,255 @@
-# Deployment on Proxmox homelab
+# Deploy with the Docker Hub image (default)
 
-Deploy vulcan-notify as a Docker container inside a dedicated "tools" LXC on Proxmox.
+The default deployment uses `macjoker/vulcan-notify` on a Linux Docker host.
+Deploy manually below or use the [example Ansible playbook](deployment-ansible.md).
+The host needs neither a source build nor application Python/Playwright dependencies.
 
-## 1. Create the tools LXC
+**No image has been published as part of this change.** A maintainer must first
+follow the [build and publishing instructions](publishing.md). `0.20.0` below is
+an example matching the current project version; select a tag actually published
+on Docker Hub. AMD64 and ARM64 are build targets; full builds and live operation
+on both architectures still need verification.
 
-On the Proxmox host (ssh root@pve):
+The [existing Proxmox homelab deployment](deployment-proxmox.md) remains an
+alternative. The root `docker-compose.yml` remains the source-build configuration
+for local development and that existing installation.
 
-```bash
-# Download Ubuntu 24.04 template
-pveam update
-pveam download local ubuntu-24.04-standard_24.04-2_amd64.tar.zst
+## Requirements
 
-# Create LXC (adjust VMID as needed)
-pct create 103 local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst \
-  --hostname tools \
-  --cores 2 \
-  --memory 1024 \
-  --swap 512 \
-  --rootfs local-lvm:8 \
-  --net0 name=eth0,bridge=vmbr0,ip=dhcp \
-  --unprivileged 1 \
-  --features nesting=1 \
-  --onboot 1
+- Linux AMD64/ARM64 host with Docker Engine and Docker Compose plugin 2.18+.
+  Follow the [official Docker installation guide](https://docs.docker.com/engine/install/).
+- Outbound HTTPS to Docker Hub and eduVULCAN. Optional SMTP, MQTT and AI services
+  must also be reachable from the containers.
+- An eduVULCAN account with web journal access and SSH access to the Docker host
+  for remote browser authentication.
 
-# Start and enter
-pct start 103
-pct enter 103
-```
+## Services and persistent state
 
-Resources: 2 cores, 1GB RAM, 8GB disk. `nesting=1` is required for Docker inside LXC.
+| Service | Purpose | Default exposure |
+| --- | --- | --- |
+| `vulcan-api` | HTTP API and lesson-schedule iCalendar feeds from SQLite | `127.0.0.1:8585` |
+| `vulcan-sync` | Sequential polling with Xvfb for headed browser recovery | No published ports |
+| `vulcan-auth` | Explicit interactive login using Xvfb/Openbox/noVNC | `127.0.0.1:6080`, `auth` profile only |
 
-## 2. Install Docker
+All three services share `./data:/app/data`: SQLite, `session.json`, the Chromium
+profile and its lock survive container replacement. Configuration lives in `.env`.
+The image includes Chromium and the graphical authentication tools. macOS
+AppleScript Calendar integration is disabled; HTTP iCalendar remains available.
+One sync/delivery owner must use this data directory at a time.
 
-Inside the LXC:
+## 1. Prepare configuration
 
-```bash
-apt-get update && apt-get upgrade -y
-apt-get install -y ca-certificates curl gnupg git
-
-# Docker official repo
-install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-chmod a+r /etc/apt/keyrings/docker.gpg
-
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-  https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
-  > /etc/apt/sources.list.d/docker.list
-
-apt-get update
-apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-
-systemctl enable docker
-docker run --rm hello-world
-```
-
-## 3. Deploy vulcan-notify
+On the Docker host, become root (or prefix host commands below with `sudo`):
 
 ```bash
-cd /opt
-git clone <repo-url> vulcan-notify
-cd vulcan-notify
-
-# Create data dir and config
-mkdir -p data
-cp .env.example .env
+sudo -s
+install -d -m 0700 /opt/vulcan-notify /opt/vulcan-notify/data
+cd /opt/vulcan-notify
 ```
 
-Edit `.env` with your credentials:
+Copy these reviewed repository files to the host:
 
+- [`deploy/docker/compose.yml`](../deploy/docker/compose.yml) → `/opt/vulcan-notify/compose.yml`
+- [`.env.example`](../.env.example) → `/opt/vulcan-notify/.env`
+
+For example, from a local checkout on your workstation:
+
+```bash
+scp deploy/docker/compose.yml .env.example deploy@docker-host:/tmp/
 ```
-VULCAN_LOGIN=your.email@example.com
-VULCAN_PASSWORD=your_password
+
+Then in the root shell on the host:
+
+```bash
+install -m 0644 /tmp/compose.yml /opt/vulcan-notify/compose.yml
+install -m 0600 /tmp/.env.example /opt/vulcan-notify/.env
+```
+
+Edit `.env`. Minimal configuration:
+
+```dotenv
+VULCAN_IMAGE=macjoker/vulcan-notify:0.20.0
+VULCAN_API_BIND=127.0.0.1
+TZ=Europe/Warsaw
+POLL_INTERVAL=1800
+QUIET_HOURS_START=0
+QUIET_HOURS_END=5
 LOG_LEVEL=INFO
+
+# Optional: enable automatic session recovery with credentials.
+# VULCAN_LOGIN=parent@example.org
+# VULCAN_PASSWORD='replace_me'
 ```
 
-Note: do NOT set `CALENDAR_MAP` - calendar integration requires macOS and is disabled by default.
+Without credentials, initialize the session through manual authentication in
+step 3. With credentials, the worker validates saved cookies over HTTP, then tries
+persistent-browser recovery before credential login when needed. Normal sync
+does not launch interactive login automatically.
 
-Build and start:
+Use single quotes around literal secrets containing `$`, `#` or spaces; consult
+[Compose's environment-file syntax](https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/#env-file-syntax)
+for embedded quotes and multiline values. The sample includes all application
+options. `DB_PATH`, `SESSION_FILE`, `API_PORT`, browser profile/lock paths and
+`CALENDAR_MAP` are fixed by this deployment to match its volume and service commands.
+`TZ` controls logs, quiet hours and displayed timestamps; storage remains UTC.
 
-```bash
-docker compose up -d --build
-docker compose logs -f
+For Home Assistant on another machine, set `VULCAN_API_BIND` to the Docker host's
+trusted LAN IPv4 address. The API has no authentication; restrict access to trusted
+clients. noVNC stays bound to loopback.
+
+Optional email and MQTT example (merge into `.env`):
+
+```dotenv
+EMAIL_ENABLED=true
+SMTP_HOST=smtp.example.org
+SMTP_PORT=587
+SMTP_SECURITY=starttls
+SMTP_USERNAME=school@example.org
+SMTP_PASSWORD='replace_me'
+EMAIL_FROM='School notifications <school@example.org>'
+EMAIL_TO=["parent@example.org"]
+
+MQTT_ENABLED=true
+MQTT_BROKER=mqtt.example.org
+MQTT_PORT=1883
+# MQTT_USERNAME=vulcan-notify
+# MQTT_PASSWORD='replace_me'
 ```
 
-The Dockerfile installs Python dependencies and Chromium before copying application
-source. With the Docker build cache available, changes under `src/` reuse those
-layers and rerun only the source copy and application installation. Changes to
-`pyproject.toml` or `uv.lock` invalidate the dependency and browser layers.
+`localhost` inside a container refers to that container. Use a reachable broker
+or SMTP hostname. Email, MQTT and AI are optional; see [email configuration](email.md).
 
-If an ARM64 build appears to stall during `apt-get install`, capture the full
-build output to identify whether it stops downloading, unpacking or configuring:
+## 2. Pull and start
+
+In `/opt/vulcan-notify` on the host:
 
 ```bash
-docker buildx build --platform linux/arm64 --progress=plain --load -t vulcan-notify:arm64 .
-docker buildx inspect --bootstrap
+# Validate without printing credentials from the resolved configuration.
+docker compose config --quiet
+docker compose --profile auth pull
+docker compose up -d vulcan-api vulcan-sync
+docker compose ps
+docker compose logs --tail 50 vulcan-sync
 ```
 
-Package configuration runs with `DEBIAN_FRONTEND=noninteractive`, so `tzdata`
-and other debconf packages use defaults without requesting input. This setting
-applies only during installation, not to the running container.
+The auth profile is pulled but not started. No host build is performed. First
+successful imports establish baselines silently, rather than notifying about
+historical school records.
 
-If output stops at a `Get:` line, investigate download connectivity first;
-that line does not confirm the package finished downloading. When building
-ARM64 on an AMD64 builder, QEMU emulation can make unpacking and configuration
-much slower; prefer a native ARM64 builder when available. See
-[Docker's multi-platform build guidance](https://docs.docker.com/build/building/multi-platform/).
-The last build log lines and the builder's native architecture are needed to
-distinguish slow emulation from a network or package-script hang.
+## 3. Authenticate when needed
 
-Synchronization first validates `data/session.json` over HTTP. With credentials configured, an expired or missing session starts persistent Chromium under Xvfb, imports stored cookies and tries to restore browser access before entering credentials. Browser recovery is headed by default; set `VULCAN_BROWSER_HEADLESS=true` to opt into headless recovery. Automatic profile selection opens the first available journal; synchronization then covers all students returned by the API.
-
-Timeouts and server/malformed-response failures during session validation retry
-once after two seconds, with a 30-second total/10-second connection timeout per
-attempt. If both checks fail, sync exits nonzero without replacing the session,
-starting Chromium or sending an authentication-failure email. The worker tries
-again on its next cycle. Credential login recognizes the final portal/student
-redirect instead of requiring a POST response at a specific URL.
-
-Validation warnings include the HTTP status (for example `HTTP 503`) or unexpected
-JSON type (for example `JSON NoneType`), rather than only `SessionValidationError`.
-Transport/parsing failures still show only the exception class to avoid exposing
-tokens or response content. Check these warnings before assuming session expiry.
-
-The observed HTTP 409 from upstream `/api/Context` now requests session recovery
-immediately. With configured credentials, recovery first tries the persistent
-browser profile, then the normal credential flow if required. Student discovery
-uses the same rule for conflicts that occur after validation; its mid-sync retry
-remains limited to one. A repeated conflict exits nonzero. This is a recovery
-policy for Context, not proof that every HTTP 409 is an authentication failure;
-other module conflicts and transient 429/5xx/timeouts retain their existing handling.
-
-The Chromium profile, its lock file, session and database remain under the shared `./data:/app/data` bind mount. Rebuilding the image does not replace these files. The API runs independently from the sync worker; normal HTTP synchronization does not start a browser.
-
-If automatic recovery fails, authenticate manually:
-
-With `EMAIL_ENABLED=true` and configured SMTP, an exhausted authentication attempt
-also queues an email with these noVNC recovery steps (and an SSH tunnel example).
-Repeated failures notify once per outage/recipient; failed SMTP delivery is retried
-on later attempts or with `email-retry`. See [email.md](email.md#authentication-failure-alerts).
+Stop the worker before opening the shared Chromium profile:
 
 ```bash
+cd /opt/vulcan-notify
 docker compose stop vulcan-sync
 docker compose --profile auth up vulcan-auth
-# Once authentication finishes:
+```
+
+From the workstation, keep an SSH tunnel running:
+
+```bash
+ssh -N -L 6080:127.0.0.1:6080 deploy@docker-host
+```
+
+Open <http://127.0.0.1:6080/vnc.html> and complete login. The foreground auth
+command saves the session and exits after reaching the student application.
+If interrupted or authentication fails, check its logs and retry before resuming
+the worker. The API can continue serving previously stored state.
+
+```bash
+docker compose --profile auth stop vulcan-auth
 docker compose up -d vulcan-sync
+docker compose logs --tail 50 vulcan-sync
 ```
 
-Open `http://127.0.0.1:6080/vnc.html` locally, or use an SSH tunnel to that loopback port on the Docker host. The auth service starts Xvfb, Openbox, x11vnc and noVNC; interactive auth always forces headed Chromium and reuses the same profile/session. Normal sync never launches interactive auth automatically.
+Preserve `data/session.json` and `data/chromium-profile`; deleting them is not a
+normal recovery step. Automatic browser recovery is headed under Xvfb by default;
+`VULCAN_BROWSER_HEADLESS=true` opts into headless recovery. Interactive auth is
+always headed. Authentication opens the first journal profile, then synchronization
+processes every student discovered for the account.
 
-Set `TZ=Europe/Warsaw` in `.env` to use one timezone for all three containers, shell/Python logs, Chromium, quiet hours and rendered timestamps. This is also the standalone image default; `tzdata` supplies IANA/DST rules. `QUIET_HOURS_TZ` remains a legacy fallback when `TZ` is unset. Database writes explicitly use UTC and existing naive UTC timestamps keep their meaning, so no database migration is required. Windows crossing midnight are supported; equal start/end disables the window. `/api/health` excludes these pauses from freshness age and reports stale until the first confirmed fetch populates the new section timestamps. The default `SYNC_HISTORY_KEEP_DAYS=90` prunes sync-run/section diagnostics, preserving school data and baseline markers.
+Transient connectivity/server/malformed session-validation failures retry once,
+then preserve the session for the next poll. Context HTTP 409 requests session
+recovery; mid-sync recovery is limited to one attempt. Exhausted authentication
+can queue a deduplicated recovery email when SMTP is configured.
 
-The deployment and backup scripts default to the same `TZ`, and their systemd services read `/opt/vulcan-notify/.env`. The backup timer explicitly runs at 03:00 Europe/Warsaw, regardless of the host timezone. If you choose another `TZ`, update its `OnCalendar` timezone through a systemd override as well; timer expressions cannot interpolate environment variables. Reload systemd and restart the timer after installing updated units. Host journal timestamps and Docker daemon timestamp prefixes remain host/daemon metadata; application log timestamps use `TZ`.
-
-## 4. Remote access
-
-LXC 103 is **not** a tailnet node and does not run Tailscale. It is reached through the PVE host, which is one, using `pct exec`. The `tools.dwelf-forel.ts.net` name older notes refer to never resolved — do not try to reach the LXC directly.
-
-Set up SSH key auth to the PVE host instead:
+## 4. Verify and operate
 
 ```bash
-# From your Mac
-ssh-copy-id root@pve.dwelf-forel.ts.net
-
-# Then reach the LXC through it
-ssh root@pve.dwelf-forel.ts.net "pct exec 103 -- sh -lc 'cd /opt/vulcan-notify && docker compose ps'"
+curl --fail http://127.0.0.1:8585/api/alive
+# 503 means stale/missing data, including before the first successful sync.
+curl -s http://127.0.0.1:8585/api/health
+curl --fail http://127.0.0.1:8585/api/students
+docker compose logs --tail 50 vulcan-api
+docker compose logs --tail 50 vulcan-sync
 ```
 
-## 5. GitHub deploy key
+Use your configured LAN address instead of loopback if you changed the API bind.
+The container healthcheck uses `/api/alive`. Monitor `/api/health` separately for
+freshness (`?soft=1` returns the same body with HTTP 200). Freshness excludes quiet
+hours. `POLL_INTERVAL` is the delay after completion, defaulting to 1800 seconds;
+quiet hours default to 00:00–05:00 in `TZ`.
 
-Generate a deploy key on the LXC for read-only GitHub access:
+After `.env` changes, use `docker compose up -d vulcan-api vulcan-sync` to recreate
+services whose configuration changed. `docker compose restart` retains the old
+environment. If Ansible manages the installation, edit controller files and rerun
+the playbook instead.
 
-```bash
-ssh-keygen -t ed25519 -C "vulcan-notify-deploy" -f ~/.ssh/id_ed25519 -N ""
-cat ~/.ssh/id_ed25519.pub
-```
-
-Add the public key as a read-only deploy key at `github.com/kintecus/vulcan-notify/settings/keys`.
-
-## 6. Management
-
-Two normal services and one explicit auth service run off one image (see `docker-compose.yml`): **`vulcan-api`** serves port 8585, **`vulcan-sync`** runs the poll loop. There is no `vulcan-notify` service any more — it was split on 2026-09-15 so each process gets its own restart supervision.
+For a one-off sync, keep the regular worker stopped:
 
 ```bash
-# View logs — pick the container, the two are very different in volume
-docker compose logs --tail 50 vulcan-sync   # sync activity
-docker compose logs --tail 50 vulcan-api    # HTTP server
-
-# Restart (e.g., after .env changes)
-docker compose restart
-
-# Update to latest
-git pull && docker compose up -d --build --remove-orphans
-
-# Avoid overlapping sync jobs when running a one-off sync
 docker compose stop vulcan-sync
 docker compose run --rm vulcan-sync uv run vulcan-notify sync
 docker compose up -d vulcan-sync
-
-# Check session validity
-docker compose run --rm vulcan-sync uv run vulcan-notify test
 ```
 
-`--remove-orphans` matters when migrating from the old single-service layout: without it a leftover container from the pre-split layout keeps port 8585 bound and the new API cannot start.
+The [architecture reference](architecture.md) documents HTTP endpoints, MQTT
+payloads and iCalendar feeds. Feeds cover lesson schedules, not exams/homework.
 
-## 7. Auto-deploy (CI/CD)
+## 5. Backup, update and rollback
 
-**Pushing to `main` deploys.** A systemd timer on the LXC polls `origin/main` every 5 minutes and rebuilds if there are new commits, so a push reaches production within ~5 minutes with no action from you. There is no GitHub Actions workflow — this timer is the whole CI/CD path. Deploy notifications go to ntfy.sh.
-
-`vulcan-deploy.sh` builds the image before recreating the container and rolls `HEAD` back on a build failure, so a broken build never takes the service down and never leaves the timer dormant on undeployed code.
-
-### Install the systemd units
+For a consistent offline backup, stop all services that can write shared state:
 
 ```bash
-ln -sf /opt/vulcan-notify/deploy/vulcan-deploy.service /etc/systemd/system/
-ln -sf /opt/vulcan-notify/deploy/vulcan-deploy.timer /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable --now vulcan-deploy.timer
+cd /opt/vulcan-notify
+docker compose --profile auth stop
+install -d -m 0700 /var/backups/vulcan-notify
+tar -czf "/var/backups/vulcan-notify/state-$(date +%Y%m%d-%H%M%S).tar.gz" \
+  data .env compose.yml
+chmod 0600 /var/backups/vulcan-notify/*.tar.gz
+docker compose up -d vulcan-api vulcan-sync
 ```
 
-### Verify
+Backups contain private data and credentials; keep them protected. The playbook
+does not install backup or auto-update timers. Schedule backups separately if desired.
+
+To upgrade, review the release, back up state, and change `VULCAN_IMAGE` to a new
+published version (or `macjoker/vulcan-notify@sha256:...` digest):
 
 ```bash
-# Timer is active
-systemctl list-timers vulcan-deploy*
-
-# Manual trigger
-systemctl start vulcan-deploy.service
-journalctl -u vulcan-deploy --no-pager -n 20
+docker compose --profile auth pull
+docker compose up -d vulcan-api vulcan-sync
+docker compose ps
 ```
 
-### Skipping the 5-minute wait
+With Ansible, change `vulcan_image` in your vars file and rerun the playbook.
+`latest` can be used deliberately; a version/digest makes upgrades explicit.
+Treat published version tags as immutable and retain the previous tag/digest.
+For rollback, select the previous image and recreate services. Older code may
+not understand a newer schema; restore the matching pre-upgrade backup with all
+services stopped when required. Image replacement preserves bind-mounted state.
 
-Push to GitHub, then:
+## Migrating an existing Proxmox installation
 
-```bash
-./deploy.sh
-```
+Stop the old worker/auth service and disable `vulcan-deploy.timer` so it cannot
+rebuild/restart that installation. Back up the old `.env` and full `data/` directory.
+On a different host, copy state while services are stopped; on the same host,
+retain the directory. Stop the old API before starting the new stack on the same port.
 
-This only shortcuts the timer's polling interval; it is not the sole deploy path. It SSHes to the **PVE host** and `pct exec`s into LXC 103 to run pull + rebuild, because the LXC itself is not reachable over the tailnet. Override with `PVE_HOST=<host> ./deploy.sh`.
-
-## 8. Monitoring
-
-```bash
-# Deploy history
-journalctl -u vulcan-deploy --no-pager -n 50
-
-# Container status
-ssh root@pve.dwelf-forel.ts.net "pct exec 103 -- sh -lc 'cd /opt/vulcan-notify && docker compose ps'"
-
-# Recent sync logs
-ssh root@pve.dwelf-forel.ts.net "pct exec 103 -- sh -lc 'cd /opt/vulcan-notify && docker compose logs --tail 30 vulcan-sync'"
-
-# Is the data actually current? (503 = stale; ?soft=1 for the same body as 200)
-ssh root@pve.dwelf-forel.ts.net "pct exec 103 -- curl -s http://localhost:8585/api/health" | jq '.status, .stale_sections'
-```
-
-## 9. DNS fix for LXC
-
-If DNS doesn't work inside the LXC (common with Tailscale on the PVE host), set it during LXC creation or override:
-
-```bash
-pct set 103 -nameserver "1.1.1.1 8.8.8.8"
-```
+The old Compose project name may have been derived from its checkout directory.
+Shut down the old stack with its original Compose file before replacing files,
+using `docker compose down` without `--volumes`. The new project is explicitly
+named `vulcan-notify`; keep exactly one sync owner. Apply the new definition or
+playbook, then verify the API and sync logs. Review existing backup timers' paths;
+do not copy homelab-specific timers blindly to a new host.

@@ -35,10 +35,31 @@ Supports multiple students under one parent account.
 
 ## 📦 Installation <a name="installation"></a>
 
+### Docker Hub deployment (default)
+
+Deploy `macjoker/vulcan-notify` with separate API, sync and explicit noVNC auth
+services. The host pulls the image; SQLite, sessions and Chromium state persist
+under `data/`.
+
+- [Deploy with Docker Compose](docs/deployment.md)
+- [Deploy with the example Ansible playbook](docs/deployment-ansible.md)
+- [Build and publish an image manually](docs/publishing.md)
+- [Docker Hub overview text](docs/docker-hub.md)
+
+The publishing setup is prepared for review; no image was published in this
+change. Publish a reviewed version before using the deployment instructions.
+The [existing Proxmox homelab setup](docs/deployment-proxmox.md) remains an
+alternative, including its independent source-build auto-deploy timer.
+
+### Local development / source installation
+
+The root `docker-compose.yml` still builds locally. Use it for development, or
+run the CLI directly as below.
+
 **Requirements:** Python 3.12+, [uv](https://docs.astral.sh/uv/) package manager
 
 ```bash
-git clone https://github.com/yourname/vulcan-notify.git
+git clone https://github.com/Joker-KP/vulcan-notify.git
 cd vulcan-notify
 uv sync
 
@@ -185,12 +206,16 @@ For the full module breakdown, database schema, MQTT topic map, and HTTP endpoin
 
 ## 🏠 Home Assistant integration <a name="home-assistant-integration"></a>
 
-Production setup runs vulcan-notify as a Docker container on a Proxmox LXC, publishing MQTT events to the Mosquitto broker inside Home Assistant OS. Two ways to wire it up:
+The Docker deployment can publish MQTT events to a broker reachable from its
+containers, including Mosquitto inside Home Assistant OS. Two ways to wire it up:
 
 - **Event-driven (MQTT)** - subscribe to `school/#` and build sensors or automations. Topic scheme: `<prefix>/<student-slug>/<segment>/<change_type>`, e.g. `school/alice/grades/new`, `school/alice/exams/updated`, `school/alice/attendance/alert`, `school/alice/substitutions/new`. Payloads are structured JSON with the full change metadata.
 - **Pull-based (HTTP)** - HA's REST sensor polls `/api/grades/monthly`, `/api/messages`, `/api/schedule`, etc. for dashboards and history graphs. The iCalendar feed at `/calendar/<name>.ics` can be subscribed directly from any calendar client.
 
-See [`docs/architecture.md`](docs/architecture.md) for the full endpoint list, MQTT topic map, and payload examples. See [`docs/deployment.md`](docs/deployment.md) for the Proxmox/Docker/systemd setup.
+See [`docs/architecture.md`](docs/architecture.md) for endpoints, MQTT topics and
+payloads, and [`docs/deployment.md`](docs/deployment.md) for the default Docker Hub
+deployment. The API defaults to loopback; configure a trusted LAN bind address
+when Home Assistant runs on another host.
 
 ## 🔐 Auto-login <a name="auto-login"></a>
 
@@ -293,5 +318,9 @@ Python settings load `.env`; Compose exports it to the containers. Direct auth/A
 
 - [`docs/architecture.md`](docs/architecture.md) - internal architecture, pipeline, database schema, MQTT payloads, endpoint reference
 - [`docs/email.md`](docs/email.md) - HTML groups/templates, SMTP digests, optional AI summary, configuration and retries
-- [`docs/deployment.md`](docs/deployment.md) - Docker + Proxmox LXC + systemd setup
+- [`docs/deployment.md`](docs/deployment.md) - default Docker Hub deployment and operations
+- [`docs/deployment-ansible.md`](docs/deployment-ansible.md) - example Ansible deployment
+- [`docs/publishing.md`](docs/publishing.md) - manual image build and Docker Hub publication
+- [`docs/docker-hub.md`](docs/docker-hub.md) - compact Docker Hub description
+- [`docs/deployment-proxmox.md`](docs/deployment-proxmox.md) - alternative Proxmox LXC + source builds + systemd
 - [`docs/eduvulcan-api.md`](docs/eduvulcan-api.md) - reverse-engineered eduVulcan web API reference
