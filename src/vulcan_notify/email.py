@@ -187,7 +187,7 @@ def _message_html(message: Message, config: Settings, student: Student | None = 
     metadata_html += "<br>\n".join(escape(line) for line in metadata[1:])
     content = ""
     if config.email_include_message_bodies and message.content:
-        content = message_html(message.content, message.mailbox_url)
+        content = message_html(message.content, message.mailbox_url, linkify=True)
     heading, context = _message_heading(student)
     return render_email(
         heading,

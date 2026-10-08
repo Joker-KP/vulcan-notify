@@ -139,7 +139,13 @@ inline font/spacing styles. The original message HTML is sanitized locally using
 [nh3](https://nh3.readthedocs.io/en/latest/). Scripts, embedded active content,
 remote images and unsupported style properties are removed; attachment files are
 not forwarded. Original links are retained for HTTP/HTTPS/mailto, with relative
-links resolved against the inbox URL. The plain alternative preserves paragraph
+links resolved against the inbox URL. Plain-text website URLs (`http://`,
+`https://` and `www.`) in inbox message bodies become clickable in HTML. New link
+labels omit the HTTP/HTTPS prefix and show up to 20 characters followed by `...`
+when longer; the destination and hover title retain the full URL. `www.` links
+use HTTPS. Existing HTML links retain their labels, and the plain-text alternative
+keeps full URLs. This applies to newly queued message notifications; retries reuse
+their stored bodies. The plain alternative preserves paragraph
 boundaries, explicit breaks, list items, table rows and HTML entities rather than
 simply stripping tags. Literal newlines in messages containing plain text are also
 preserved. Typography may vary between email clients.

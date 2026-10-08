@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from html import escape
 from html.parser import HTMLParser
+from urllib.parse import urlsplit
 
 import nh3
 
@@ -55,14 +56,53 @@ _MESSAGE_STYLES = {
 }
 
 
-class _MessageHTMLParser(HTMLParser):
-    """Remove implicit paragraph margins without overriding author styles."""
+_WEBSITE_URL = re.compile(r"(?<![\w@])(?:https?://|www\.)[^\s<>\"']+", re.IGNORECASE)
+_LINK_LABEL_LENGTH = 20
 
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=False)
+
+def _website_link(match: re.Match[str]) -> str:
+    """Link a visible URL, keeping sentence punctuation outside the anchor."""
+    original = match.group()
+    url = original
+    while url:
+        if url[-1] in ".,!?;:":
+            url = url[:-1]
+        elif url[-1] in ")]}":
+            opening = {")": "(", "]": "[", "}": "{"}[url[-1]]
+            if url.count(url[-1]) <= url.count(opening):
+                break
+            url = url[:-1]
+        else:
+            break
+    destination = "https://" + url if url.lower().startswith("www.") else url
+    try:
+        hostname = urlsplit(destination).hostname
+    except ValueError:
+        return escape(original)
+    if not hostname or hostname.lower() == "www":
+        return escape(original)
+    label = re.sub(r"^https?://", "", url, flags=re.IGNORECASE)
+    if len(label) > _LINK_LABEL_LENGTH:
+        label = label[:_LINK_LABEL_LENGTH] + "..."
+    href = escape(destination, quote=True)
+    return (
+        f'<a href="{href}" title="{href}" rel="noopener noreferrer">{escape(label)}</a>'
+        + escape(original[len(url) :])
+    )
+
+
+class _MessageHTMLParser(HTMLParser):
+    """Normalize paragraph margins and optionally link URLs in text nodes."""
+
+    def __init__(self, *, linkify: bool = False) -> None:
+        super().__init__(convert_charrefs=linkify)
         self.parts: list[str] = []
+        self.linkify = linkify
+        self.in_link = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "a":
+            self.in_link = True
         if tag != "p":
             self.parts.append(self.get_starttag_text() or "")
             return
@@ -75,10 +115,23 @@ class _MessageHTMLParser(HTMLParser):
         self.parts.append(f"<p{attributes}>")
 
     def handle_endtag(self, tag: str) -> None:
+        if tag == "a":
+            self.in_link = False
         self.parts.append(f"</{tag}>")
 
     def handle_data(self, data: str) -> None:
-        self.parts.append(data)
+        if not self.linkify:
+            self.parts.append(data)
+            return
+        if self.in_link:
+            self.parts.append(escape(data))
+            return
+        end = 0
+        for match in _WEBSITE_URL.finditer(data):
+            self.parts.append(escape(data[end : match.start()]))
+            self.parts.append(_website_link(match))
+            end = match.end()
+        self.parts.append(escape(data[end:]))
 
     def handle_entityref(self, name: str) -> None:
         self.parts.append(f"&{name};")
@@ -87,7 +140,7 @@ class _MessageHTMLParser(HTMLParser):
         self.parts.append(f"&#{name};")
 
 
-def message_html(content: str, base_url: str | None = None) -> str:
+def message_html(content: str, base_url: str | None = None, *, linkify: bool = False) -> str:
     """Retain message layout and inline formatting as a sanitized HTML fragment."""
     attributes = {tag: values.copy() for tag, values in nh3.ALLOWED_ATTRIBUTES.items()}
     attributes.setdefault("*", set()).update({"style", "dir"})
@@ -117,7 +170,7 @@ def message_html(content: str, base_url: str | None = None) -> str:
     # Plain message content can contain literal newlines instead of HTML breaks.
     if not nh3.is_html(content):
         cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br>")
-    parser = _MessageHTMLParser()
+    parser = _MessageHTMLParser(linkify=linkify)
     parser.feed(cleaned)
     parser.close()
     return "".join(parser.parts)

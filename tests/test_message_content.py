@@ -1,5 +1,7 @@
 """Original message layout in HTML and readable text alternatives."""
 
+from html import escape
+
 import pytest
 
 from vulcan_notify.text import message_html, message_text
@@ -92,3 +94,74 @@ def test_html_drops_active_content_without_losing_message_text():
         assert unwanted not in rendered
     assert "Ważna treść" in rendered and "color:red" in rendered
     assert message_text(source) == "Ważna treść\nZły link"
+
+
+@pytest.mark.parametrize(
+    "source,destination,label,suffix",
+    [
+        ("http://x.pl", "http://x.pl", "x.pl", ""),
+        ("www.example.org/path", "https://www.example.org/path", "www.example.org/path", ""),
+        (
+            "HTTPS://example.org/long-resource",
+            "HTTPS://example.org/long-resource",
+            "example.org/long-res...",
+            "",
+        ),
+        (
+            "https://example.org/search?q=one&amp;page=2.",
+            "https://example.org/search?q=one&page=2",
+            "example.org/search?q...",
+            ".",
+        ),
+        (
+            "(https://example.org/info).",
+            "https://example.org/info",
+            "example.org/info",
+            ").",
+        ),
+        (
+            "https://example.org/wiki/Test_(A).",
+            "https://example.org/wiki/Test_(A)",
+            "example.org/wiki/Tes...",
+            ".",
+        ),
+    ],
+)
+def test_html_links_websites_with_full_destinations_and_short_labels(
+    source, destination, label, suffix
+):
+    rendered = message_html(source, linkify=True)
+    href = escape(destination, quote=True)
+    assert f'href="{href}" title="{href}"' in rendered
+    assert f">{label}</a>{suffix}" in rendered
+    assert rendered.count("<a ") == 1
+    assert "<a " not in message_html(source)
+    assert "..." not in message_text(source)
+
+
+def test_linkification_preserves_existing_links_formatting_and_sanitization():
+    source = (
+        "<p><strong>Website:</strong> "
+        "https://example.org/plain?x=1&amp;y=2 &lt;test&gt;</p>"
+        '<a href="https://example.org/original" title="https://example.org/attribute">'
+        "<em>https://example.org/label</em></a>"
+        "<script>https://example.org/hidden</script>"
+        '<img src="https://example.org/pixel">'
+        '<a href="javascript:alert(1)">Unsafe</a>'
+    )
+    rendered = message_html(source, linkify=True)
+    assert rendered.count("<a ") == 3  # One new link plus both original anchors.
+    assert "<em>https://example.org/label</em></a>" in rendered
+    assert 'href="https://example.org/original"' in rendered
+    assert "/attribute" not in rendered  # Sanitizer removes unsupported attributes.
+    assert "<strong>Website:</strong>" in rendered
+    assert "&lt;test&gt;" in rendered
+    for removed in ["<script", "/hidden", "<img", "/pixel", "javascript:"]:
+        assert removed not in rendered
+
+
+def test_linkification_leaves_non_websites_and_malformed_urls_as_text():
+    source = "mail@example.org ftp://example.org javascript:alert(1) https:// www. https://[broken"
+    rendered = message_html(source, linkify=True)
+    assert "<a " not in rendered
+    assert rendered == source

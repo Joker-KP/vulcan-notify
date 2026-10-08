@@ -1190,3 +1190,28 @@ async def test_rich_message_body_and_bold_sender_survive_mime_serialization(db, 
     assert "Dzień dobry,\nWażne informacje." in plain
     assert "A\nB" in plain
     assert "1. Przynieść zeszyt\n2. Podpisać zgodę" in plain
+
+
+async def test_plain_website_links_are_shortened_only_in_html_and_persist_for_retry(
+    db, email_config, smtp
+):
+    email_config.email_include_message_bodies = True
+    url = "https://example.org/long-resource?class=3A&day=2"
+    message = replace(MESSAGE, content=f"Website:\n{url}")
+    smtp.send_message.side_effect = TimeoutError()
+    await email.publish_email(FullSyncResult([], [message]), db)
+    pending = (await db.list_email_outbox())[0]
+    assert url in pending["body"]
+    assert 'href="https://example.org/long-resource?class=3A&amp;day=2"' in pending["html_body"]
+    assert ">example.org/long-res...</a>" in pending["html_body"]
+    assert "Website:<br>" in pending["html_body"]
+    assert message.content == f"Website:\n{url}"
+
+    smtp.send_message.side_effect = None
+    await email.publish_email(FullSyncResult([], [message]), db)
+    parsed = BytesParser(policy=policy.default).parsebytes(
+        smtp.send_message.call_args.args[0].as_bytes()
+    )
+    assert parsed.get_body(("html",)).get_content().strip() == pending["html_body"].strip()
+    assert url in parsed.get_body(("plain",)).get_content()
+    assert parsed["Message-ID"] == pending["message_id"]
