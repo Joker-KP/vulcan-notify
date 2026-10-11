@@ -366,6 +366,15 @@ Session writes use a flushed temporary file in the same directory and atomic rep
 
 The current authentication implementation can bootstrap/import cookies from the stored session into the persistent browser context and save refreshed state after successful authentication.
 
+Browser finalization validates the exported cookies against `/api/Context` before
+replacing `session.json`; the response must be a JSON object with an `uczniowie`
+list (including an empty list). Reaching the student page alone is insufficient.
+Failed/unavailable checks preserve the previous file. HTTP cookie headers honor
+Playwright host-only/domain, path, expiry and Secure metadata, keep applicable
+same-name cookies in descending path-length order, and are rebuilt per endpoint.
+Validation and API requests do not follow HTTP redirects with a manual Cookie
+header; redirects request the existing bounded browser recovery instead.
+
 Do not unnecessarily overwrite or invalidate a working session.
 
 ### Session reuse first
@@ -425,21 +434,23 @@ Connectivity, server and malformed-response failures retry once after two second
 then raise `SessionValidationError`. The CLI exits nonzero without browser recovery,
 session replacement or an authentication-failure email when validity remains unknown;
 the poll loop retries on its next cycle. HTTP 401/403 or an HTTP 200 HTML response
-return false and follow normal authentication recovery.
+return false and follow normal authentication recovery. HTTP 301/302/303/307/308
+redirects also request recovery without forwarding the cookies.
 The observed HTTP 409 from upstream `/api/Context` also requests session recovery
 without an HTTP retry. This is a recovery policy for a Context conflict, not a
 claim that every HTTP 409 proves session expiry. The client's student discovery
 uses the same policy so a conflict between validation and synchronization reaches
 the existing single mid-sync recovery/retry. A repeated conflict after that retry
 exits nonzero; other module conflicts remain fetch errors.
-Validation failures log the HTTP status or unexpected JSON type, while transport
+Validation failures log the HTTP status, safe response-kind/redirect-count/cookie-size
+metadata, or unexpected JSON type, while transport
 and parsing failures log only the exception class. Response bodies, cookies and
 raw transport exception messages are never included in these diagnostics.
 
 Credential submission waits up to 30 seconds for the final portal/student redirect
 and handles student access in another tab; it does not require a POST to a specific
 URL or resubmit credentials after an ambiguous click timeout. Session saving still
-requires reaching the student application.
+requires reaching the student application and confirming its HTTP API access.
 
 Mid-sync `SessionExpiredError` propagates to the CLI for one credential-backed recovery attempt. Partial results carry already persisted changes to the CLI for output delivery before retry, so a fresh diff does not silently discard them. A degraded sync exits nonzero after publishing successful changes; the loop counts it as a failure. HTML server failures are retried as fetch failures, rather than interpreted as expired sessions.
 

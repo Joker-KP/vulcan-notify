@@ -11,7 +11,7 @@ from urllib.parse import quote, urlsplit
 
 import aiohttp
 
-from vulcan_notify.auth import _make_ssl_context, cookies_for_url
+from vulcan_notify.auth import _make_ssl_context, cookie_header_for_url
 from vulcan_notify.models import (
     AttendanceEntry,
     ClassificationPeriod,
@@ -113,8 +113,7 @@ class VulcanClient:
 
     def _cookie_header(self) -> str:
         url = f"{self._base_url}/api/"
-        cookies = cookies_for_url(self._session_data, url)
-        return "; ".join(f"{k}={v}" for k, v in cookies.items())
+        return cookie_header_for_url(self._session_data, url)
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if self._http is None or self._http.closed:
@@ -147,8 +146,18 @@ class VulcanClient:
             session = await self._ensure_session()
 
             try:
-                async with session.get(url, ssl=self._ssl_ctx, headers=extra_headers or {}) as resp:
+                async with session.get(
+                    url,
+                    ssl=self._ssl_ctx,
+                    headers=extra_headers or {},
+                    allow_redirects=False,
+                ) as resp:
                     content_type = resp.headers.get("content-type", "")
+
+                    if resp.status in (301, 302, 303, 307, 308):
+                        raise SessionExpiredError(
+                            "Student API redirected; session recovery required"
+                        )
 
                     if (
                         resp.status == 409
@@ -219,14 +228,15 @@ class VulcanClient:
         Builds a per-request Cookie header matching the URL's domain,
         since different subdomains need different cookies.
         """
-        cookie_header = "; ".join(
-            f"{k}={v}" for k, v in cookies_for_url(self._session_data, url).items()
-        )
+        cookie_header = cookie_header_for_url(self._session_data, url)
         return await self._fetch(url, extra_headers={"Cookie": cookie_header, "Referer": url})
 
     async def _request(self, path: str) -> Any:
         """Make a GET request to the API. Returns parsed JSON."""
-        return await self._fetch(f"{self._base_url}{path}")
+        url = f"{self._base_url}{path}"
+        return await self._fetch(
+            url, extra_headers={"Cookie": cookie_header_for_url(self._session_data, url)}
+        )
 
     # ── Student context ──────────────────────────────────────────────
 

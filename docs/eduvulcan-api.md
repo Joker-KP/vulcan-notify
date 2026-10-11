@@ -21,6 +21,12 @@ Key cookies for API access:
 
 The `tenant` is the school district identifier extracted from the dashboard URL (e.g. `exampledistrict`).
 
+Exported cookies are filtered by host-only/domain scope, path boundaries, expiry
+and Secure metadata. Applicable same-name cookies retain browser path order.
+Authentication verifies HTTP `/api/Context` access before replacing the session;
+a successful student-page navigation alone does not prove the HTTP worker can
+use the exported state. API requests refuse redirects with manual cookie headers.
+
 **Important:** the iris library's `register_by_jwt` endpoint expects JWTs, but eduVulcan no longer provides them through the web login flow. This project uses saved browser cookies instead.
 
 ## Base URL
@@ -34,6 +40,15 @@ https://uczen.eduvulcan.pl/{tenant}/api/
 ### GET /api/Context
 
 Returns all students linked to the logged-in parent account.
+
+On 2026-10-11 a deployment reported HTTP 400 during session validation, persisting
+after manual authentication while browser school data loaded normally. The exact
+server rejection reason is unverified. A local regression reproduced a client
+cookie-selection defect: an unrelated tenant/path's same-name cookie overwrote
+the applicable cookie. Cookie scoping and authentication finalization are now
+tested locally; resolution of this live deployment has not yet been verified.
+400 remains a validation error, with safe response-kind, redirect-count and
+cookie-size diagnostics; it is not automatically treated as session expiry.
 
 A deployment log on 2026-10-04 showed this endpoint returning HTTP 409 for a
 saved session. The response body and the server's exact conflict semantics were

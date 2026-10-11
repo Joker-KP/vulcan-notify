@@ -153,7 +153,8 @@ ssh -N -L 6080:127.0.0.1:6080 deploy@docker-host
 ```
 
 Open <http://127.0.0.1:6080/vnc.html> and complete login. The foreground auth
-command saves the session and exits after reaching the student application.
+command verifies `/api/Context` with the exported cookies, saves the session and
+exits. Reaching the student page alone does not count as successful authentication.
 If interrupted or authentication fails, check its logs and retry before resuming
 the worker. The API can continue serving previously stored state.
 
@@ -173,6 +174,15 @@ Transient connectivity/server/malformed session-validation failures retry once,
 then preserve the session for the next poll. Context HTTP 409 requests session
 recovery; mid-sync recovery is limited to one attempt. Exhausted authentication
 can queue a deduplicated recovery email when SMTP is configured.
+
+If the browser loads school data but the worker reports HTTP 400, check that both
+services use the same image and data mount. Earlier images selected cookies by
+domain only, so cookies from another tenant/path could overwrite the correct
+ones. Updated code scopes cookies to the exact URL and checks API access before
+saving a session. Deploy the updated image to both services and run `vulcan-notify
+test` through the worker. HTTP errors now log response kind, redirect count and
+cookie byte count without contents. A remaining 400 requires further upstream
+diagnosis; it is not automatically classified as expired credentials.
 
 ## 4. Verify and operate
 

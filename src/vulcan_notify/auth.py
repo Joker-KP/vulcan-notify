@@ -40,7 +40,7 @@ class InvalidSessionError(ValueError):
 
 
 class SessionValidationError(RuntimeError):
-    """Upstream is unavailable; the saved session's validity is unknown."""
+    """API validation failed; the saved session's validity is unknown."""
 
 
 def _write_session(session_path: Path, session_data: dict[str, Any]) -> None:
@@ -947,6 +947,13 @@ async def _save_current_session(
         "dashboard_url": dashboard_url,
     }
 
+    # A dashboard redirect alone does not establish that exported cookies work
+    # with the HTTP worker. Keep the previous file until its API access is proven.
+    if not await test_session(session_data):
+        raise InvalidSessionError(
+            "Student API access was not confirmed after browser authentication"
+        )
+
     _write_session(session_path, session_data)
 
     logger.info(
@@ -1338,39 +1345,53 @@ def load_session(
     return data
 
 
-def cookies_for_url(
-    session_data: dict[str, Any],
-    url: str,
-) -> dict[str, str]:
+def _matching_cookies(session_data: dict[str, Any], url: str) -> list[dict[str, Any]]:
+    """Select exported Playwright cookies using browser domain/path/expiry rules."""
     parsed = urlparse(url)
-
     host = (parsed.hostname or "").lower()
-
-    matching: dict[
-        str,
-        str,
-    ] = {}
-
-    for cookie in session_data.get(
-        "cookies",
-        [],
-    ):
-        domain = (
-            cookie.get(
-                "domain",
-                "",
-            )
-            .lstrip(".")
-            .lower()
-        )
-
-        if not domain:
+    path = parsed.path or "/"
+    now = time.time()
+    matching = []
+    for cookie in session_data.get("cookies", []):
+        raw_domain = cookie.get("domain", "").lower()
+        domain = raw_domain.lstrip(".")
+        if not domain or not (
+            host == domain or (raw_domain.startswith(".") and host.endswith("." + domain))
+        ):
             continue
+        cookie_path = cookie.get("path") or "/"
+        if not cookie_path.startswith("/"):
+            cookie_path = "/"
+        if path != cookie_path and not (
+            path.startswith(cookie_path)
+            and (cookie_path.endswith("/") or path[len(cookie_path) :].startswith("/"))
+        ):
+            continue
+        expires = cookie.get("expires", -1)
+        # Playwright uses -1 for session cookies. Older session exports may omit it.
+        if isinstance(expires, (int, float)) and expires != -1 and expires <= now:
+            continue
+        if cookie.get("secure", False) and parsed.scheme != "https":
+            continue
+        matching.append(cookie)
 
-        if host == domain or host.endswith("." + domain):
-            matching[cookie["name"]] = cookie["value"]
+    # Browsers send longer paths first. Preserve export order for equal paths.
+    return sorted(matching, key=lambda cookie: len(cookie.get("path") or "/"), reverse=True)
 
+
+def cookies_for_url(session_data: dict[str, Any], url: str) -> dict[str, str]:
+    """Compatibility mapping; prefer the most specific path for duplicate names."""
+    matching: dict[str, str] = {}
+    for cookie in _matching_cookies(session_data, url):
+        matching.setdefault(cookie["name"], cookie["value"])
     return matching
+
+
+def cookie_header_for_url(session_data: dict[str, Any], url: str) -> str:
+    """Build a scoped Cookie header without losing same-name browser cookies."""
+    return "; ".join(
+        f"{cookie['name']}={cookie['value']}" for cookie in _matching_cookies(session_data, url)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1390,7 +1411,7 @@ async def test_session(
     """Test the API session; transient failures do not prove session expiry.
 
     Retry once for connectivity/server failures, then raise SessionValidationError.
-    Return False for authentication failure, HTML login or a Context conflict (409)
+    Return False for authentication failure, redirects, HTML login or a Context conflict (409)
     that needs a fresh browser session context.
     """
 
@@ -1398,13 +1419,7 @@ async def test_session(
 
     url = f"{base_url}/api/Context"
 
-    cookie_header = "; ".join(
-        f"{k}={v}"
-        for k, v in cookies_for_url(
-            session_data,
-            url,
-        ).items()
-    )
+    cookie_header = cookie_header_for_url(session_data, url)
 
     headers = {
         "Cookie": cookie_header,
@@ -1429,8 +1444,16 @@ async def test_session(
         for attempt in range(2):
             try:
                 async with session.get(
-                    url, ssl=ssl_context, headers=headers, allow_redirects=True
+                    url, ssl=ssl_context, headers=headers, allow_redirects=False
                 ) as response:
+                    if response.status in (301, 302, 303, 307, 308):
+                        # A manual Cookie header is scoped to this URL, not a
+                        # login redirect's host/path. Let the browser restore access.
+                        logger.warning(
+                            "Session validation: HTTP %d redirect; session recovery required",
+                            response.status,
+                        )
+                        return False
                     if response.status == 409:
                         # A Context conflict is eligible for bounded browser
                         # recovery; it is not proof of a transient server outage.
@@ -1441,8 +1464,17 @@ async def test_session(
                     if response.status in (401, 403):
                         return False
                     if response.status != 200:
+                        content_type = response.headers.get("content-type", "").lower()
+                        if "text/html" in content_type:
+                            kind = "html"
+                        elif "json" in content_type:
+                            kind = "json"
+                        else:
+                            kind = "other"
                         raise SessionValidationError(
-                            f"Session validation returned HTTP {response.status}"
+                            f"Session validation returned HTTP {response.status} "
+                            f"(response={kind}, redirects={len(response.history)}, "
+                            f"cookie_bytes={len(cookie_header.encode('utf-8'))})"
                         )
 
                     text = await response.text()
@@ -1455,6 +1487,10 @@ async def test_session(
                         raise SessionValidationError(
                             f"Session validation returned JSON {type(data).__name__}; "
                             "expected student context object"
+                        )
+                    if not isinstance(data.get("uczniowie"), list):
+                        raise SessionValidationError(
+                            "Session validation returned an object without a student list"
                         )
                     return True
             except (

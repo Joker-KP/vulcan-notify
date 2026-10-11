@@ -182,6 +182,17 @@ async def test_session_expired_raises(session_data: dict) -> None:
         await client.get_students()
 
 
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+async def test_api_redirect_does_not_forward_explicit_cookies(session_data, status):
+    client = VulcanClient(session_data)
+    client._http = _mock_session(_mock_response(None, status=status))
+    client._jitter = AsyncMock()
+    with pytest.raises(SessionExpiredError, match="redirected"):
+        await client.get_students()
+    assert client._http.get.call_count == 1
+    assert client._http.get.call_args.kwargs["allow_redirects"] is False
+
+
 async def test_context_conflict_requests_session_recovery(session_data, monkeypatch):
     client = VulcanClient(session_data)
     client._jitter = AsyncMock()

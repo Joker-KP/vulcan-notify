@@ -24,7 +24,7 @@ import aiohttp
 import yaml
 from jsonschema import Draft202012Validator
 
-from vulcan_notify.auth import _make_ssl_context, cookies_for_url, load_session
+from vulcan_notify.auth import _make_ssl_context, cookie_header_for_url, load_session
 from vulcan_notify.client import _BROWSER_HEADERS
 from vulcan_notify.config import settings
 
@@ -287,9 +287,7 @@ class ProbeClient:
             raise ValueError("Request outside the expected eduVULCAN host")
         headers = {**_BROWSER_HEADERS, "Referer": self.base(host) + "/App"}
         if not asset:
-            headers["Cookie"] = "; ".join(
-                f"{k}={v}" for k, v in cookies_for_url(self.session, url).items()
-            )
+            headers["Cookie"] = cookie_header_for_url(self.session, url)
         await asyncio.sleep(self.delay)
         try:
             async with self.http.get(

@@ -172,6 +172,41 @@ async def test_validation_logs_http_status_without_response_body(monkeypatch, ca
     assert "private-detail" not in caplog.text + str(failure.value)
 
 
+async def test_http_400_diagnostics_do_not_expose_cookie_values(monkeypatch, caplog):
+    response = session_response(400, "text/html", "private-body")
+    response.history = (MagicMock(),)
+    mock_session_responses(monkeypatch, response, response)
+    cookie_value = "private-cookie-value"
+    state = {
+        "base_url": "https://example.test/district",
+        "cookies": [{"name": "session", "value": cookie_value, "domain": "example.test"}],
+    }
+    with pytest.raises(auth.SessionValidationError):
+        await auth.test_session(state)
+    assert "response=html, redirects=1" in caplog.text
+    assert f"cookie_bytes={len('session=' + cookie_value)}" in caplog.text
+    assert cookie_value not in caplog.text
+    assert "private-body" not in caplog.text
+
+
+@pytest.mark.parametrize("body", ["{}", '{"uczniowie":null}', '{"uczniowie":{}}'])
+async def test_session_validation_requires_a_student_list(monkeypatch, body):
+    mock_session_responses(monkeypatch, session_response(body=body), session_response(body=body))
+    with pytest.raises(auth.SessionValidationError, match="without a student list"):
+        await auth.test_session({"base_url": "https://example.test", "cookies": []})
+
+
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+async def test_validation_does_not_forward_cookies_on_redirect(monkeypatch, caplog, status):
+    response = session_response(status)
+    response.headers["Location"] = "https://example.test/login?private-token=secret"
+    client = mock_session_responses(monkeypatch, response)
+    assert not await auth.test_session({"base_url": "https://example.test", "cookies": []})
+    assert client.get.call_count == 1
+    assert client.get.call_args.kwargs["allow_redirects"] is False
+    assert "private-token" not in caplog.text
+
+
 @pytest.mark.parametrize(
     "body,json_type", [("null", "NoneType"), ("[]", "list"), ('"private-detail"', "str")]
 )

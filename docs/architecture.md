@@ -438,14 +438,21 @@ and forwards to Telegram.
 
 ## Auth & session management
 
-1. `vulcan-notify auth` opens a real Chromium window via Playwright. After the user logs in, cookies are serialized to `SESSION_FILE` (`session.json`).
+1. `vulcan-notify auth` opens a real Chromium window via Playwright. After login, the exported cookies must pass HTTP `/api/Context` validation before being serialized to `SESSION_FILE` (`session.json`). Failed validation preserves the previous file.
 2. Every subsequent run loads the cookie jar and hits the API directly — no browser needed.
 3. If the client detects an HTML response (eduVulcan's expired-session sentinel) and credentials are available (from `.env` or the macOS Keychain service `vulcan-notify`), it restores persistent Chromium, imports stored cookies, tries browser reuse and then credential login, before retrying once. Docker supplies Xvfb for headed recovery; manual authentication remains explicit through the `vulcan-auth` profile.
 4. SSL uses certifi's bundled root store so it works inside minimal containers.
 
 Session writes flush/fsync a mode-0600 temporary file in the same directory before atomic replacement. Failed writes leave the previous session intact. JSON and structure validation raises a sanitized error; normal sync attempts existing credential-backed recovery, or asks for explicit manual authentication when credentials are unavailable. No browser starts merely to validate a corrupt file.
 
-`test_session()` returns false for HTTP 401/403 or HTTP 200 HTML. An observed
+HTTP cookie selection respects host-only versus domain cookies, path boundaries,
+expiry and Secure metadata. Same-name cookies remain in descending path-length
+order, and headers are built for the exact endpoint in both sync and contract
+probes. API/validation requests refuse redirects so a manual Cookie header cannot
+be forwarded to a different host/path; HTTP 301/302/303/307/308 requests recovery.
+
+`test_session()` requires a JSON object containing an `uczniowie` list (empty is
+valid), and returns false for HTTP 401/403 or HTTP 200 HTML. An observed
 HTTP 409 from upstream `/api/Context` also returns false to request session-context
 recovery, without assuming every 409 means expired authentication. Student
 discovery applies the same policy through `SessionExpiredError`, allowing the
@@ -459,7 +466,10 @@ poll loop retries on a later cycle. Credential submission uses Playwright's
 final-URL wait (30 seconds), with context tracking for student tabs, instead of
 requiring a POST response from `/logowanie`. An ambiguous click timeout checks
 the redirect without resubmitting credentials; the student application must
-still be reached before a session is saved.
+still be reached and exported API access confirmed before a session is saved.
+HTTP errors log safe response-kind, redirect-count and cookie-byte-count metadata,
+without printing cookies, response bodies or redirect destinations. HTTP 400
+still preserves the saved session rather than being assumed to prove expiry.
 
 ## Home Assistant integration
 

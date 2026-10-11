@@ -79,7 +79,7 @@ uv run mypy src/
 
 The tool follows a linear pipeline: **Auth -> Client -> Sync -> Diff -> Display**.
 
-- `auth.py` - Persistent Playwright Chromium under `/app/data/chromium-profile`, guarded by a shared profile lock. Imports `session.json` cookies, tries browser reuse before credentials and saves refreshed session state. Interactive auth always forces headed mode; automatic selection opens the first journal profile. Also provides `cookies_for_url()` and `_make_ssl_context()` used by the client.
+- `auth.py` - Persistent Playwright Chromium under `/app/data/chromium-profile`, guarded by a shared profile lock. Imports `session.json` cookies, tries browser reuse before credentials and verifies exported HTTP API access before saving refreshed state. Interactive auth always forces headed mode; automatic selection opens the first journal profile. `cookie_header_for_url()` honors host-only/domain, path, expiry and Secure metadata and preserves same-name cookies in path order; `cookies_for_url()` retains a compatibility mapping. API/validation requests refuse redirects with manual cookie headers and use the existing bounded recovery. Also provides `_make_ssl_context()` used by the client.
 
 - `client.py` - `VulcanClient` wraps aiohttp for the uczen.eduvulcan.pl JSON API. Handles cookie auth, SSL (certifi), and session expiry detection (HTML response = expired). Returns typed dataclasses from `models.py`.
 
@@ -93,7 +93,7 @@ The tool follows a linear pipeline: **Auth -> Client -> Sync -> Diff -> Display*
 
 - Session writes are atomic and mode 0600. Invalid session files use the existing recovery policy without exposing file contents. Calendar transient failures preserve stored UIDs for retry; `CALENDAR_TIMEOUT_SECONDS` bounds AppleScript and kills/reaps timed-out or cancelled processes.
 
-- Session validation retries transient HTTP/connectivity/malformed-response failures once (30-second total/10-second connect timeout per attempt, two-second delay). Exhausted checks raise `SessionValidationError`; CLI exits nonzero, preserves the session and skips browser recovery/auth alerts until a later cycle. Credential login follows the final portal/student redirect rather than requiring a particular POST response; a submit timeout does not resubmit credentials. Student access is still required before saving a session.
+- Session validation requires a JSON Context object with an `uczniowie` list and retries transient HTTP/connectivity/malformed-response failures once (30-second total/10-second connect timeout per attempt, two-second delay). Exhausted checks raise `SessionValidationError`; CLI exits nonzero, preserves the session and skips browser recovery/auth alerts until a later cycle. Non-200 diagnostics include only HTTP status, response kind, redirect count and cookie byte count, never contents. Credential login follows the final portal/student redirect rather than requiring a particular POST response; a submit timeout does not resubmit credentials. Student access and successful HTTP validation are required before saving a session.
 
 - Observed upstream `/api/Context` HTTP 409 requests browser/session recovery immediately, both in validation and student discovery. It is treated as a recoverable Context conflict without asserting that all 409s mean expired authentication. The existing mid-sync retry remains bounded; 409s from other modules remain fetch failures, while 429/5xx/timeouts retain transient-failure behavior.
 
