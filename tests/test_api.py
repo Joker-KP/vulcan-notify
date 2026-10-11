@@ -827,3 +827,14 @@ async def test_homework_api_exposes_persisted_details(seeded_db):
     assert item["response_deadline"] == "2026-10-09"
     assert item["links"] == ["https://example.org/1"]
     assert item["details"] == raw
+
+
+async def test_exam_api_retains_full_detail_json(seeded_exams_db):
+    import json
+    import sqlite3
+
+    detail = {"opis": "Stored details", "typ": 2, "additionalField": ["retained"]}
+    with sqlite3.connect(seeded_exams_db) as conn:
+        conn.execute("UPDATE exams SET details=? WHERE id=2", (json.dumps(detail),))
+    item = api_mod._get_exams(days_ahead=21)["Yarema"]["exams"][0]
+    assert item["details"] == detail

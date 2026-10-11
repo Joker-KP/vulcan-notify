@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 
 
@@ -67,6 +68,14 @@ class AttendanceEntry:
     teacher: str  # nauczyciel
     time_from: str  # godzinaOd (ISO 8601)
     time_to: str  # godzinaDo (ISO 8601)
+    source: str = "oddzialy"
+
+    @property
+    def entry_key(self) -> str:
+        """Keep classroom identity compatible; distinguish unnumbered activities."""
+        if self.source == "oddzialy":
+            return ""
+        return json.dumps([self.time_from, self.time_to, self.subject], ensure_ascii=False)
 
 
 @dataclass
@@ -77,6 +86,7 @@ class Exam:
     type: int  # rodzaj (1=test?, 2=quiz?)
     description: str | None = None  # opis (from detail endpoint)
     teacher: str | None = None  # nauczyciel
+    details: dict[str, object] | None = None
 
 
 @dataclass

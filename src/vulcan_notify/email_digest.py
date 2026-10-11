@@ -82,7 +82,14 @@ def _item(change: Change, config: Settings) -> str:
             raw.category, f"Kategoria {raw.category}"
         )
         title = f"{raw.subject}: {category}"
-        details = [f"Lekcja: {raw.lesson_number}", f"Nauczyciel: {raw.teacher}"]
+        source_label = {
+            "dziennikiZajecInnych": "Zajęcia dodatkowe",
+            "dziennikiSwietlicy": "Świetlica",
+        }.get(raw.source)
+        location = (
+            f"Rodzaj zajęć: {source_label}" if source_label else f"Lekcja: {raw.lesson_number}"
+        )
+        details = [location, f"Nauczyciel: {raw.teacher}"]
     elif isinstance(raw, Exam):
         title = raw.subject
         details = [raw.description or ""]

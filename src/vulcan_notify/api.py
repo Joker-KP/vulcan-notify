@@ -761,7 +761,7 @@ def _get_exams(
 
         for s in selected:
             rows = db.execute(
-                "SELECT date, subject, type, description, teacher "
+                "SELECT date, subject, type, description, teacher, details "
                 "FROM exams WHERE student_key = ? AND deleted_at IS NULL "
                 "AND substr(date, 1, 10) >= ? AND substr(date, 1, 10) <= ? "
                 "ORDER BY date ASC, subject ASC",
@@ -774,6 +774,7 @@ def _get_exams(
                     "type": _EXAM_TYPE_LABELS.get(r["type"], "exam"),
                     "description": r["description"],
                     "teacher": r["teacher"],
+                    "details": json.loads(r["details"]) if r["details"] is not None else None,
                 }
                 for r in rows
             ]

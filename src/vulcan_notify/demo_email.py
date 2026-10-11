@@ -167,7 +167,9 @@ class DemoClient(VulcanClient):
     ) -> list[AttendanceEntry]:
         return [] if self.baseline else self.attendance
 
-    async def get_exams(self, student: Student) -> list[Exam]:
+    async def get_exams(
+        self, student: Student, date_from: str | None = None, date_to: str | None = None
+    ) -> list[Exam]:
         return [] if self.baseline else self.exams
 
     async def get_homework(

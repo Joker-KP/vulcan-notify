@@ -42,3 +42,13 @@ def test_homework_windows_are_configurable_and_nonnegative(tmp_path):
     for field in ("sync_homework_days", "sync_homework_future_days"):
         with pytest.raises(ValidationError):
             Settings(_env_file=None, **{field: -1})
+
+
+def test_exam_windows_are_configurable_and_nonnegative(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("SYNC_EXAM_DAYS=30\nSYNC_EXAM_FUTURE_DAYS=60\n")
+    config = Settings(_env_file=env)
+    assert config.sync_exam_days == 30 and config.sync_exam_future_days == 60
+    for field in ("sync_exam_days", "sync_exam_future_days"):
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, **{field: -1})

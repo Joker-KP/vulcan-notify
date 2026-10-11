@@ -153,6 +153,15 @@ Returns attendance records for a date range. Dates are ISO 8601 with timezone of
 }
 ```
 
+The response also contains `dziennikiZajecInnych` (other activities) and
+`dziennikiSwietlicy` (childcare). Synchronization reads all three collections.
+Classroom identity remains `(date, lesson_number)`; unnumbered activities also
+use source and the `(time_from, time_to, subject)` tuple. Separate source identities
+prevent overwrites between collections. `last_sync:<student>:attendance_full`
+baselines the additional collections silently on upgrades, preserving classroom
+change detection. The October 11, 2026 live audit returned 101 classroom records
+and 2 other-activity records; the previous parser dropped the latter.
+
 `kategoriaFrekwencji` values (observed): 1 = present, 2 = absent. Other values (late, excused) need further observation.
 
 ### GET /api/FrekwencjaStatystyki?key={key}&idPrzedmiot={id}
@@ -165,7 +174,9 @@ Excuse requests for the given date range.
 
 ## Dashboard summaries (Tablica endpoints)
 
-These are lightweight endpoints used by the dashboard. Good for polling since they return minimal data.
+These lightweight endpoints provide dashboard summaries and can omit historical
+or otherwise hidden records. Use module endpoints as the synchronization source;
+dashboard responses do not establish completeness or cancellation.
 
 ### GET /api/OcenyTablica?key={key}
 
@@ -228,8 +239,10 @@ Synchronization enriches `Homework` before detecting new-ID changes using `opis`
 Email and MQTT notifications include these available details. `linki` is retained
 as raw JSON; populated item shapes are not confirmed by the recorded empty array.
 The database automatically adds these fields and a successful-detail timestamp;
-existing tasks are backfilled silently. Empty descriptions count as fetched,
-while detail failures remain eligible for retry. The entire detail response is
+all returned tasks refresh their details on every sync, silently for known IDs. Empty
+descriptions count as fetched; successful responses replace cleared/null fields,
+while failed reads retain stored details and retry on the next sync. The entire
+detail response is
 stored as `details` JSON and exposed through MQTT and the local homework API.
 Notifications also include available attachment labels/links, response text and
 teacher comments. Populated attachment item shapes and numeric status meanings
@@ -274,9 +287,17 @@ homework list item shape is:
 {"typ": 4, "przedmiotNazwa": "Example subject", "data": "2026-10-09T00:00:00+02:00", "hasAttachment": false, "id": 1}
 ```
 
-This example uses a synthetic ID/subject. `typ=4` identifies homework; other item
-types remain outside homework synchronization. Invalid/malformed homework items
-fail the section instead of being interpreted as an empty list. The initial
+This example uses a synthetic ID/subject. `typ=4` identifies homework; all other
+numeric type codes are retained as exams without guessing additional enum meanings.
+Exam synchronization uses this same calendar with `SYNC_EXAM_DAYS=365` and
+`SYNC_EXAM_FUTURE_DAYS=365`. Exam descriptions and teachers are fetched before
+creating new change events, including a teacher paired with an empty description.
+Full detail JSON persists in `exams.details` and is exposed through HTTP/MQTT.
+Known exams refresh details silently. `last_sync:<student>:exams_calendar`
+initializes expanded history silently on upgrades; subsequent unseen IDs notify.
+Missing exams are retired only within the successfully fetched date window,
+including successful empty lists; rolled-out history remains stored.
+Invalid/malformed calendar items fail the section instead of being interpreted as an empty list. The initial
 calendar-source read baselines expanded history silently, independently of the
 existing dashboard-source marker; later unknown IDs notify. Missing tasks are
 soft-deleted only within the successfully fetched window. The dashboard overview
@@ -601,13 +622,29 @@ Email signatures per mailbox.
 
 ## Polling strategy
 
-For change detection, prefer the `*Tablica` (dashboard) endpoints - they're lightweight and designed for the dashboard to poll. The full endpoints (e.g. `/api/Oceny`, `/api/Frekwencja`) should be used sparingly to get detail when a change is detected.
+Use each module's data source as the synchronization baseline. `*Tablica`
+responses are presentation summaries, not authoritative inventories: a record may
+vanish from the dashboard while remaining available in its module. Fetching a
+module only after the dashboard reports a change can therefore miss data.
 
-Recommended approach:
-1. Fetch `/api/Context` once per session to get student keys
-2. For each student, poll `OcenyTablica`, `FrekwencjaTablica`, `SprawdzianyTablica`, `ZadaniaDomoweTablica`, `OgloszeniaTablica` on interval
-3. When a dashboard endpoint shows new data, optionally fetch the full endpoint for details
-4. Hash responses for deduplication (same approach as the original differ)
+Current synchronization strategy:
+
+1. Discover active profiles with `/api/Context`.
+2. Fetch grades from `/api/Oceny` for every returned classification period.
+3. Fetch `/api/Frekwencja` for the configured lookback and retain all three collections.
+4. Fetch exams and homework from `/api/SprawdzianyZadaniaDomowe` with explicit,
+   configurable date windows; enrich models using their detail endpoints before diffing.
+5. Refresh details of all returned exams and homework on every sync. Preserve
+   previously stored details on failures; persist valid empty/null values on success.
+   Known-ID edits remain silent under the current notification policy.
+6. Fetch schedule, remarks and completed lessons from their module endpoints.
+7. Compare with persisted SQLite state using stable category identities. Only
+   absence within a successfully fetched interval can retire calendar records.
+
+Date windows deliberately bound coverage; synchronization does not promise
+calendar history outside the requested window. Messages still read the latest 50 received messages per
+sync; frequent polling is assumed and full pagination remains unimplemented.
+Dashboard methods remain available for overview callers but do not gate module sync.
 
 ## Open questions
 

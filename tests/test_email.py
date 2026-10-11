@@ -1278,3 +1278,29 @@ async def test_plain_website_links_are_shortened_only_in_html_and_persist_for_re
     assert parsed.get_body(("html",)).get_content().strip() == pending["html_body"].strip()
     assert url in parsed.get_body(("plain",)).get_content()
     assert parsed["Message-ID"] == pending["message_id"]
+
+
+def test_extra_attendance_notifications_show_source_and_mqtt_identity():
+    from vulcan_notify.differ import Change
+    from vulcan_notify.email_digest import render_summary
+    from vulcan_notify.models import AttendanceEntry, Student
+    from vulcan_notify.mqtt import build_payload
+    from vulcan_notify.sync import FullSyncResult, SyncResult
+
+    student = Student("KEY", "Jan", "3A", "School", 1, "mailbox")
+    entries = [
+        AttendanceEntry(0, 2, "2026-10-09", "Club", "Teacher", "08:00", "09:00", source)
+        for source in ("dziennikiZajecInnych", "dziennikiSwietlicy")
+    ]
+    changes = [
+        Change("new", "attendance", student.name, "Absence", "", raw=entry) for entry in entries
+    ]
+    _, plain, html, count = render_summary(
+        FullSyncResult([SyncResult(student, new_attendance=changes)]), Settings(_env_file=None)
+    )
+    assert count == 2
+    for output in (plain, html):
+        assert "Zajęcia dodatkowe" in output and "Świetlica" in output
+        assert "Lekcja: 0" not in output
+    assert build_payload(changes[0])["source"] == entries[0].source
+    assert build_payload(changes[0])["entry_key"] == entries[0].entry_key

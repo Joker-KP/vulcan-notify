@@ -118,7 +118,12 @@ async def test_real_client_parsers_accept_sanitized_fixtures(name):
         elif isinstance(response, list):
             assert len(result) == len(response)
         elif name == "Frekwencja":
-            assert len(result) == len(response["oddzialy"])
+            sources = ("oddzialy", "dziennikiZajecInnych", "dziennikiSwietlicy")
+            assert len(result) == sum(len(response.get(source, [])) for source in sources)
+            for source in sources:
+                assert sum(entry.source == source for entry in result) == len(
+                    response.get(source, [])
+                )
         else:
             assert result == response
 

@@ -163,16 +163,28 @@ async def diff_attendance(
 ) -> list[Change]:
     """Compare fetched attendance against stored records.
 
-    New (date, lesson_number) combo = new record.
+    Classroom keys remain compatible; unnumbered activities also use source/times/subject.
     """
     stored = await db.get_attendance_for_student(student.key)
-    stored_keys = {(row["date"], row["lesson_number"]) for row in stored}
+    stored_keys = {
+        (row["date"], row["lesson_number"], row["source"], row["entry_key"]) for row in stored
+    }
     changes: list[Change] = []
 
     for entry in fetched:
-        if (entry.date, entry.lesson_number) not in stored_keys and entry.category != 1:
+        key = (entry.date, entry.lesson_number, entry.source, entry.entry_key)
+        if key not in stored_keys and entry.category != 1:
+            stored_keys.add(key)
             category_name = {2: "Absent", 3: "Late", 4: "Excused"}.get(
                 entry.category, f"Category {entry.category}"
+            )
+            location = (
+                f"lesson {entry.lesson_number}"
+                if entry.source == "oddzialy"
+                else {
+                    "dziennikiZajecInnych": "Zajęcia dodatkowe",
+                    "dziennikiSwietlicy": "Świetlica",
+                }.get(entry.source, entry.source)
             )
             changes.append(
                 Change(
@@ -180,7 +192,7 @@ async def diff_attendance(
                     item_type="attendance",
                     student_name=student.name,
                     title=f"{category_name}: {entry.subject}",
-                    body=f"{_short_due(entry.date)} • lesson {entry.lesson_number}",
+                    body=f"{_short_due(entry.date)} • {location}",
                     priority=3,
                     tags=["calendar", "school"],
                     raw=entry,
@@ -208,7 +220,17 @@ async def diff_exams(
                     item_type="exam",
                     student_name=student.name,
                     title=f"{exam_type}: {exam.subject}",
-                    body=_short_due(exam.date),
+                    body="\n".join(
+                        part
+                        for part in (
+                            _short_due(exam.date),
+                            message_text(message_html(exam.description))
+                            if exam.description
+                            else "",
+                            f"Nauczyciel: {exam.teacher}" if exam.teacher else "",
+                        )
+                        if part
+                    ),
                     priority=3,
                     tags=["memo", "school"],
                     raw=exam,

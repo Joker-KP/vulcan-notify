@@ -45,11 +45,22 @@ are soft-deleted only inside the successfully fetched interval; rolled-out histo
 remains stored. Fetch/parse failures do not initialize the marker or delete tasks.
 
 Database migration is automatic and preserves existing tasks and calendar UIDs.
-Older tasks have their full details fetched again once, silently, without another
-notification. Successful detail responses are cached independently of an empty
-description. Failed detail fetches retain a basic notification and retry on later
+Every returned task refreshes its full details on each sync, silently for known
+IDs. Successful reads replace cleared values, including empty descriptions and
+null response deadlines; failed reads preserve stored detail content. Failed
+detail fetches retain a basic notification and retry on later
 syncs; subsequent detail backfill does not send another notification. Already
 queued emails retain their original content when retried.
+
+Exam notifications also receive description and teacher before change creation,
+including when the description is empty. Exams use the module calendar with
+`SYNC_EXAM_DAYS=365` / `SYNC_EXAM_FUTURE_DAYS=365`; expanded history baselines
+silently on upgrades. Existing exam details refresh silently on each sync. Failed
+detail reads preserve stored content, and new records can notify with basic data.
+
+Attendance alerts cover classroom, other activities and childcare. Historical
+other-activity/childcare records baseline silently on upgrades; new non-present
+records notify afterwards. Existing attendance-category changes remain silent.
 
 ### Choosing digest groups
 

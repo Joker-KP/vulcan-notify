@@ -109,6 +109,8 @@ def build_payload(change: Change) -> dict[str, object]:
             category=category_name,
             date=raw.date,
             lesson_number=raw.lesson_number,
+            source=raw.source,
+            entry_key=raw.entry_key,
             subject=raw.subject,
             teacher=raw.teacher,
         )
@@ -121,6 +123,7 @@ def build_payload(change: Change) -> dict[str, object]:
             date=raw.date,
             description=raw.description,
             teacher=raw.teacher,
+            details=raw.details,
         )
 
     elif isinstance(raw, Homework):

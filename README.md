@@ -202,8 +202,11 @@ flowchart TB
 
 1. **Auth** - Playwright opens a browser for you to log into eduvulcan.pl. After login, session cookies are saved locally. Subsequent syncs validate cookies over HTTP. With credentials available, expired sessions first try persistent-browser recovery, then credential login.
 2. **Fetch** - The tool calls the eduVulcan web API directly (using saved cookies) to pull grades (all periods), attendance (last 90 days), exams, homework with full body, messages, and the lesson schedule including substitutions.
-3. **Diff** - Each item is compared against the local SQLite database. New or changed items are reported; exams and homework that disappear from the API are soft-deleted.
-4. **Persist** - All upserts are idempotent (`INSERT OR REPLACE`). Each run is recorded in a `sync_runs` table.
+
+   Exams and homework use the date-windowed module calendar, rather than upcoming-only dashboard lists. Their details refresh on every sync for returned items; new notifications include description and teacher. Existing details update silently, and failed detail reads retain stored content. Expanded exam history and additional attendance sections baseline silently on upgrades. SQLite migrates automatically while preserving history and calendar UIDs.
+
+3. **Diff** - Each item is compared against the local SQLite database. New grades and value changes, new non-present attendance, new exams/homework, and supported schedule changes are reported. Missing exams/homework are soft-deleted only inside a successfully fetched calendar window. Known exam/homework detail edits persist silently.
+4. **Persist** - All upserts are idempotent (`INSERT ... ON CONFLICT DO UPDATE`). Each run is recorded in a `sync_runs` table.
 5. **Publish** - Changes are printed to the terminal, summarized for SMTP email (optionally using AI), written to macOS Calendar, and published to MQTT when those channels are configured. Email and MQTT have separate persistent retry outboxes.
 6. **Serve** (separate command, long-running) - `vulcan-notify api` (via Docker or systemd service) exposes the HTTP + iCalendar endpoints backed by the same SQLite file.
 
@@ -287,7 +290,9 @@ Python settings load `.env`; Compose exports it to the containers. Direct auth/A
 | `SESSION_FILE` | `session.json` | Saved session cookies path |
 | `VULCAN_LOGIN` | (none) | eduVulcan login email for auto-login |
 | `VULCAN_PASSWORD` | (none) | eduVulcan password for auto-login |
-| `SYNC_ATTENDANCE_DAYS` | `90` | How many days back to sync attendance |
+| `SYNC_ATTENDANCE_DAYS` | `90` | Attendance lookback, including classroom, other activities and childcare |
+| `SYNC_EXAM_DAYS` | `365` | Exam calendar lookback in full local days, plus today |
+| `SYNC_EXAM_FUTURE_DAYS` | `365` | Exam calendar lookahead in full local days |
 | `SYNC_COMPLETED_LESSONS_DAYS` | `90` | How many days back to sync completed lessons, plus today; no email notifications |
 | `SYNC_MESSAGE_BACKFILL_BATCH` | `10` | Legacy messages to refetch bodies for, per run |
 | `POLL_INTERVAL` | `1800` | Seconds between polls when run as a service |

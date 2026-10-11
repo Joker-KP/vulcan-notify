@@ -230,49 +230,59 @@ async def sync_student(
 
         attendance = await client.get_attendance(student, date_from, date_to)
 
+        full_attendance_marker = f"last_sync:{student.key}:attendance_full"
+        first_full_attendance = await db.get_state(full_attendance_marker) is None
         if not first_sections["attendance"]:
-            result.new_attendance = await diff_attendance(student, attendance, db)
+            comparable = [
+                entry
+                for entry in attendance
+                if not first_full_attendance or entry.source == "oddzialy"
+            ]
+            result.new_attendance = await diff_attendance(student, comparable, db)
 
         for entry in attendance:
             await db.upsert_attendance(student.key, entry)
+        await db.set_state(full_attendance_marker, datetime.now(UTC).isoformat())
         await section_ok("attendance", len(attendance))
     except Exception as exc:
         await section_failed("attendance", exc)
 
     # ── Exams ────────────────────────────────────────────────────
     try:
-        exams = await client.get_exams(student)
-        stored_exam_ids = await db.get_exam_ids_for_student(student.key)
+        now = datetime.now(settings.timezone)
+        date_from, date_to = _api_date_window(
+            now, settings.sync_exam_days, settings.sync_exam_future_days
+        )
+        exams = await client.get_exams(student, date_from, date_to)
+        calendar_baseline = f"last_sync:{student.key}:exams_calendar"
+        first_exams = first_sections["exams"] or await db.get_state(calendar_baseline) is None
+        detailed_exam_ids: set[int] = set()
+        for exam in exams:
+            try:
+                detail = await client.get_exam_detail(student, exam.id)
+                if detail:
+                    exam.details = detail
+                    description = detail.get("opis")
+                    teacher = detail.get("nauczycielImieNazwisko")
+                    exam.description = description if isinstance(description, str) else None
+                    exam.teacher = teacher if isinstance(teacher, str) else None
+                    detailed_exam_ids.add(exam.id)
+            except SessionExpiredError:
+                raise
+            except Exception:
+                logger.debug("Failed to fetch exam detail for %d", exam.id)
 
-        if not first_sections["exams"]:
+        if not first_exams:
             result.new_exams = await diff_exams(student, exams, db)
-
         for exam in exams:
-            await db.upsert_exam(student.key, exam)
-
-        # Fetch detail for new exams or exams missing description
-        missing_detail = await db.get_exams_missing_detail(student.key)
-        for exam in exams:
-            if exam.id not in stored_exam_ids or exam.id in missing_detail:
-                try:
-                    detail = await client.get_exam_detail(student, exam.id)
-                    if detail:
-                        description = detail.get("opis", "")
-                        teacher = detail.get("nauczycielImieNazwisko", "")
-                        if description:
-                            await db.update_exam_description(
-                                exam.id, str(description), str(teacher) if teacher else None
-                            )
-                except SessionExpiredError:
-                    raise
-                except Exception:
-                    logger.debug("Failed to fetch exam detail for %d", exam.id)
-
-        # Mark exams no longer returned by API as soft-deleted
-        if not first_sections["exams"]:
-            deleted = await db.mark_missing(student.key, "exams", {e.id for e in exams})
+            await db.upsert_exam(student.key, exam, detail_fetched=exam.id in detailed_exam_ids)
+        if not first_exams:
+            deleted = await db.mark_missing_exams_in_window(
+                student.key, {e.id for e in exams}, date_from, date_to
+            )
             if deleted:
                 logger.info("Soft-deleted %d exams for %s", deleted, student.name)
+        await db.set_state(calendar_baseline, datetime.now(UTC).isoformat())
         await section_ok("exams", len(exams))
     except Exception as exc:
         await section_failed("exams", exc)
@@ -286,36 +296,29 @@ async def sync_student(
         homework = await client.get_homework(student, date_from, date_to)
         calendar_baseline = f"last_sync:{student.key}:homework_calendar"
         first_homework = first_sections["homework"] or await db.get_state(calendar_baseline) is None
-        stored_hw_ids = await db.get_homework_ids_for_student(student.key)
-
-        # Enrich the models before diffing so every output sees the same details.
-        missing_detail = await db.get_homework_missing_detail(student.key)
+        # Refresh each returned task: descriptions, resources and responses can change.
         detailed_ids: set[int] = set()
         for hw in homework:
-            if hw.id not in stored_hw_ids or hw.id in missing_detail:
-                try:
-                    detail = await client.get_homework_detail(student, hw.id)
-                    if detail:
-                        hw.details = detail
-                        for field, source in (
-                            ("content", "opis"),
-                            ("teacher", "nauczycielImieNazwisko"),
-                            ("response_deadline", "terminOdpowiedzi"),
-                        ):
-                            value = detail.get(source)
-                            if isinstance(value, str):
-                                setattr(hw, field, value)
-                        links = detail.get("linki")
-                        if isinstance(links, list):
-                            hw.links = links
-                        required = detail.get("odpowiedzWymagana")
-                        if isinstance(required, bool):
-                            hw.response_required = required
-                        detailed_ids.add(hw.id)
-                except SessionExpiredError:
-                    raise
-                except Exception:
-                    logger.debug("Failed to fetch homework detail for %d", hw.id)
+            try:
+                detail = await client.get_homework_detail(student, hw.id)
+                if detail:
+                    hw.details = detail
+                    for field, source in (
+                        ("content", "opis"),
+                        ("teacher", "nauczycielImieNazwisko"),
+                        ("response_deadline", "terminOdpowiedzi"),
+                    ):
+                        value = detail.get(source)
+                        setattr(hw, field, value if isinstance(value, str) else None)
+                    links = detail.get("linki")
+                    hw.links = links if isinstance(links, list) else None
+                    required = detail.get("odpowiedzWymagana")
+                    hw.response_required = required if isinstance(required, bool) else None
+                    detailed_ids.add(hw.id)
+            except SessionExpiredError:
+                raise
+            except Exception:
+                logger.debug("Failed to fetch homework detail for %d", hw.id)
 
         if not first_homework:
             result.new_homework = await diff_homework(student, homework, db)

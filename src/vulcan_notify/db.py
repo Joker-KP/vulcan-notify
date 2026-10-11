@@ -101,8 +101,10 @@ CREATE TABLE IF NOT EXISTS attendance (
     teacher TEXT,
     time_from TEXT,
     time_to TEXT,
+    source TEXT NOT NULL DEFAULT 'oddzialy',
+    entry_key TEXT NOT NULL DEFAULT '',
     first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (student_key, date, lesson_number),
+    PRIMARY KEY (student_key, date, lesson_number, source, entry_key),
     FOREIGN KEY (student_key) REFERENCES students(key)
 );
 
@@ -114,6 +116,8 @@ CREATE TABLE IF NOT EXISTS exams (
     type INTEGER NOT NULL,
     description TEXT,
     teacher TEXT,
+    details TEXT,
+    detail_fetched_at TIMESTAMP,
     first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     deleted_at TIMESTAMP,
@@ -332,6 +336,31 @@ class Database:
                 logger.info("Migrating: dropping legacy %s table", table)
                 await self.db.execute(f"DROP TABLE {table}")
 
+        # Extra activities lack lesson numbers; extend identity without losing history.
+        cursor = await self.db.execute("PRAGMA table_info(attendance)")
+        attendance_columns = {row[1] for row in await cursor.fetchall()}
+        if attendance_columns and "source" not in attendance_columns:
+            await self.db.execute("SAVEPOINT attendance_migration")
+            try:
+                schema = SCHEMA.split("CREATE TABLE IF NOT EXISTS attendance (", 1)[1].split(
+                    ";", 1
+                )[0]
+                await self.db.execute("CREATE TABLE attendance_expanded (" + schema)
+                await self.db.execute(
+                    "INSERT INTO attendance_expanded "
+                    "(student_key, date, lesson_number, category, subject, teacher, "
+                    "time_from, time_to, first_seen) "
+                    "SELECT student_key, date, lesson_number, category, subject, "
+                    "teacher, time_from, time_to, first_seen FROM attendance"
+                )
+                await self.db.execute("DROP TABLE attendance")
+                await self.db.execute("ALTER TABLE attendance_expanded RENAME TO attendance")
+                await self.db.execute("RELEASE attendance_migration")
+            except Exception:
+                await self.db.execute("ROLLBACK TO attendance_migration")
+                await self.db.execute("RELEASE attendance_migration")
+                raise
+
         # Migrate exams table (add new columns)
         cursor = await self.db.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='exams'"
@@ -341,6 +370,8 @@ class Database:
             columns = {row[1] for row in await col_cursor.fetchall()}
             for col, col_type in [
                 ("description", "TEXT"),
+                ("details", "TEXT"),
+                ("detail_fetched_at", "TIMESTAMP"),
                 ("teacher", "TEXT"),
                 ("last_seen", "TIMESTAMP"),
                 ("deleted_at", "TIMESTAMP"),
@@ -550,9 +581,9 @@ class Database:
     async def upsert_attendance(self, student_key: str, entry: AttendanceEntry) -> None:
         await self.db.execute(
             "INSERT INTO attendance (student_key, date, lesson_number, category, "
-            "subject, teacher, time_from, time_to) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(student_key, date, lesson_number) DO UPDATE SET "
+            "subject, teacher, time_from, time_to, source, entry_key) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(student_key, date, lesson_number, source, entry_key) DO UPDATE SET "
             "category=excluded.category, subject=excluded.subject, "
             "teacher=excluded.teacher, time_from=excluded.time_from, "
             "time_to=excluded.time_to",
@@ -565,12 +596,15 @@ class Database:
                 entry.teacher,
                 entry.time_from,
                 entry.time_to,
+                entry.source,
+                entry.entry_key,
             ),
         )
 
     async def get_attendance_for_student(self, student_key: str) -> list[dict[str, object]]:
         cursor = await self.db.execute(
-            "SELECT date, lesson_number, category, subject, teacher, time_from, time_to "
+            "SELECT date, lesson_number, category, subject, teacher, time_from, time_to, "
+            "source, entry_key "
             "FROM attendance WHERE student_key = ?",
             (student_key,),
         )
@@ -584,20 +618,30 @@ class Database:
                 "teacher": r[4],
                 "time_from": r[5],
                 "time_to": r[6],
+                "source": r[7],
+                "entry_key": r[8],
             }
             for r in rows
         ]
 
     # ── Exams ────────────────────────────────────────────────────────
 
-    async def upsert_exam(self, student_key: str, exam: Exam) -> None:
+    async def upsert_exam(
+        self, student_key: str, exam: Exam, *, detail_fetched: bool = False
+    ) -> None:
         await self.db.execute(
-            "INSERT INTO exams (id, student_key, date, subject, type, description, teacher) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "INSERT INTO exams (id, student_key, date, subject, type, description, "
+            "teacher, details, detail_fetched_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? THEN CURRENT_TIMESTAMP END) "
             "ON CONFLICT(id) DO UPDATE SET "
             "date=excluded.date, subject=excluded.subject, type=excluded.type, "
-            "description=COALESCE(excluded.description, exams.description), "
-            "teacher=COALESCE(excluded.teacher, exams.teacher), "
+            "description=CASE WHEN excluded.detail_fetched_at IS NOT NULL THEN "
+            "excluded.description ELSE COALESCE(excluded.description, exams.description) "
+            "END, "
+            "teacher=CASE WHEN excluded.detail_fetched_at IS NOT NULL THEN "
+            "excluded.teacher ELSE COALESCE(excluded.teacher, exams.teacher) END, "
+            "details=COALESCE(excluded.details, exams.details), "
+            "detail_fetched_at=COALESCE(excluded.detail_fetched_at, exams.detail_fetched_at), "
             "last_seen=CURRENT_TIMESTAMP, deleted_at=NULL",
             (
                 exam.id,
@@ -607,6 +651,8 @@ class Database:
                 exam.type,
                 exam.description,
                 exam.teacher,
+                json.dumps(exam.details, ensure_ascii=False) if exam.details is not None else None,
+                detail_fetched,
             ),
         )
 
@@ -634,7 +680,7 @@ class Database:
 
     async def get_exams_for_student(self, student_key: str) -> list[dict[str, object]]:
         cursor = await self.db.execute(
-            "SELECT id, date, subject, type, description, teacher "
+            "SELECT id, date, subject, type, description, teacher, details "
             "FROM exams WHERE student_key = ? AND deleted_at IS NULL "
             "ORDER BY date DESC",
             (student_key,),
@@ -648,6 +694,7 @@ class Database:
                 "type": r[3],
                 "description": r[4],
                 "teacher": r[5],
+                "details": json.loads(r[6]) if r[6] is not None else None,
             }
             for r in rows
         ]
@@ -663,11 +710,18 @@ class Database:
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? THEN CURRENT_TIMESTAMP END, ?) "
             "ON CONFLICT(id) DO UPDATE SET "
             "date=excluded.date, subject=excluded.subject, "
-            "content=COALESCE(excluded.content, homework.content), "
-            "teacher=COALESCE(excluded.teacher, homework.teacher), "
-            "links=COALESCE(excluded.links, homework.links), "
-            "response_required=COALESCE(excluded.response_required, homework.response_required), "
-            "response_deadline=COALESCE(excluded.response_deadline, homework.response_deadline), "
+            "content=CASE WHEN excluded.detail_fetched_at IS NOT NULL THEN "
+            "excluded.content ELSE COALESCE(excluded.content, homework.content) END, "
+            "teacher=CASE WHEN excluded.detail_fetched_at IS NOT NULL THEN "
+            "excluded.teacher ELSE COALESCE(excluded.teacher, homework.teacher) END, "
+            "links=CASE WHEN excluded.detail_fetched_at IS NOT NULL THEN excluded.links "
+            "ELSE COALESCE(excluded.links, homework.links) END, "
+            "response_required=CASE WHEN excluded.detail_fetched_at IS NOT NULL THEN "
+            "excluded.response_required ELSE COALESCE(excluded.response_required, "
+            "homework.response_required) END, "
+            "response_deadline=CASE WHEN excluded.detail_fetched_at IS NOT NULL THEN "
+            "excluded.response_deadline ELSE COALESCE(excluded.response_deadline, "
+            "homework.response_deadline) END, "
             "detail_fetched_at=COALESCE(excluded.detail_fetched_at, homework.detail_fetched_at), "
             "details=COALESCE(excluded.details, homework.details), "
             "last_seen=CURRENT_TIMESTAMP, deleted_at=NULL",
@@ -1255,9 +1309,25 @@ class Database:
     async def mark_missing_homework_in_window(
         self, student_key: str, current_ids: set[int], date_from: str, date_to: str
     ) -> int:
-        """Only a successfully fetched interval can retire tasks, including an empty result."""
+        return await self._mark_missing_in_window(
+            "homework", student_key, current_ids, date_from, date_to
+        )
+
+    async def mark_missing_exams_in_window(
+        self, student_key: str, current_ids: set[int], date_from: str, date_to: str
+    ) -> int:
+        return await self._mark_missing_in_window(
+            "exams", student_key, current_ids, date_from, date_to
+        )
+
+    async def _mark_missing_in_window(
+        self, table: str, student_key: str, current_ids: set[int], date_from: str, date_to: str
+    ) -> int:
+        """Only a successfully fetched interval can retire items, including an empty result."""
+        if table not in ("exams", "homework"):
+            raise ValueError(f"Window-scoped deletion not supported for table: {table}")
         query = (
-            "UPDATE homework SET deleted_at = CURRENT_TIMESTAMP "
+            f"UPDATE {table} SET deleted_at = CURRENT_TIMESTAMP "
             "WHERE student_key = ? AND deleted_at IS NULL "
             "AND julianday(date) BETWEEN julianday(?) AND julianday(?)"
         )

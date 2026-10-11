@@ -104,7 +104,7 @@ SQLite lives at `DB_PATH` (default `vulcan_notify.db`). Tables:
 |-------|-------------|-------|
 | `students` | `key` | One row per student on the account. |
 | `grades` | `(student_key, column_id)` | `column_id` is the upstream grade-column id; `last_seen` tracks re-appearance. |
-| `attendance` | `(student_key, date, lesson_number)` | Append-only in practice. |
+| `attendance` | `(student_key, date, lesson_number, source, entry_key)` | Classroom keys stay compatible; unnumbered activities use times/subject and source. |
 | `exams`, `homework` | `id` | `deleted_at` for soft-delete; `calendar_uid` for macOS Calendar dedup. |
 | `messages` | `id` with `UNIQUE(api_global_key)` | `content` is backfilled in batches of `SYNC_MESSAGE_BACKFILL_BATCH` per run for legacy rows. |
 | `remarks` | `(student_key, id)` | Praise and behavior notes, original content, category, author, numeric type/kind, optional points and student view URL; first/last seen and soft deletion. Created additively on startup. |
@@ -123,8 +123,8 @@ The full entity diagram (students + primary entities) is in the [README](../READ
 `differ.py` compares the freshly fetched API list against the stored rows. The keying strategy per entity:
 
 - **Grades** — keyed by `column_id`. Value or category change → `updated`.
-- **Attendance** — keyed by `(date, lesson_number)`. New row → alert (no "updated" path).
-- **Exams / homework** — keyed by upstream `id`. Disappearance → soft-delete (`deleted_at` set, calendar event removed).
+- **Attendance** — classroom identity remains `(date, lesson_number)`; other activities and childcare add source and times/subject. New non-present row → alert (no "updated" path).
+- **Exams / homework** — keyed by upstream `id`. Missing within a successfully fetched date window → soft-delete (`deleted_at` set, calendar event removed); no update/delete change events.
 - **Messages** — keyed by `api_global_key`. Content is pulled lazily; the MQTT payload for a newly-appeared message includes the body once fetched.
 - **Schedule** — keyed by `(date, time_from, subject)`. Three independent change types are emitted: `substitution` (teacher/room swap), `cancellation` (annotation flag set), `addition` (is_extra lesson inserted).
 
@@ -134,8 +134,9 @@ Homework detail is fetched before diffing and persistence, so new change events
 carry the description, teacher, raw `links` JSON, `response_required` and
 `response_deadline` to email and MQTT. The nullable `detail_fetched_at` column
 tracks successful enrichment even when the description is empty. Additive migration
-preserves history and calendar UIDs; old records are enriched silently once, and
-failed detail requests remain eligible for retry without duplicate notifications.
+preserves history and calendar UIDs; all returned records refresh details silently
+on each sync. Successful reads replace cleared values; failed reads retain previous detail content and retry
+without duplicate notifications.
 New-task details include links from HTML descriptions in plain notification text.
 Populated upstream link object shapes have not been verified live.
 
@@ -151,6 +152,21 @@ The complete original detail response also persists in `homework.details` JSON,
 including attachments, response content/comments, flags and uninterpreted status
 codes. HTTP `/api/homework` and MQTT expose it alongside typed fields; email and
 plain notifications render available attachments and response text safely.
+
+Exams use the same calendar source (all numeric types other than `typ=4`), with
+`SYNC_EXAM_DAYS=365` / `SYNC_EXAM_FUTURE_DAYS=365`. Their independent successful
+`last_sync:<student>:exams_calendar` marker imports expanded history silently.
+Details are refreshed before diffing, including empty descriptions and teachers;
+original JSON persists in `exams.details`. Calendar deletion is scoped to the
+successful UTC interval, including empty results. Exam details migrate additively.
+
+Attendance reads `oddzialy`, `dziennikiZajecInnych` and `dziennikiSwietlicy`.
+The table migration copies original rows and `first_seen` into the expanded key;
+classroom rows keep their identity with an empty `entry_key`. Other sections use
+JSON-encoded `(time_from, time_to, subject)` and source because observed records
+lack upstream IDs and lesson numbers. `last_sync:<student>:attendance_full`
+baselines the additional sections on upgrades without suppressing new classroom
+absences. Failures do not initialize either expanded-source marker.
 
 Praise/notes use `diff_remarks()` and a separate `last_sync:<student>:remarks`
 baseline, initialized only after successful fetching and persistence. This also

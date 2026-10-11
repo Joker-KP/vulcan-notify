@@ -182,7 +182,7 @@ async def test_homework_details_reach_notifications_and_storage(db: Database) ->
     client = _make_mock_client(homework=[replace(HOMEWORK)])
     repeated = await sync_student(client, db, STUDENT_A)
     assert repeated.new_homework == []
-    client.get_homework_detail.assert_not_awaited()
+    client.get_homework_detail.assert_awaited_once_with(STUDENT_A, HOMEWORK.id)
     assert (await db.get_homework_for_student(STUDENT_A.key))[0] == row
 
 
@@ -488,7 +488,8 @@ async def test_baseline_upgrade_preserves_legacy_success_and_tracked_failure(db,
     await db.commit()
     result = await sync_student(_make_mock_client(grades=[GRADE], exams=[EXAM]), db, STUDENT_A)
     assert bool(result.new_grades) is not tracked_failure
-    assert len(result.new_exams) == 1
+    # Broader calendar history has its own silent upgrade baseline.
+    assert result.new_exams == []
 
 
 async def test_successful_empty_baseline_notifies_later_records(db):
@@ -513,3 +514,187 @@ async def test_failed_section_commit_does_not_initialize_baseline(db, monkeypatc
     monkeypatch.setattr(db, "record_section", record)
     recovered = await sync_all(_make_mock_client(grades=[GRADE]), db)
     assert recovered.student_results[0].new_grades == []
+
+
+async def test_exam_calendar_upgrade_baselines_history_then_notifies_with_details(db):
+    from vulcan_notify.config import Settings
+    from vulcan_notify.email_digest import render_summary
+    from vulcan_notify.mqtt import build_payload
+    from vulcan_notify.sync import FullSyncResult
+
+    await db.upsert_student(STUDENT_A)
+    await db.set_state("last_sync:KEYA", "2026-10-08T17:00:00Z")
+    await db.set_state("last_sync:KEYA:exams", "2026-10-08T17:00:00Z")
+    client = _make_mock_client(exams=[replace(EXAM)])
+    client.get_exam_detail.return_value = {
+        "opis": "",
+        "nauczycielImieNazwisko": "Anna Nowak",
+        "typ": 2,
+    }
+    assert (await sync_student(client, db, STUDENT_A)).new_exams == []
+    row = (await db.get_exams_for_student(STUDENT_A.key))[0]
+    assert row["description"] == "" and row["teacher"] == "Anna Nowak"
+    await db.close()
+    await db.connect()
+    new = replace(EXAM, id=EXAM.id + 1)
+    client = _make_mock_client(exams=[new])
+    detail = {"opis": "Przeczytaj rozdział.", "nauczycielImieNazwisko": "Jan Kowalski", "typ": 2}
+    client.get_exam_detail.return_value = detail
+    result = await sync_student(client, db, STUDENT_A)
+    assert len(result.new_exams) == 1
+    change = result.new_exams[0]
+    payload = build_payload(change)
+    _, plain, html, _ = render_summary(FullSyncResult([result]), Settings(_env_file=None))
+    for output in (change.body, plain, html):
+        assert "Przeczytaj rozdział." in output and "Jan Kowalski" in output
+    assert payload["details"] == detail
+    assert (await sync_student(client, db, STUDENT_A)).new_exams == []
+
+
+async def test_exam_calendar_failure_does_not_initialize_expanded_baseline(db):
+    await db.upsert_student(STUDENT_A)
+    await db.set_state("last_sync:KEYA", "2026-10-08T17:00:00Z")
+    await db.upsert_exam(STUDENT_A.key, replace(EXAM))
+    client = _make_mock_client()
+    client.get_exams.side_effect = VulcanFetchError("calendar failure")
+    result = await sync_student(client, db, STUDENT_A)
+    assert "exams" in result.failed_sections
+    assert await db.get_state("last_sync:KEYA:exams_calendar") is None
+    assert len(await db.get_exams_for_student(STUDENT_A.key)) == 1
+    client.get_exams.side_effect = None
+    client.get_exams.return_value = [replace(EXAM, id=EXAM.id + 1)]
+    assert (await sync_student(client, db, STUDENT_A)).new_exams == []
+
+
+async def test_exam_detail_expiry_does_not_consume_new_item(db):
+    await sync_student(_make_mock_client(), db, STUDENT_A)
+    client = _make_mock_client(exams=[replace(EXAM)])
+    client.get_exam_detail.side_effect = SessionExpiredError("expiry")
+    with pytest.raises(SyncSessionExpiredError):
+        await sync_student(client, db, STUDENT_A)
+    assert await db.get_exam_ids_for_student(STUDENT_A.key) == set()
+    client.get_exam_detail.side_effect = None
+    client.get_exam_detail.return_value = {"opis": "Recovered description"}
+    assert len((await sync_student(client, db, STUDENT_A)).new_exams) == 1
+
+
+async def test_full_attendance_upgrade_keeps_class_notifications_and_baselines_activities(db):
+    await db.upsert_student(STUDENT_A)
+    await db.set_state("last_sync:KEYA", "2026-10-08T17:00:00Z")
+    await db.set_state("last_sync:KEYA:attendance", "2026-10-08T17:00:00Z")
+    ordinary = AttendanceEntry(1, 2, "2026-10-09", "Math", "Teacher", "08:00", "09:00")
+    extra = replace(ordinary, lesson_number=0, source="dziennikiZajecInnych")
+    club = replace(extra, source="dziennikiSwietlicy")
+    client = _make_mock_client()
+    client.get_attendance.return_value = [ordinary, extra, club]
+    result = await sync_student(client, db, STUDENT_A)
+    assert [change.raw.source for change in result.new_attendance] == ["oddzialy"]
+    assert len(await db.get_attendance_for_student(STUDENT_A.key)) == 3
+    await db.close()
+    await db.connect()
+    newer = replace(extra, time_from="10:00")
+    client.get_attendance.return_value = [ordinary, extra, club, newer, newer]
+    result = await sync_student(client, db, STUDENT_A)
+    assert [change.raw.entry_key for change in result.new_attendance] == [newer.entry_key]
+    assert len(await db.get_attendance_for_student(STUDENT_A.key)) == 4
+    assert await db.get_attendance_for_student(STUDENT_B.key) == []
+    assert (await sync_student(client, db, STUDENT_A)).new_attendance == []
+
+
+async def test_full_attendance_failure_does_not_baseline_activities(db):
+    client = _make_mock_client()
+    client.get_attendance.side_effect = VulcanFetchError("attendance failure")
+    await sync_student(client, db, STUDENT_A)
+    assert await db.get_state("last_sync:KEYA:attendance_full") is None
+    client.get_attendance.side_effect = None
+    client.get_attendance.return_value = [
+        AttendanceEntry(
+            0, 2, "2026-10-09", "Club", "Teacher", "08:00", "09:00", "dziennikiZajecInnych"
+        )
+    ]
+    assert (await sync_student(client, db, STUDENT_A)).new_attendance == []
+    assert await db.get_state("last_sync:KEYA:attendance_full") is not None
+
+
+async def test_homework_details_refresh_clear_values_and_survive_failure(db):
+    detail = {
+        "opis": "Original",
+        "nauczycielImieNazwisko": "Teacher",
+        "linki": ["https://example.org"],
+        "odpowiedzWymagana": True,
+        "terminOdpowiedzi": "2026-10-10",
+        "odpowiedz": {"komentarzNauczyciela": "Original comment"},
+    }
+    client = _make_mock_client(homework=[replace(HOMEWORK)])
+    client.get_homework_detail.return_value = detail
+    await sync_student(client, db, STUDENT_A)
+    await db.close()
+    await db.connect()
+    changed = dict(
+        detail, opis="Updated", linki=[], odpowiedz={"komentarzNauczyciela": "Updated comment"}
+    )
+    client = _make_mock_client(homework=[replace(HOMEWORK)])
+    client.get_homework_detail.return_value = changed
+    result = await sync_student(client, db, STUDENT_A)
+    assert result.new_homework == []
+    row = (await db.get_homework_for_student(STUDENT_A.key))[0]
+    assert row["content"] == "Updated" and row["links"] == [] and row["details"] == changed
+    client = _make_mock_client(homework=[replace(HOMEWORK)])
+    client.get_homework_detail.side_effect = VulcanFetchError("detail failure")
+    assert (await sync_student(client, db, STUDENT_A)).new_homework == []
+    assert (await db.get_homework_for_student(STUDENT_A.key))[0] == row
+    client.get_homework_detail.side_effect = None
+    cleared = {
+        "opis": "",
+        "nauczycielImieNazwisko": None,
+        "linki": [],
+        "odpowiedzWymagana": False,
+        "terminOdpowiedzi": None,
+    }
+    client.get_homework_detail.return_value = cleared
+    await sync_student(client, db, STUDENT_A)
+    row = (await db.get_homework_for_student(STUDENT_A.key))[0]
+    assert row["content"] == "" and row["teacher"] is None and row["response_required"] is False
+    assert row["response_deadline"] is None and row["details"] == cleared
+
+
+async def test_exam_window_uses_configured_full_local_days_across_dst(db, monkeypatch):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from vulcan_notify import sync
+    from vulcan_notify.config import Settings
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 10, 25, 12, tzinfo=ZoneInfo("Europe/Warsaw")).astimezone(tz)
+
+    monkeypatch.setattr(sync, "datetime", Clock)
+    monkeypatch.setattr(
+        sync,
+        "settings",
+        Settings(_env_file=None, sync_exam_days=1, sync_exam_future_days=1, tz="Europe/Warsaw"),
+    )
+    client = _make_mock_client()
+    await sync_student(client, db, STUDENT_A)
+    client.get_exams.assert_awaited_once_with(
+        STUDENT_A, "2026-10-23T22:00:00.000Z", "2026-10-26T22:59:59.999Z"
+    )
+
+
+async def test_exam_detail_failure_preserves_stored_description(db):
+    client = _make_mock_client(exams=[replace(EXAM)])
+    detail = {"opis": "Stored description", "nauczycielImieNazwisko": "Teacher"}
+    client.get_exam_detail.return_value = detail
+    await sync_student(client, db, STUDENT_A)
+    client = _make_mock_client(exams=[replace(EXAM)])
+    client.get_exam_detail.side_effect = VulcanFetchError("detail failure")
+    assert (await sync_student(client, db, STUDENT_A)).new_exams == []
+    row = (await db.get_exams_for_student(STUDENT_A.key))[0]
+    assert row["description"] == "Stored description" and row["details"] == detail
+    client.get_exam_detail.side_effect = None
+    client.get_exam_detail.return_value = {"opis": "", "nauczycielImieNazwisko": None}
+    await sync_student(client, db, STUDENT_A)
+    row = (await db.get_exams_for_student(STUDENT_A.key))[0]
+    assert row["description"] == "" and row["teacher"] is None

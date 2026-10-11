@@ -96,6 +96,8 @@ class Settings(BaseSettings):
 
     # Sync
     sync_attendance_days: int = 90  # how far back to sync attendance
+    sync_exam_days: int = Field(default=365, ge=0)
+    sync_exam_future_days: int = Field(default=365, ge=0)
     sync_homework_days: int = Field(default=365, ge=0)
     sync_homework_future_days: int = Field(default=365, ge=0)
     sync_completed_lessons_days: int = Field(default=90, ge=0)

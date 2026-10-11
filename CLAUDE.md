@@ -52,10 +52,26 @@ Homework synchronization now reads the calendar list `SprawdzianyZadaniaDomowe`
 uses the upcoming-only list. The independent successful
 `last_sync:<student>:homework_calendar` marker silently imports expanded history
 once on upgrades; later unknown IDs notify. Window-scoped soft deletes preserve
-rolled-out history and skip failures. Full original detail JSON is cached in
+rolled-out history and skip failures. Full original detail JSON is refreshed on
+every sync and stored in
 `homework.details`, exposed through MQTT/HTTP; attachments and response text/comments
 also appear in notifications when available. A live calendar/detail check verified
 the October 9, 2026 task omitted by the dashboard.
+
+Exams now also read the module calendar with `SYNC_EXAM_DAYS=365` and
+`SYNC_EXAM_FUTURE_DAYS=365`, using `last_sync:<student>:exams_calendar` to
+baseline expanded history silently. All non-homework calendar type codes are
+preserved as exams. Detail enrichment occurs before diffing; original JSON
+persists in `exams.details` and HTTP/MQTT. Every returned exam/homework detail
+refreshes on each sync; successful empty/null values replace old ones and failed
+reads retain prior data. Known-ID edits remain silent. Soft deletes for both
+calendar categories are scoped to successful windows, including empty lists.
+
+Attendance reads classroom, other activities and childcare collections. The
+migration preserves history and expands identity with `source` / `entry_key`;
+classroom keys remain compatible while unnumbered activities use times/subject.
+`last_sync:<student>:attendance_full` silently imports additional collections on
+upgrades; new classroom alerts continue. Messages still use the first 50 entries.
 
 ## Sibling repos (cross-repo work is common)
 
@@ -118,7 +134,7 @@ The tool follows a linear pipeline: **Auth -> Client -> Sync -> Diff -> Display*
 
 - Exhausted/missing authentication and explicit interactive auth failures notify through the existing email outbox when `EMAIL_ENABLED=true`. `auth_failure.html` shares the email layout and includes noVNC/SSH recovery instructions. The persisted `email:auth_failure` outage marker suppresses duplicate alerts across restarts and resets after completed non-expired syncs or successful interactive auth. No raw authentication errors, secrets or AI are included.
 
-- `differ.py` - Compares fetched API data against stored database rows. `diff_grades()` detects new/updated grades by column_id. `diff_attendance()` detects new records by (date, lesson_number). Returns `Change` dataclasses.
+- `differ.py` - Compares fetched API data against stored database rows. `diff_grades()` detects new/updated grades by column_id. `diff_attendance()` retains classroom (date, lesson_number) identity and adds source plus times/subject for unnumbered activities. Returns `Change` dataclasses.
 
 - `display.py` - Formats `SyncResult` for terminal output with ANSI colors (auto-disabled when piped). Groups by student, then by data type.
 

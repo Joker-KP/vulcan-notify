@@ -453,3 +453,86 @@ async def test_null_schedule_response_cannot_cancel_stored_lessons(session_data,
     monkeypatch.setattr(client, "_jitter", AsyncMock())
     with pytest.raises(VulcanFetchError, match="null"):
         await client._request("/api/PlanZajec")
+
+
+async def test_exam_calendar_reads_past_and_future_items_and_preserves_type_codes(
+    session_data, student
+):
+    from urllib.parse import parse_qs, urlsplit
+
+    client = VulcanClient(session_data)
+    old = {"typ": 2, "id": 1, "data": "2026-10-09", "przedmiotNazwa": "Math"}
+    future = {"typ": 9, "id": 2, "data": "2026-10-20", "przedmiotNazwa": "History"}
+    client._request = AsyncMock(return_value=[old, future, {"typ": 4}, old])
+    exams = await client.get_exams(student, "2026-10-01", "2026-10-31")
+    assert [(item.id, item.subject, item.type) for item in exams] == [
+        (1, "Math", 2),
+        (2, "History", 9),
+    ]
+    url = urlsplit(client._request.call_args.args[0])
+    assert url.path == "/api/SprawdzianyZadaniaDomowe"
+    assert parse_qs(url.query)["dataOd"] == ["2026-10-01"]
+    assert parse_qs(url.query)["dataDo"] == ["2026-10-31"]
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {},
+        [{"typ": 1, "id": 1, "data": "invalid", "przedmiotNazwa": "Math"}],
+        [{"typ": 2, "id": True, "data": "2026-10-01", "przedmiotNazwa": "Math"}],
+    ],
+)
+async def test_exam_calendar_invalid_records_fail(session_data, student, response):
+    from vulcan_notify.client import VulcanFetchError
+
+    client = VulcanClient(session_data)
+    client._request = AsyncMock(return_value=response)
+    with pytest.raises(VulcanFetchError):
+        await client.get_exams(student, "2026-10-01", "2026-10-31")
+
+
+async def test_attendance_parses_all_three_collections(session_data, student):
+    row = {
+        "data": "2026-10-09",
+        "kategoriaFrekwencji": 2,
+        "opisZajec": "Math",
+        "godzinaOd": "08:00",
+        "godzinaDo": "09:00",
+    }
+    client = VulcanClient(session_data)
+    client._request = AsyncMock(
+        return_value={
+            "oddzialy": [dict(row, numerLekcji=1)],
+            "dziennikiZajecInnych": [row, dict(row, godzinaOd="10:00")],
+            "dziennikiSwietlicy": [row],
+        }
+    )
+    entries = await client.get_attendance(student, "2026-10-01", "2026-10-31")
+    assert len(entries) == 4
+    assert [entry.source for entry in entries] == [
+        "oddzialy",
+        "dziennikiZajecInnych",
+        "dziennikiZajecInnych",
+        "dziennikiSwietlicy",
+    ]
+    assert entries[0].entry_key == ""
+    assert entries[1].lesson_number == 0
+    assert entries[1].entry_key != entries[2].entry_key
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {},
+        {"oddzialy": [], "dziennikiZajecInnych": None},
+        {"oddzialy": [], "dziennikiSwietlicy": [None]},
+    ],
+)
+async def test_malformed_attendance_is_not_empty_success(session_data, student, response):
+    from vulcan_notify.client import VulcanFetchError
+
+    client = VulcanClient(session_data)
+    client._request = AsyncMock(return_value=response)
+    with pytest.raises(VulcanFetchError):
+        await client.get_attendance(student, "2026-10-01", "2026-10-31")

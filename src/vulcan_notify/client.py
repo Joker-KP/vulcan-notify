@@ -468,27 +468,45 @@ class VulcanClient:
         data = await self._request(
             f"/api/Frekwencja?key={student.key}&dataOd={date_from}&dataDo={date_to}"
         )
-        if not data:
-            return []
-
+        if not isinstance(data, dict) or "oddzialy" not in data:
+            raise VulcanFetchError("/api/Frekwencja response has no 'oddzialy' key")
         entries: list[AttendanceEntry] = []
-        for entry in data.get("oddzialy", []):
-            entries.append(
-                AttendanceEntry(
-                    lesson_number=entry.get("numerLekcji", 0),
-                    category=entry.get("kategoriaFrekwencji", 0),
-                    date=entry.get("data", ""),
-                    subject=entry.get("opisZajec", ""),
-                    teacher=entry.get("nauczyciel", ""),
-                    time_from=entry.get("godzinaOd", ""),
-                    time_to=entry.get("godzinaDo", ""),
+        for source in ("oddzialy", "dziennikiZajecInnych", "dziennikiSwietlicy"):
+            rows = data.get(source, [])
+            if not isinstance(rows, list):
+                raise VulcanFetchError(f"/api/Frekwencja {source} is not a list")
+            for entry in rows:
+                if not isinstance(entry, dict) or not {
+                    "data",
+                    "kategoriaFrekwencji",
+                    "opisZajec",
+                }.issubset(entry):
+                    raise VulcanFetchError(f"/api/Frekwencja {source} has invalid records")
+                entries.append(
+                    AttendanceEntry(
+                        lesson_number=entry.get("numerLekcji", 0),
+                        category=entry["kategoriaFrekwencji"],
+                        date=entry["data"],
+                        subject=entry["opisZajec"],
+                        teacher=entry.get("nauczyciel") or "",
+                        time_from=entry.get("godzinaOd") or "",
+                        time_to=entry.get("godzinaDo") or "",
+                        source=source,
+                    )
                 )
-            )
         return entries
 
     # ── Dashboard (Tablica) endpoints ────────────────────────────────
 
-    async def get_exams(self, student: Student) -> list[Exam]:
+    async def get_exams(
+        self, student: Student, date_from: str | None = None, date_to: str | None = None
+    ) -> list[Exam]:
+        if date_from is not None or date_to is not None:
+            items = await self._get_calendar_items(student, date_from, date_to, homework=False)
+            return [
+                Exam(item["id"], item["data"], item["przedmiotNazwa"], item["typ"])
+                for item in items
+            ]
         data = await self._request(f"/api/SprawdzianyTablica?key={student.key}")
         if not data:
             return []
@@ -507,35 +525,8 @@ class VulcanClient:
     ) -> list[Homework]:
         """Read the calendar when a window is supplied; dashboard callers keep their overview."""
         if date_from is not None or date_to is not None:
-            if date_from is None or date_to is None:
-                raise ValueError("Both homework date bounds are required")
-            endpoint = "/api/SprawdzianyZadaniaDomowe"
-            query = urlencode({"key": student.key, "dataOd": date_from, "dataDo": date_to})
-            data = await self._request(f"{endpoint}?{query}")
-            if not isinstance(data, list):
-                raise VulcanFetchError(f"{endpoint} response is not a list")
-            homework: dict[int, Homework] = {}
-            for item in data:
-                if not isinstance(item, dict) or type(item.get("typ")) is not int:
-                    raise VulcanFetchError(f"{endpoint} item has invalid type")
-                # Live calendar/detail responses identify homework as typ=4.
-                if item["typ"] != 4:
-                    continue
-                if (
-                    type(item.get("id")) is not int
-                    or not isinstance(item.get("data"), str)
-                    or not isinstance(item.get("przedmiotNazwa"), str)
-                ):
-                    raise VulcanFetchError(f"{endpoint} homework has invalid fields")
-                try:
-                    datetime.fromisoformat(item["data"])
-                except ValueError:
-                    raise VulcanFetchError(f"{endpoint} homework has invalid date") from None
-                hw = Homework(item["id"], item["data"], item["przedmiotNazwa"])
-                if hw.id in homework and homework[hw.id] != hw:
-                    raise VulcanFetchError(f"{endpoint} has conflicting homework IDs")
-                homework[hw.id] = hw
-            return list(homework.values())
+            items = await self._get_calendar_items(student, date_from, date_to, homework=True)
+            return [Homework(item["id"], item["data"], item["przedmiotNazwa"]) for item in items]
         data = await self._request(f"/api/ZadaniaDomoweTablica?key={student.key}")
         if not data:
             return []
@@ -547,6 +538,38 @@ class VulcanClient:
             )
             for h in data
         ]
+
+    async def _get_calendar_items(
+        self, student: Student, date_from: str | None, date_to: str | None, *, homework: bool
+    ) -> list[dict[str, Any]]:
+        """Read the module list, preserving exam type codes without guessing enums."""
+        if date_from is None or date_to is None:
+            raise ValueError("Both calendar date bounds are required")
+        endpoint = "/api/SprawdzianyZadaniaDomowe"
+        query = urlencode({"key": student.key, "dataOd": date_from, "dataDo": date_to})
+        data = await self._request(f"{endpoint}?{query}")
+        if not isinstance(data, list):
+            raise VulcanFetchError(f"{endpoint} response is not a list")
+        items: dict[int, dict[str, Any]] = {}
+        for item in data:
+            if not isinstance(item, dict) or type(item.get("typ")) is not int:
+                raise VulcanFetchError(f"{endpoint} item has invalid type")
+            if (item["typ"] == 4) != homework:
+                continue
+            if (
+                type(item.get("id")) is not int
+                or not isinstance(item.get("data"), str)
+                or not isinstance(item.get("przedmiotNazwa"), str)
+            ):
+                raise VulcanFetchError(f"{endpoint} item has invalid fields")
+            try:
+                datetime.fromisoformat(item["data"])
+            except ValueError:
+                raise VulcanFetchError(f"{endpoint} item has invalid date") from None
+            if item["id"] in items and items[item["id"]] != item:
+                raise VulcanFetchError(f"{endpoint} has conflicting IDs")
+            items[item["id"]] = item
+        return list(items.values())
 
     # ── Detail endpoints ────────────────────────────────────────────
 

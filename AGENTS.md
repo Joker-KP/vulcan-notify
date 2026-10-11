@@ -79,8 +79,8 @@ The list above describes product direction. Current implementation status is:
 | Students | Implemented | API discovery and per-student synchronization. |
 | Grades | Implemented | All returned classification periods; new grades and value changes. |
 | Classification periods and subject summaries | Implemented persistence | Period metadata, proposed/final grades and weighted-average settings; no separate change events. |
-| Attendance | Implemented | Configurable lookback; notifications for new non-present records only. |
-| Exams/tests/quizzes and homework | Implemented | Exams use the dashboard; homework uses the calendar with configurable 365-day lookback/lookahead and full detail JSON. New-item events; homework soft deletes are window-scoped. No update/delete events. |
+| Attendance | Implemented | Configurable lookback across classroom, other activities and childcare; notifications for new non-present records only. |
+| Exams/tests/quizzes and homework | Implemented | Exams and homework use the module calendar with configurable 365-day lookback/lookahead, refreshed detail JSON and details in new-item events. Soft deletes are window-scoped. No update/delete events. |
 | Messages | Implemented with bounded coverage | Unified inbox, latest 50 messages per sync; new-message content and bounded historical content backfill. No full inbox pagination. |
 | Lesson schedule and substitutions/cancellations/additions | Implemented with bounded coverage | Previous 7 days through next 14 days; change semantics are described in section 5. |
 | Remarks and praise | Implemented from recorded API contract | `/api/Uwagi`; per-student IDs, full content, independent category baseline, new-ID events, silent updates and soft deletes. Live behavior not verified during implementation. |
@@ -231,16 +231,34 @@ do not initialize it. Subsequent unseen IDs notify even with past school dates;
 missing tasks are soft-deleted only inside the successful UTC window. Default
 coverage is `SYNC_HOMEWORK_DAYS=365` back and `SYNC_HOMEWORK_FUTURE_DAYS=365` ahead,
 including today. Full original detail JSON persists in `homework.details`, retaining
-attachments, response text/comments and uninterpreted status codes. Details are
-cached after success; old/missing details backfill silently. HTTP/MQTT expose these
+attachments, response text/comments and uninterpreted status codes. Details of
+all returned tasks refresh on every sync; known-ID edits persist silently. Successful reads replace
+cleared values; failures retain prior details. HTTP/MQTT expose these
 fields, and notifications include available attachments and response text/comments.
 The calendar and detail endpoints were checked live for the October 9, 2026 task;
 populated attachment/link shapes and status meanings remain unverified.
 
+Exams additionally use `last_sync:{student.key}:exams_calendar` for a silent
+expanded-source baseline. `SYNC_EXAM_DAYS=365` / `SYNC_EXAM_FUTURE_DAYS=365`
+define full local-day bounds. Calendar types other than homework (`typ=4`) retain
+numeric exam codes without assuming additional enum meanings. Exam details refresh
+before diffing and persist as full JSON; teacher-only/empty-description data is
+retained. Missing exams soft-delete only within a successful window, including [].
+
+Full attendance reads all three collections from `/api/Frekwencja`. An automatic
+table migration preserves original rows and `first_seen`, adding `source` and
+`entry_key` to the primary key. Classroom rows keep empty `entry_key`; observed
+other-activity/childcare rows lack IDs/numbers and use JSON times/subject tuples.
+`last_sync:{student.key}:attendance_full` silently imports additional collections
+on upgrades while classroom alerts continue. The live audit found 101 classroom
+and 2 other-activity records. Live sync on a temporary DB copy preserved the
+101 historical rows, stored the additional entries and refreshed homework details
+on repeat without duplicate events. Populated exam data remains mock-tested only.
+
 | Category | Comparison identity | Events and limitations |
 | --- | --- | --- |
 | Grades | `column_id` within the student | `new` for an unknown column; `updated` only when `value` changes. Metadata changes do not emit events. |
-| Attendance | `(date, lesson_number)` within the student | `new` only for an unknown record with `category != 1`. Changes to an existing record's category do not emit events. |
+| Attendance | Classroom `(date, lesson_number)`; other activities add source and times/subject within the student | `new` only for an unknown record with `category != 1`. Changes to an existing record's category do not emit events. |
 | Exams and homework | Upstream numeric `id`, checked against the student's stored IDs | New-item events only. Missing items are soft-deleted after baseline; updates and soft deletes do not emit `Change` events. |
 | Remarks/praise | `(student_key, id)` | New-ID events only; content/metadata updates are persisted silently, missing items are soft-deleted, restoration does not re-notify. |
 | Completed lessons | `(student_key, id)` | New-ID and source-field update events; independent baseline, window-scoped soft deletes and silent restoration. No email events; optional stored-topic AI context. |
