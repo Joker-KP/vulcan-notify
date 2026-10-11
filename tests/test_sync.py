@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from vulcan_notify.client import VulcanFetchError
+from vulcan_notify.client import SessionExpiredError, VulcanFetchError
 from vulcan_notify.db import Database
 from vulcan_notify.models import (
     AttendanceEntry,
@@ -18,7 +18,7 @@ from vulcan_notify.models import (
     Message,
     Student,
 )
-from vulcan_notify.sync import sync_all, sync_messages, sync_student
+from vulcan_notify.sync import SyncSessionExpiredError, sync_all, sync_messages, sync_student
 
 STUDENT_A = Student(
     key="KEYA",
@@ -128,6 +128,183 @@ async def test_new_grade_detected_on_second_sync(db: Database) -> None:
     assert len(result.new_grades) == 1
     assert result.new_grades[0].change_type == "new"
     assert "5" in result.new_grades[0].title
+
+
+async def test_homework_details_reach_notifications_and_storage(db: Database) -> None:
+    from vulcan_notify.config import Settings
+    from vulcan_notify.email_digest import render_summary
+    from vulcan_notify.mqtt import build_payload
+    from vulcan_notify.sync import FullSyncResult
+
+    await sync_student(_make_mock_client(), db, STUDENT_A)
+    client = _make_mock_client(homework=[replace(HOMEWORK)])
+    links = ["https://example.org/material", {"label": "Ćwiczenia", "url": "https://example.org/1"}]
+    client.get_homework_detail.return_value = {
+        "opis": '<p>Przeczytaj rozdział.</p><a href="https://example.org/2">Lektura</a>',
+        "nauczycielImieNazwisko": "Anna Nowak",
+        "linki": links,
+        "odpowiedzWymagana": True,
+        "terminOdpowiedzi": "2026-03-16T18:30:00+01:00",
+    }
+    result = await sync_student(client, db, STUDENT_A)
+    change = result.new_homework[0]
+    payload = build_payload(change)
+    _, plain, html, count = render_summary(
+        FullSyncResult([result]), Settings(_env_file=None, tz="Europe/Warsaw")
+    )
+    assert count == 1
+    for output in (change.body, plain, html):
+        assert "Przeczytaj rozdział." in output
+        assert "Anna Nowak" in output
+        assert "https://example.org/1" in output
+        assert "https://example.org/2" in output
+        assert "Odpowiedź wymagana: Tak" in output
+        assert "Termin odpowiedzi:" in output
+    assert "2026-03-16 18:30" in plain
+    assert payload["links"] == links
+    assert payload["response_required"] is True
+    assert payload["response_deadline"] == "2026-03-16T18:30:00+01:00"
+    row = (await db.get_homework_for_student(STUDENT_A.key))[0]
+    for field in (
+        "content",
+        "teacher",
+        "links",
+        "response_required",
+        "response_deadline",
+        "details",
+    ):
+        assert row[field] == payload[field]
+    assert await db.get_homework_for_student(STUDENT_B.key) == []
+
+    # The list omits detail fields; a restart must retain them without re-notifying.
+    await db.close()
+    await db.connect()
+    client = _make_mock_client(homework=[replace(HOMEWORK)])
+    repeated = await sync_student(client, db, STUDENT_A)
+    assert repeated.new_homework == []
+    client.get_homework_detail.assert_not_awaited()
+    assert (await db.get_homework_for_student(STUDENT_A.key))[0] == row
+
+
+@pytest.mark.parametrize("initial", [True, False])
+async def test_homework_detail_backfill_is_silent_and_accepts_empty_description(db, initial):
+    if not initial:
+        await sync_student(_make_mock_client(), db, STUDENT_A)
+        # Simulate a task persisted by a previous version, already containing an empty description.
+        await db.upsert_homework(STUDENT_A.key, replace(HOMEWORK, content=""))
+        await db.commit()
+    client = _make_mock_client(homework=[replace(HOMEWORK)])
+    client.get_homework_detail.return_value = {
+        "opis": "",
+        "nauczycielImieNazwisko": "Anna Nowak",
+        "linki": [],
+        "odpowiedzWymagana": False,
+    }
+    result = await sync_student(client, db, STUDENT_A)
+    assert result.new_homework == []
+    row = (await db.get_homework_for_student(STUDENT_A.key))[0]
+    assert row["content"] == ""
+    assert row["teacher"] == "Anna Nowak"
+    assert row["response_required"] is False
+    assert row["links"] == []
+    assert row["response_deadline"] is None
+    assert await db.get_homework_missing_detail(STUDENT_A.key) == set()
+
+
+async def test_homework_detail_failure_retries_without_duplicate_notification(db):
+    await sync_student(_make_mock_client(), db, STUDENT_A)
+    client = _make_mock_client(homework=[replace(HOMEWORK)])
+    client.get_homework_detail.side_effect = VulcanFetchError("Synthetic detail failure")
+    result = await sync_student(client, db, STUDENT_A)
+    assert len(result.new_homework) == 1
+    assert result.failed_sections == {}
+    assert await db.get_homework_missing_detail(STUDENT_A.key) == {HOMEWORK.id}
+    client.get_homework_detail.side_effect = None
+    client.get_homework_detail.return_value = {"opis": "Uzupełniony opis", "linki": []}
+    result = await sync_student(client, db, STUDENT_A)
+    assert result.new_homework == []
+    assert (await db.get_homework_for_student(STUDENT_A.key))[0]["content"] == "Uzupełniony opis"
+    assert await db.get_homework_missing_detail(STUDENT_A.key) == set()
+
+
+async def test_homework_detail_expiry_does_not_consume_new_task(db):
+    await sync_student(_make_mock_client(), db, STUDENT_A)
+    client = _make_mock_client(homework=[replace(HOMEWORK)])
+    client.get_homework_detail.side_effect = SessionExpiredError("Synthetic expiry")
+    with pytest.raises(SyncSessionExpiredError):
+        await sync_student(client, db, STUDENT_A)
+    assert await db.get_homework_ids_for_student(STUDENT_A.key) == set()
+    client.get_homework_detail.side_effect = None
+    client.get_homework_detail.return_value = {"opis": "Opis po odzyskaniu sesji"}
+    result = await sync_student(client, db, STUDENT_A)
+    assert len(result.new_homework) == 1
+    assert "Opis po odzyskaniu sesji" in result.new_homework[0].body
+
+
+async def test_homework_calendar_upgrade_imports_history_then_notifies_new_ids(db):
+    # An installation that previously used the empty dashboard already has its old baseline.
+    await db.upsert_student(STUDENT_A)
+    await db.set_state("last_sync:KEYA", "2026-10-08T17:00:00Z")
+    await db.set_state("last_sync:KEYA:homework", "2026-10-08T17:00:00Z")
+    old = replace(HOMEWORK, date="2026-10-09T00:00:00+02:00")
+    client = _make_mock_client(homework=[old])
+    client.get_homework_detail.return_value = {"opis": "History task", "zalaczniki": []}
+    result = await sync_student(client, db, STUDENT_A)
+    assert not result.is_first_sync
+    assert result.new_homework == []
+    assert (await db.get_homework_for_student(STUDENT_A.key))[0]["content"] == "History task"
+    assert await db.get_state("last_sync:KEYA:homework_calendar") is not None
+    await db.close()
+    await db.connect()
+    new = replace(old, id=old.id + 1)
+    client = _make_mock_client(homework=[replace(old), new])
+    client.get_homework_detail.return_value = {"opis": "New task"}
+    result = await sync_student(client, db, STUDENT_A)
+    assert [change.raw.id for change in result.new_homework] == [new.id]
+    assert "New task" in result.new_homework[0].body
+    assert (await sync_student(client, db, STUDENT_A)).new_homework == []
+
+
+async def test_homework_calendar_failure_keeps_baseline_uninitialized_and_history(db):
+    await db.upsert_student(STUDENT_A)
+    await db.set_state("last_sync:KEYA", "2026-10-08T17:00:00Z")
+    await db.upsert_homework(STUDENT_A.key, replace(HOMEWORK))
+    client = _make_mock_client()
+    client.get_homework.side_effect = VulcanFetchError("Synthetic calendar failure")
+    result = await sync_student(client, db, STUDENT_A)
+    assert "homework" in result.failed_sections
+    assert await db.get_state("last_sync:KEYA:homework_calendar") is None
+    assert len(await db.get_homework_for_student(STUDENT_A.key)) == 1
+    client.get_homework.side_effect = None
+    client.get_homework.return_value = [replace(HOMEWORK, id=HOMEWORK.id + 1)]
+    assert (await sync_student(client, db, STUDENT_A)).new_homework == []
+
+
+async def test_homework_uses_configured_local_days_across_dst(db, monkeypatch):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from vulcan_notify import sync
+    from vulcan_notify.config import Settings
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 10, 25, 12, tzinfo=ZoneInfo("Europe/Warsaw")).astimezone(tz)
+
+    monkeypatch.setattr(sync, "datetime", Clock)
+    monkeypatch.setattr(
+        sync,
+        "settings",
+        Settings(
+            _env_file=None, sync_homework_days=1, sync_homework_future_days=1, tz="Europe/Warsaw"
+        ),
+    )
+    client = _make_mock_client()
+    await sync_student(client, db, STUDENT_A)
+    client.get_homework.assert_awaited_once_with(
+        STUDENT_A, "2026-10-23T22:00:00.000Z", "2026-10-26T22:59:59.999Z"
+    )
 
 
 async def test_changed_grade_detected(db: Database) -> None:

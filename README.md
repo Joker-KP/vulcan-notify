@@ -23,6 +23,13 @@ Solves the problem of eduVulcan paywalling push notifications behind a subscript
 
 Supports multiple students under one parent account.
 
+Homework comes from the date-windowed school calendar, including past tasks,
+with 365 days back and 365 days ahead by default. Notifications include available
+descriptions, teachers, links, response requirements/deadlines, attachments and
+response comments. Full upstream details are stored locally and exposed via HTTP
+and MQTT. Upgrading from dashboard-only sync imports the expanded history silently
+once; subsequent new tasks notify. See [email behavior](docs/email.md).
+
 ## What it exposes
 
 - **Terminal output** - colored when interactive, plain when piped
@@ -284,6 +291,8 @@ Python settings load `.env`; Compose exports it to the containers. Direct auth/A
 | `SYNC_COMPLETED_LESSONS_DAYS` | `90` | How many days back to sync completed lessons, plus today; no email notifications |
 | `SYNC_MESSAGE_BACKFILL_BATCH` | `10` | Legacy messages to refetch bodies for, per run |
 | `POLL_INTERVAL` | `1800` | Seconds between polls when run as a service |
+| `SYNC_HOMEWORK_DAYS` | `365` | Homework calendar lookback in full local days, plus today |
+| `SYNC_HOMEWORK_FUTURE_DAYS` | `365` | Homework calendar lookahead in full local days |
 | `QUIET_HOURS_START` | `0` | Hour (0-23) to start quiet window, sync paused |
 | `QUIET_HOURS_END` | `5` | Hour (0-23) to end quiet window, sync resumes |
 | `TZ` | `Europe/Warsaw` | Shared runtime, log, scheduling and display timezone; `QUIET_HOURS_TZ` is a legacy fallback |

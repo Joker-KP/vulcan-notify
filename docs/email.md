@@ -18,6 +18,39 @@ Completed lessons (`RealizacjaZajec13`, `status=1`) do not trigger email
 notifications or form digest groups, subjects or counts. Their stored topics can
 optionally provide historical context for the AI summary, as described below.
 
+Homework notifications include the available description, teacher, resource links,
+response requirement and response deadline (with local time when provided).
+Descriptions retain sanitized paragraphs, lists and hyperlinks; visible URLs and
+resource links are clickable, and the plain-text alternative retains their URLs.
+These details do not depend on `EMAIL_INCLUDE_MESSAGE_BODIES` or AI.
+The sync enriches each new task before creating its change event, so MQTT also
+receives the details in `message` and in `content`, `teacher`, `links`,
+`response_required`, `response_deadline` and the complete original `details` JSON.
+Available attachment labels/links, student response text and teacher comments also
+appear in the email and MQTT message. Numeric upstream status codes remain stored
+without inventing their meanings. Unknown response requirements are
+omitted rather than shown as false; deadlines are shown only for required responses.
+Populated upstream link item shapes are unverified: raw JSON is stored unchanged,
+and link labels/values are rendered without assuming specific object keys.
+
+Homework sync reads `/api/SprawdzianyZadaniaDomowe` with a date window rather than
+relying on the upcoming-only dashboard. `SYNC_HOMEWORK_DAYS=365` and
+`SYNC_HOMEWORK_FUTURE_DAYS=365` define full local days before/after today.
+The first successful calendar read per student initializes
+`last_sync:<student>:homework_calendar`, including empty results. Existing
+installations import the expanded history silently once; subsequent unknown IDs
+notify even when their school date is already past. This preserves first-sync
+suppression and does not repeat an alert for restored known IDs. Missing records
+are soft-deleted only inside the successfully fetched interval; rolled-out history
+remains stored. Fetch/parse failures do not initialize the marker or delete tasks.
+
+Database migration is automatic and preserves existing tasks and calendar UIDs.
+Older tasks have their full details fetched again once, silently, without another
+notification. Successful detail responses are cached independently of an empty
+description. Failed detail fetches retain a basic notification and retry on later
+syncs; subsequent detail backfill does not send another notification. Already
+queued emails retain their original content when retried.
+
 ### Choosing digest groups
 
 `EMAIL_DIGEST_GROUPS` is a JSON object of individual on/off switches. Omitted keys
@@ -56,8 +89,8 @@ HTML group templates live in `src/vulcan_notify/email_templates/`: `grade.html`,
 and `$content` for the surrounding card, background and typography.
 Templates use Python's `string.Template` (write `$$` for a literal dollar sign).
 Category-specific item content is prepared in `email_digest.py`; upstream text
-is escaped before entering HTML. Inline styles work in email clients without
-loading external stylesheets. Restart/rebuild after editing bundled templates.
+is escaped or locally sanitized before entering HTML. Inline styles work in email
+clients without loading external stylesheets. Restart/rebuild after editing bundled templates.
 The plain-text MIME alternative is generated from the same HTML, so it does not
 require a second set of templates.
 

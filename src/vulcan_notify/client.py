@@ -7,7 +7,7 @@ import logging
 import random
 from datetime import datetime
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 import aiohttp
 
@@ -502,7 +502,40 @@ class VulcanClient:
             for e in data
         ]
 
-    async def get_homework(self, student: Student) -> list[Homework]:
+    async def get_homework(
+        self, student: Student, date_from: str | None = None, date_to: str | None = None
+    ) -> list[Homework]:
+        """Read the calendar when a window is supplied; dashboard callers keep their overview."""
+        if date_from is not None or date_to is not None:
+            if date_from is None or date_to is None:
+                raise ValueError("Both homework date bounds are required")
+            endpoint = "/api/SprawdzianyZadaniaDomowe"
+            query = urlencode({"key": student.key, "dataOd": date_from, "dataDo": date_to})
+            data = await self._request(f"{endpoint}?{query}")
+            if not isinstance(data, list):
+                raise VulcanFetchError(f"{endpoint} response is not a list")
+            homework: dict[int, Homework] = {}
+            for item in data:
+                if not isinstance(item, dict) or type(item.get("typ")) is not int:
+                    raise VulcanFetchError(f"{endpoint} item has invalid type")
+                # Live calendar/detail responses identify homework as typ=4.
+                if item["typ"] != 4:
+                    continue
+                if (
+                    type(item.get("id")) is not int
+                    or not isinstance(item.get("data"), str)
+                    or not isinstance(item.get("przedmiotNazwa"), str)
+                ):
+                    raise VulcanFetchError(f"{endpoint} homework has invalid fields")
+                try:
+                    datetime.fromisoformat(item["data"])
+                except ValueError:
+                    raise VulcanFetchError(f"{endpoint} homework has invalid date") from None
+                hw = Homework(item["id"], item["data"], item["przedmiotNazwa"])
+                if hw.id in homework and homework[hw.id] != hw:
+                    raise VulcanFetchError(f"{endpoint} has conflicting homework IDs")
+                homework[hw.id] = hw
+            return list(homework.values())
         data = await self._request(f"/api/ZadaniaDomoweTablica?key={student.key}")
         if not data:
             return []

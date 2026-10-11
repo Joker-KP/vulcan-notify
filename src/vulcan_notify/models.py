@@ -84,8 +84,12 @@ class Homework:
     id: int
     date: str  # data (ISO 8601)
     subject: str  # przedmiot
-    content: str | None = None  # tresc (from detail endpoint)
+    content: str | None = None  # opis (from detail endpoint)
     teacher: str | None = None  # nauczyciel
+    links: list[object] | None = None  # linki; populated item shapes are unverified
+    response_required: bool | None = None  # odpowiedzWymagana
+    response_deadline: str | None = None  # terminOdpowiedzi
+    details: dict[str, object] | None = None  # original detail response, including response/files
 
 
 @dataclass

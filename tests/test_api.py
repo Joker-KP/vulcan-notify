@@ -794,3 +794,36 @@ async def test_homework_order_is_chronological_across_months_and_years(seeded_db
     assert [item["subject"] for item in api_mod._get_homework(10)["Solomiia"]["homework"]] == dates[
         ::-1
     ]
+
+
+async def test_homework_api_exposes_persisted_details(seeded_db):
+    from vulcan_notify.models import Homework
+
+    raw = {"opis": "Opis", "zalaczniki": [{"id": 10}], "odpowiedz": {"status": 1}}
+    database = Database(seeded_db)
+    await database.connect()
+    try:
+        await database.upsert_homework(
+            "S1",
+            Homework(
+                1,
+                "2026-10-09",
+                "Math",
+                "Opis",
+                "Test Teacher",
+                links=["https://example.org/1"],
+                response_required=False,
+                response_deadline="2026-10-09",
+                details=raw,
+            ),
+            detail_fetched=True,
+        )
+        await database.commit()
+    finally:
+        await database.close()
+    item = api_mod._get_homework(1)["Solomiia"]["homework"][0]
+    assert item["id"] == 1 and item["teacher"] == "Test Teacher"
+    assert item["response_required"] is False
+    assert item["response_deadline"] == "2026-10-09"
+    assert item["links"] == ["https://example.org/1"]
+    assert item["details"] == raw

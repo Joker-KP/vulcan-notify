@@ -716,13 +716,19 @@ def _get_homework(
         for s in (selected := _select_students(db, student_filter, student_key, keyed)):
             items = []
             for h in db.execute(
-                "SELECT date, subject, content "
+                "SELECT id, date, subject, content, teacher, links, response_required, "
+                "response_deadline, details "
                 "FROM homework WHERE student_key = ? AND deleted_at IS NULL "
                 "ORDER BY date DESC, id DESC "
                 "LIMIT ?",
                 (s["key"], n),
             ):
-                items.append(dict(h))
+                item = dict(h)
+                for field in ("links", "details"):
+                    item[field] = json.loads(item[field]) if item[field] is not None else None
+                if item["response_required"] is not None:
+                    item["response_required"] = bool(item["response_required"])
+                items.append(item)
             students[s["response_key"]] = {
                 "class": s["class_name"],
                 "homework": items,

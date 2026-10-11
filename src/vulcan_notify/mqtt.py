@@ -129,6 +129,10 @@ def build_payload(change: Change) -> dict[str, object]:
             date=raw.date,
             content=raw.content,
             teacher=raw.teacher,
+            links=raw.links,
+            response_required=raw.response_required,
+            response_deadline=raw.response_deadline,
+            details=raw.details,
         )
 
     elif isinstance(raw, Lesson):

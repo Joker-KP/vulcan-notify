@@ -128,6 +128,11 @@ CREATE TABLE IF NOT EXISTS homework (
     subject TEXT NOT NULL,
     content TEXT,
     teacher TEXT,
+    links TEXT,
+    response_required INTEGER,
+    response_deadline TEXT,
+    detail_fetched_at TIMESTAMP,
+    details TEXT,
     first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     deleted_at TIMESTAMP,
@@ -355,6 +360,11 @@ class Database:
             for col, col_type in [
                 ("content", "TEXT"),
                 ("teacher", "TEXT"),
+                ("links", "TEXT"),
+                ("response_required", "INTEGER"),
+                ("response_deadline", "TEXT"),
+                ("detail_fetched_at", "TIMESTAMP"),
+                ("details", "TEXT"),
                 ("last_seen", "TIMESTAMP"),
                 ("deleted_at", "TIMESTAMP"),
                 ("calendar_uid", "TEXT"),
@@ -644,16 +654,36 @@ class Database:
 
     # ── Homework ─────────────────────────────────────────────────────
 
-    async def upsert_homework(self, student_key: str, hw: Homework) -> None:
+    async def upsert_homework(
+        self, student_key: str, hw: Homework, *, detail_fetched: bool = False
+    ) -> None:
         await self.db.execute(
-            "INSERT INTO homework (id, student_key, date, subject, content, teacher) "
-            "VALUES (?, ?, ?, ?, ?, ?) "
+            "INSERT INTO homework (id, student_key, date, subject, content, teacher, "
+            "links, response_required, response_deadline, detail_fetched_at, details) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? THEN CURRENT_TIMESTAMP END, ?) "
             "ON CONFLICT(id) DO UPDATE SET "
             "date=excluded.date, subject=excluded.subject, "
             "content=COALESCE(excluded.content, homework.content), "
             "teacher=COALESCE(excluded.teacher, homework.teacher), "
+            "links=COALESCE(excluded.links, homework.links), "
+            "response_required=COALESCE(excluded.response_required, homework.response_required), "
+            "response_deadline=COALESCE(excluded.response_deadline, homework.response_deadline), "
+            "detail_fetched_at=COALESCE(excluded.detail_fetched_at, homework.detail_fetched_at), "
+            "details=COALESCE(excluded.details, homework.details), "
             "last_seen=CURRENT_TIMESTAMP, deleted_at=NULL",
-            (hw.id, student_key, hw.date, hw.subject, hw.content, hw.teacher),
+            (
+                hw.id,
+                student_key,
+                hw.date,
+                hw.subject,
+                hw.content,
+                hw.teacher,
+                json.dumps(hw.links, ensure_ascii=False) if hw.links is not None else None,
+                hw.response_required,
+                hw.response_deadline,
+                detail_fetched,
+                json.dumps(hw.details, ensure_ascii=False) if hw.details is not None else None,
+            ),
         )
 
     async def update_homework_content(
@@ -673,14 +703,16 @@ class Database:
 
     async def get_homework_missing_detail(self, student_key: str) -> set[int]:
         cursor = await self.db.execute(
-            "SELECT id FROM homework WHERE student_key = ? AND content IS NULL",
+            "SELECT id FROM homework WHERE student_key = ? "
+            "AND (detail_fetched_at IS NULL OR details IS NULL)",
             (student_key,),
         )
         return {row[0] for row in await cursor.fetchall()}
 
     async def get_homework_for_student(self, student_key: str) -> list[dict[str, object]]:
         cursor = await self.db.execute(
-            "SELECT id, date, subject, content, teacher "
+            "SELECT id, date, subject, content, teacher, links, "
+            "response_required, response_deadline, details "
             "FROM homework WHERE student_key = ? AND deleted_at IS NULL "
             "ORDER BY date DESC",
             (student_key,),
@@ -693,6 +725,10 @@ class Database:
                 "subject": r[2],
                 "content": r[3],
                 "teacher": r[4],
+                "links": json.loads(r[5]) if r[5] is not None else None,
+                "response_required": bool(r[6]) if r[6] is not None else None,
+                "response_deadline": r[7],
+                "details": json.loads(r[8]) if r[8] is not None else None,
             }
             for r in rows
         ]
@@ -1214,6 +1250,22 @@ class Database:
             f"WHERE student_key = ? AND deleted_at IS NULL AND id NOT IN ({placeholders})",
             (student_key, *current_ids),
         )
+        return cursor.rowcount
+
+    async def mark_missing_homework_in_window(
+        self, student_key: str, current_ids: set[int], date_from: str, date_to: str
+    ) -> int:
+        """Only a successfully fetched interval can retire tasks, including an empty result."""
+        query = (
+            "UPDATE homework SET deleted_at = CURRENT_TIMESTAMP "
+            "WHERE student_key = ? AND deleted_at IS NULL "
+            "AND julianday(date) BETWEEN julianday(?) AND julianday(?)"
+        )
+        params: list[object] = [student_key, date_from, date_to]
+        if current_ids:
+            query += f" AND id NOT IN ({','.join('?' for _ in current_ids)})"
+            params.extend(sorted(current_ids))
+        cursor = await self.db.execute(query, params)
         return cursor.rowcount
 
     # ── Calendar sync ────────────────────────────────────────────────

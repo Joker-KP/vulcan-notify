@@ -10,6 +10,15 @@ from urllib.parse import urlsplit
 import nh3
 
 
+def homework_link_text(link: object) -> str:
+    """Keep link labels/URLs without assuming an unverified upstream object schema."""
+    if isinstance(link, dict):
+        return " · ".join(homework_link_text(value) for value in link.values() if value is not None)
+    if isinstance(link, list):
+        return " · ".join(homework_link_text(value) for value in link if value is not None)
+    return str(link) if link is not None else ""
+
+
 def strip_html(html: str) -> str:
     """Minimal HTML-to-text: strip tags, decode common entities, collapse whitespace."""
     text = re.sub(r"<br\s*/?>", "\n", html)

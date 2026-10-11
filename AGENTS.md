@@ -80,7 +80,7 @@ The list above describes product direction. Current implementation status is:
 | Grades | Implemented | All returned classification periods; new grades and value changes. |
 | Classification periods and subject summaries | Implemented persistence | Period metadata, proposed/final grades and weighted-average settings; no separate change events. |
 | Attendance | Implemented | Configurable lookback; notifications for new non-present records only. |
-| Exams/tests/quizzes and homework | Implemented | Lists and detail backfill; new-item events and soft deletes. No update/delete events. |
+| Exams/tests/quizzes and homework | Implemented | Exams use the dashboard; homework uses the calendar with configurable 365-day lookback/lookahead and full detail JSON. New-item events; homework soft deletes are window-scoped. No update/delete events. |
 | Messages | Implemented with bounded coverage | Unified inbox, latest 50 messages per sync; new-message content and bounded historical content backfill. No full inbox pagination. |
 | Lesson schedule and substitutions/cancellations/additions | Implemented with bounded coverage | Previous 7 days through next 14 days; change semantics are described in section 5. |
 | Remarks and praise | Implemented from recorded API contract | `/api/Uwagi`; per-student IDs, full content, independent category baseline, new-ID events, silent updates and soft deletes. Live behavior not verified during implementation. |
@@ -224,6 +224,19 @@ retries reuse them without AI. This does not add lesson sync email events.
 
 ### Current change semantics
 
+Homework additionally uses `last_sync:{student.key}:homework_calendar` after its
+first successful calendar fetch and persistence, including empty lists. This
+silently imports expanded history on upgrades from dashboard-only sync. Failures
+do not initialize it. Subsequent unseen IDs notify even with past school dates;
+missing tasks are soft-deleted only inside the successful UTC window. Default
+coverage is `SYNC_HOMEWORK_DAYS=365` back and `SYNC_HOMEWORK_FUTURE_DAYS=365` ahead,
+including today. Full original detail JSON persists in `homework.details`, retaining
+attachments, response text/comments and uninterpreted status codes. Details are
+cached after success; old/missing details backfill silently. HTTP/MQTT expose these
+fields, and notifications include available attachments and response text/comments.
+The calendar and detail endpoints were checked live for the October 9, 2026 task;
+populated attachment/link shapes and status meanings remain unverified.
+
 | Category | Comparison identity | Events and limitations |
 | --- | --- | --- |
 | Grades | `column_id` within the student | `new` for an unknown column; `updated` only when `value` changes. Metadata changes do not emit events. |
@@ -291,6 +304,15 @@ With message bodies enabled, HTML preserves original paragraphs, breaks, lists, 
 Digest delivery is tracked per sync-run/recipient; individual messages use upstream message identity/recipient to deduplicate across runs. Notifications have a text link and HTML inbox button, using `Message.mailbox_url` from the client's authenticated tenant. The link opens the unified received-message inbox. Both MIME alternatives persist in the outbox, and migration adds nullable `html_body` without altering old queued content. Retries reuse the stored bodies and Message-ID without repeating AI. Successful records clear private envelope/body fields and retain deduplication metadata. SMTP errors retain queued messages without blocking other outputs. Syncs drain the queue, and explicit `email-retry` works without upstream authentication. Quiet-hour MQTT heartbeat does not drain email. Previously queued combined digests retain their original content.
 
 Entity persistence and email enqueue have separate commits; a crash in between can lose an unqueued notification. Ambiguous SMTP acceptance can cause duplicate delivery. Do not claim exactly-once or guaranteed inbox delivery. Use a single sync/delivery owner. See `docs/email.md` for settings and behavior.
+
+Homework models are enriched before diffing: descriptions, teachers, raw link JSON,
+response requirements and response deadlines reach email and MQTT notifications.
+Email descriptions use the existing local HTML sanitizer and retain clickable
+links; MQTT `message` also includes readable details. SQLite adds nullable
+`links`, `response_required`, `response_deadline` and `detail_fetched_at` columns
+automatically, preserving history/calendar UIDs. Existing tasks backfill silently;
+empty descriptions count as successfully fetched and detail failures retry without
+re-notifying. Populated upstream link item shapes remain unverified live.
 
 ### MQTT
 
@@ -769,6 +791,8 @@ Direct environment readers do not load `.env` themselves. Compose uses `env_file
 | `DB_PATH` | `Settings` | `vulcan_notify.db`; Compose sets `/app/data/vulcan_notify.db`. |
 | `VULCAN_LOGIN`, `VULCAN_PASSWORD` | `Settings` | Unset; optional credential login with macOS Keychain fallback. |
 | `SYNC_ATTENDANCE_DAYS` | `Settings` | `90`. |
+| `SYNC_HOMEWORK_DAYS` | `Settings` | `365`; full calendar lookback days plus today. |
+| `SYNC_HOMEWORK_FUTURE_DAYS` | `Settings` | `365`; full calendar lookahead days. |
 | `SYNC_COMPLETED_LESSONS_DAYS` | `Settings` | `90`; completed lessons lookback plus today, no email notifications. |
 | `SYNC_MESSAGE_BACKFILL_BATCH` | `Settings` | `10`. |
 | `MQTT_ENABLED` | `Settings` | `false`. |

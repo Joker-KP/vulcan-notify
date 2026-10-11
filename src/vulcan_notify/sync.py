@@ -279,38 +279,58 @@ async def sync_student(
 
     # ── Homework ─────────────────────────────────────────────────
     try:
-        homework = await client.get_homework(student)
+        now = datetime.now(settings.timezone)
+        date_from, date_to = _api_date_window(
+            now, settings.sync_homework_days, settings.sync_homework_future_days
+        )
+        homework = await client.get_homework(student, date_from, date_to)
+        calendar_baseline = f"last_sync:{student.key}:homework_calendar"
+        first_homework = first_sections["homework"] or await db.get_state(calendar_baseline) is None
         stored_hw_ids = await db.get_homework_ids_for_student(student.key)
 
-        if not first_sections["homework"]:
-            result.new_homework = await diff_homework(student, homework, db)
-
-        for hw in homework:
-            await db.upsert_homework(student.key, hw)
-
-        # Fetch detail for new homework or homework missing content
+        # Enrich the models before diffing so every output sees the same details.
         missing_detail = await db.get_homework_missing_detail(student.key)
+        detailed_ids: set[int] = set()
         for hw in homework:
             if hw.id not in stored_hw_ids or hw.id in missing_detail:
                 try:
                     detail = await client.get_homework_detail(student, hw.id)
                     if detail:
-                        content = detail.get("opis", "")
-                        teacher = detail.get("nauczycielImieNazwisko", "")
-                        if content:
-                            await db.update_homework_content(
-                                hw.id, str(content), str(teacher) if teacher else None
-                            )
+                        hw.details = detail
+                        for field, source in (
+                            ("content", "opis"),
+                            ("teacher", "nauczycielImieNazwisko"),
+                            ("response_deadline", "terminOdpowiedzi"),
+                        ):
+                            value = detail.get(source)
+                            if isinstance(value, str):
+                                setattr(hw, field, value)
+                        links = detail.get("linki")
+                        if isinstance(links, list):
+                            hw.links = links
+                        required = detail.get("odpowiedzWymagana")
+                        if isinstance(required, bool):
+                            hw.response_required = required
+                        detailed_ids.add(hw.id)
                 except SessionExpiredError:
                     raise
                 except Exception:
                     logger.debug("Failed to fetch homework detail for %d", hw.id)
 
+        if not first_homework:
+            result.new_homework = await diff_homework(student, homework, db)
+
+        for hw in homework:
+            await db.upsert_homework(student.key, hw, detail_fetched=hw.id in detailed_ids)
+
         # Mark homework no longer returned by API as soft-deleted
-        if not first_sections["homework"]:
-            deleted = await db.mark_missing(student.key, "homework", {h.id for h in homework})
+        if not first_homework:
+            deleted = await db.mark_missing_homework_in_window(
+                student.key, {h.id for h in homework}, date_from, date_to
+            )
             if deleted:
                 logger.info("Soft-deleted %d homework for %s", deleted, student.name)
+        await db.set_state(calendar_baseline, datetime.now(UTC).isoformat())
         await section_ok("homework", len(homework))
     except Exception as exc:
         await section_failed("homework", exc)

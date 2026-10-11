@@ -223,6 +223,18 @@ Upcoming homework.
 
 Homework detail. Returns description, teacher, attachments, and student response status.
 
+Synchronization enriches `Homework` before detecting new-ID changes using `opis`,
+`nauczycielImieNazwisko`, `linki`, `odpowiedzWymagana` and `terminOdpowiedzi`.
+Email and MQTT notifications include these available details. `linki` is retained
+as raw JSON; populated item shapes are not confirmed by the recorded empty array.
+The database automatically adds these fields and a successful-detail timestamp;
+existing tasks are backfilled silently. Empty descriptions count as fetched,
+while detail failures remain eligible for retry. The entire detail response is
+stored as `details` JSON and exposed through MQTT and the local homework API.
+Notifications also include available attachment labels/links, response text and
+teacher comments. Populated attachment item shapes and numeric status meanings
+remain unverified; no status labels are inferred.
+
 ```json
 {
   "typ": 4,
@@ -251,6 +263,24 @@ Homework detail. Returns description, teacher, attachments, and student response
 ### GET /api/SprawdzianyZadaniaDomowe?key={key}&dataOd={from}&dataDo={to}
 
 Calendar view combining both exams and homework. Used by the "Sprawdziany i zadania domowe" page.
+
+Homework synchronization uses this endpoint with configurable full local-day
+lookback/lookahead (`SYNC_HOMEWORK_DAYS=365`, `SYNC_HOMEWORK_FUTURE_DAYS=365`),
+serialized as UTC. A live session check confirmed a homework entry dated October
+9, 2026 here while `/api/ZadaniaDomoweTablica` returned an empty list. The observed
+homework list item shape is:
+
+```json
+{"typ": 4, "przedmiotNazwa": "Example subject", "data": "2026-10-09T00:00:00+02:00", "hasAttachment": false, "id": 1}
+```
+
+This example uses a synthetic ID/subject. `typ=4` identifies homework; other item
+types remain outside homework synchronization. Invalid/malformed homework items
+fail the section instead of being interpreted as an empty list. The initial
+calendar-source read baselines expanded history silently, independently of the
+existing dashboard-source marker; later unknown IDs notify. Missing tasks are
+soft-deleted only within the successfully fetched window. The dashboard overview
+still uses the original upcoming-only endpoint.
 
 ### GET /api/WiadomosciNieodczytane
 

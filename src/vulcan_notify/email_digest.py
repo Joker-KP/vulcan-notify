@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 from vulcan_notify.client import STUDENT_PAGE_PATHS
 from vulcan_notify.email_rendering import render_email, render_template
 from vulcan_notify.models import AttendanceEntry, Exam, Grade, Homework, Lesson
-from vulcan_notify.text import message_text, strip_html
+from vulcan_notify.text import homework_link_text, message_html, message_text, strip_html
 from vulcan_notify.time_utils import as_utc
 
 if TYPE_CHECKING:
@@ -50,14 +50,14 @@ def _grade_value(value: str) -> str:
     return f'<span style="color:{colors[int(match[1]) - 1]}">{text}</span>'
 
 
-def _date(value: str, config: Settings) -> str:
+def _date(value: str, config: Settings, *, include_time: bool = False) -> str:
     """Keep school dates as dates; convert instants using the display timezone."""
     try:
         if "T" in value or " " in value:
             return (
                 as_utc(datetime.fromisoformat(value))
                 .astimezone(config.timezone)
-                .strftime("%Y-%m-%d")
+                .strftime("%Y-%m-%d %H:%M" if include_time else "%Y-%m-%d")
             )
         return datetime.strptime(value, "%d.%m.%Y").strftime("%Y-%m-%d")
     except ValueError:
@@ -69,6 +69,7 @@ def _item(change: Change, config: Settings) -> str:
     raw = change.raw
     title = change.title
     title_html = None
+    content_html = ""
     details: list[str] = [change.body] if change.body else []
     if isinstance(raw, Grade):
         value = _grade_value(raw.value)
@@ -89,9 +90,40 @@ def _item(change: Change, config: Settings) -> str:
             details.append(f"Nauczyciel: {raw.teacher}")
     elif isinstance(raw, Homework):
         title = raw.subject
-        details = [raw.content or ""]
+        details = []
+        if raw.content:
+            content_html = f"<div>{message_html(raw.content, linkify=True)}</div>"
         if raw.teacher:
             details.append(f"Nauczyciel: {raw.teacher}")
+        if raw.links:
+            links_html = "<br>".join(
+                message_html(escape(homework_link_text(link)), linkify=True) for link in raw.links
+            )
+            content_html += f"<div>Linki:<br>{links_html}</div>"
+        if raw.response_required is not None:
+            details.append(f"Odpowiedź wymagana: {'Tak' if raw.response_required else 'Nie'}")
+        if raw.response_required and raw.response_deadline:
+            details.append(
+                f"Termin odpowiedzi: {_date(raw.response_deadline, config, include_time=True)}"
+            )
+        source = raw.details or {}
+        attachments = source.get("zalaczniki")
+        if isinstance(attachments, list) and attachments:
+            attachments_html = "<br>".join(
+                message_html(escape(homework_link_text(item)), linkify=True) for item in attachments
+            )
+            content_html += f"<div>Załączniki:<br>{attachments_html}</div>"
+        response = source.get("odpowiedz")
+        if isinstance(response, dict):
+            for field, label in (
+                ("odpowiedz", "Odpowiedź ucznia"),
+                ("komentarzNauczyciela", "Komentarz nauczyciela"),
+            ):
+                response_text = response.get(field)
+                if isinstance(response_text, str) and response_text:
+                    content_html += (
+                        f"<div>{label}:<br>{message_html(response_text, linkify=True)}</div>"
+                    )
     elif isinstance(raw, Lesson):
         title = raw.subject
         details = [f"Godziny: {raw.time_from[11:16]}-{raw.time_to[11:16]}"]
@@ -112,7 +144,7 @@ def _item(change: Change, config: Settings) -> str:
     date = getattr(raw, "date", "")
     if date:
         details.append(f"Data: {_date(date, config)}")
-    detail_html = "<br>".join(_text(detail) for detail in details if detail)
+    detail_html = content_html + "<br>".join(_text(detail) for detail in details if detail)
     return (
         '<li style="margin:0 0 14px;padding:0">'
         f"<strong>{title_html if title_html is not None else _text(title)}</strong>"

@@ -269,6 +269,69 @@ async def test_digest_retry_keeps_html_subject_links_and_escaped_ai(
     assert sent.get_body(("html",)).get_content().strip() == queued["html_body"].strip()
 
 
+@pytest.mark.parametrize("required", [True, False, None])
+def test_homework_renders_safe_links_and_response_requirement(email_config, required):
+    raw = Homework(
+        1,
+        "2026-10-05",
+        "Math",
+        '<p>Zadania 1-5.</p><a href="https://example.org/chapter">Rozdział</a>'
+        '<script>private-script</script><img src="https://example.org/pixel">',
+        "Anna Nowak",
+        links=[
+            "https://example.org/task?x=1&y=2",
+            {"label": "Ćwiczenia & odpowiedzi", "url": "https://example.org/exercises"},
+            '<img src="https://example.org/tracker">',
+            "javascript:alert(1)",
+        ],
+        response_required=required,
+        response_deadline="2026-10-04T23:30:00Z",
+    )
+    change = Change("new", "homework", STUDENT.name, "HW: Math", "", raw=raw)
+    result = FullSyncResult([SyncResult(STUDENT, new_homework=[change])])
+    _, plain, html, _ = render_summary(result, email_config)
+    assert '<a href="https://example.org/chapter"' in html
+    assert 'href="https://example.org/task?x=1&amp;y=2"' in html
+    assert "https://example.org/task?x=1&y=2" in plain
+    assert "Ćwiczenia & odpowiedzi" in plain
+    assert "Anna Nowak" in plain
+    for unsafe in ("<script", "<img", 'href="javascript:', "private-script"):
+        assert unsafe not in html
+    if required is None:
+        assert "Odpowiedź wymagana" not in plain
+    else:
+        assert f"Odpowiedź wymagana: {'Tak' if required else 'Nie'}" in plain
+    if required:
+        assert "Termin odpowiedzi: 2026-10-05 01:30" in plain
+    else:
+        assert "Termin odpowiedzi" not in plain
+
+
+def test_homework_notifications_include_attachments_and_available_response(email_config):
+
+    raw = Homework(
+        1,
+        "2026-10-09",
+        "Math",
+        details={
+            "zalaczniki": [{"name": "Ćwiczenia.pdf", "url": "https://example.org/file"}],
+            "odpowiedz": {
+                "odpowiedz": "<p>Rozwiązanie zadania.</p>",
+                "komentarzNauczyciela": "<p>Popraw wynik.</p><script>private-script</script>",
+            },
+        },
+    )
+    change = Change("new", "homework", STUDENT.name, "HW: Math", "", raw=raw)
+    _, plain, html, _ = render_summary(
+        FullSyncResult([SyncResult(STUDENT, new_homework=[change])]), email_config
+    )
+    assert "Załączniki:" in plain and "Ćwiczenia.pdf" in plain
+    assert 'href="https://example.org/file"' in html
+    assert "Odpowiedź ucznia:" in plain and "Rozwiązanie zadania." in plain
+    assert "Komentarz nauczyciela:" in plain and "Popraw wynik." in plain
+    assert "private-script" not in html
+
+
 def test_digest_escapes_school_text_and_excludes_baselines_and_notes(email_config):
     result = changed_result()
     sr = result.student_results[0]

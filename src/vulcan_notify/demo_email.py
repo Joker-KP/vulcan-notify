@@ -170,7 +170,9 @@ class DemoClient(VulcanClient):
     async def get_exams(self, student: Student) -> list[Exam]:
         return [] if self.baseline else self.exams
 
-    async def get_homework(self, student: Student) -> list[Homework]:
+    async def get_homework(
+        self, student: Student, date_from: str | None = None, date_to: str | None = None
+    ) -> list[Homework]:
         return [] if self.baseline else self.homework
 
     async def get_exam_detail(self, student: Student, exam_id: int) -> dict[str, Any]:

@@ -216,6 +216,28 @@ async def test_upsert_homework(db: Database) -> None:
     assert count == 1
 
 
+async def test_homework_soft_deletion_is_window_scoped_and_accepts_empty_results(db):
+    await db.upsert_student(_student("A"))
+    await db.upsert_student(_student("B"))
+    for task in (
+        Homework(1, "2026-10-08T21:59:59Z", "Before"),
+        Homework(2, "2026-10-08T22:00:00Z", "Start"),
+        Homework(3, "2026-10-09T21:59:59.999Z", "End"),
+        Homework(4, "2026-10-09T22:00:00Z", "After"),
+    ):
+        await db.upsert_homework("A", task)
+    await db.upsert_homework("B", Homework(5, "2026-10-09", "Other student"))
+    bounds = ("2026-10-08T22:00:00Z", "2026-10-09T21:59:59.999Z")
+    assert await db.mark_missing_homework_in_window("A", {3}, *bounds) == 1
+    assert {row["id"] for row in await db.get_homework_for_student("A")} == {1, 3, 4}
+    assert await db.mark_missing_homework_in_window("A", set(), *bounds) == 1
+    assert {row["id"] for row in await db.get_homework_for_student("A")} == {1, 4}
+    assert len(await db.get_homework_for_student("B")) == 1
+    # A restored known ID remains known to the differ and does not re-notify.
+    await db.upsert_homework("A", Homework(2, "2026-10-09", "Restored"))
+    assert await db.get_homework_ids_for_student("A") == {1, 2, 3, 4}
+
+
 async def test_sync_state(db: Database) -> None:
     assert await db.get_state("last_sync") is None
 
@@ -341,6 +363,66 @@ async def test_migration_adds_active_column(tmp_path) -> None:
     assert (await cursor.fetchone())[0] == 1
 
     await db.close()
+
+
+async def test_homework_detail_migration_preserves_history_and_calendar_uid(tmp_path) -> None:
+    import aiosqlite
+
+    from vulcan_notify.db import SCHEMA
+
+    old_schema = SCHEMA.replace(
+        "    links TEXT,\n    response_required INTEGER,\n"
+        "    response_deadline TEXT,\n    detail_fetched_at TIMESTAMP,\n    details TEXT,\n",
+        "",
+    )
+    path = tmp_path / "old-homework.db"
+    async with aiosqlite.connect(path) as conn:
+        await conn.executescript(old_schema)
+        await conn.execute(
+            "INSERT INTO students (key, name, class_name, school, diary_id) "
+            "VALUES ('OLD', 'Test Student', '3A', 'Test School', 1)"
+        )
+        await conn.execute(
+            "INSERT INTO homework (id, student_key, date, subject, content, teacher, "
+            "deleted_at, calendar_uid) VALUES "
+            "(1, 'OLD', '2026-10-01', 'Math', 'Stored description', 'Test Teacher', "
+            "'2026-10-02', 'calendar-uid')"
+        )
+        await conn.commit()
+    database = Database(path)
+    await database.connect()
+    cursor = await database.db.execute(
+        "SELECT content, teacher, deleted_at, calendar_uid, links, response_required, "
+        "response_deadline, detail_fetched_at FROM homework WHERE id = 1"
+    )
+    assert await cursor.fetchone() == (
+        "Stored description",
+        "Test Teacher",
+        "2026-10-02",
+        "calendar-uid",
+        None,
+        None,
+        None,
+        None,
+    )
+    # Reopening is idempotent. Old records are eligible for silent detail backfill.
+    await database.close()
+    await database.connect()
+    assert await database.get_homework_missing_detail("OLD") == {1}
+    await database.upsert_homework(
+        "OLD",
+        Homework(1, "2026-10-01", "Math", links=[], response_required=False, details={"opis": ""}),
+        detail_fetched=True,
+    )
+    row = (await database.get_homework_for_student("OLD"))[0]
+    assert row["content"] == "Stored description"
+    assert row["teacher"] == "Test Teacher"
+    assert row["links"] == []
+    assert row["response_required"] is False
+    assert await database.get_homework_missing_detail("OLD") == set()
+    cursor = await database.db.execute("SELECT calendar_uid FROM homework WHERE id = 1")
+    assert (await cursor.fetchone())[0] == "calendar-uid"
+    await database.close()
 
 
 async def test_migration_drops_legacy_tables(tmp_path) -> None:

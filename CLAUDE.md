@@ -38,6 +38,25 @@ Collections/resources retain JSON
 without assumptions about unverified populated upstream shapes. Live behavior
 was not verified during implementation.
 
+Homework sync enriches the model before diffing, so email and MQTT include the
+description, teacher, links, response requirement and response deadline. Email
+uses the existing HTML sanitizer and preserves clickable links. Raw link JSON,
+`response_required`, `response_deadline` and `detail_fetched_at` persist through
+an automatic additive migration. Existing tasks backfill silently; an empty
+description counts as a successful fetch, while failures retry without duplicate
+notifications. Populated link item shapes have not been verified live.
+
+Homework synchronization now reads the calendar list `SprawdzianyZadaniaDomowe`
+(`typ=4`), using `SYNC_HOMEWORK_DAYS=365` back and
+`SYNC_HOMEWORK_FUTURE_DAYS=365` ahead, including today. Dashboard display still
+uses the upcoming-only list. The independent successful
+`last_sync:<student>:homework_calendar` marker silently imports expanded history
+once on upgrades; later unknown IDs notify. Window-scoped soft deletes preserve
+rolled-out history and skip failures. Full original detail JSON is cached in
+`homework.details`, exposed through MQTT/HTTP; attachments and response text/comments
+also appear in notifications when available. A live calendar/detail check verified
+the October 9, 2026 task omitted by the dashboard.
+
 ## Sibling repos (cross-repo work is common)
 
 Changes here almost always need a corresponding change in the homelab repo — new API endpoints need HA REST sensors, new MQTT topics need HA automations, new deploy behavior needs CLAUDE.md updates. Always check the homelab repo before assuming infra/docs don't exist, and update both in a single session when a change spans them.

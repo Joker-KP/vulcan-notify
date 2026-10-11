@@ -358,6 +358,51 @@ async def test_get_homework(session_data: dict, student: Student) -> None:
     assert homework[0].subject == "Plastyka"
 
 
+async def test_homework_calendar_includes_past_tasks_and_skips_exams(session_data, student):
+    from urllib.parse import parse_qs, urlsplit
+
+    client = VulcanClient(session_data)
+    task = {"typ": 4, "id": 1, "data": "2026-10-09T00:00:00+02:00", "przedmiotNazwa": "Math"}
+    client._request = AsyncMock(return_value=[task, {"typ": 1, "id": 2}, task])
+    tasks = await client.get_homework(student, "2026-10-01T00:00:00Z", "2026-10-31T23:59:59Z")
+    assert len(tasks) == 1
+    assert (tasks[0].id, tasks[0].subject, tasks[0].date) == (1, "Math", task["data"])
+    url = urlsplit(client._request.call_args.args[0])
+    assert url.path == "/api/SprawdzianyZadaniaDomowe"
+    assert parse_qs(url.query) == {
+        "key": [student.key],
+        "dataOd": ["2026-10-01T00:00:00Z"],
+        "dataDo": ["2026-10-31T23:59:59Z"],
+    }
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        None,
+        {},
+        "unexpected",
+        [None],
+        [{"id": 1}],
+        [{"typ": "4"}],
+        [{"typ": 4, "id": True, "data": "2026-10-09", "przedmiotNazwa": "Math"}],
+        [{"typ": 4, "id": 1, "data": "invalid", "przedmiotNazwa": "Math"}],
+        [{"typ": 4, "id": 1, "data": "2026-10-09", "przedmiotNazwa": None}],
+        [
+            {"typ": 4, "id": 1, "data": "2026-10-09", "przedmiotNazwa": "Math"},
+            {"typ": 4, "id": 1, "data": "2026-10-10", "przedmiotNazwa": "Math"},
+        ],
+    ],
+)
+async def test_homework_calendar_rejects_malformed_results(session_data, student, response):
+    from vulcan_notify.client import VulcanFetchError
+
+    client = VulcanClient(session_data)
+    client._request = AsyncMock(return_value=response)
+    with pytest.raises(VulcanFetchError):
+        await client.get_homework(student, "2026-10-01", "2026-10-31")
+
+
 async def test_get_attendance(session_data: dict, student: Student) -> None:
     attendance_response = {
         "oddzialy": [

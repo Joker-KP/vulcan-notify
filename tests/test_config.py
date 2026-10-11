@@ -2,6 +2,9 @@
 
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from vulcan_notify.config import Settings
 
 
@@ -29,3 +32,13 @@ def test_weekly_summary_can_be_disabled_in_environment(tmp_path):
     env = tmp_path / ".env"
     env.write_text("WEEKLY_SUMMARY_ENABLED=false\n")
     assert Settings(_env_file=env).weekly_summary_enabled is False
+
+
+def test_homework_windows_are_configurable_and_nonnegative(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("SYNC_HOMEWORK_DAYS=30\nSYNC_HOMEWORK_FUTURE_DAYS=60\n")
+    config = Settings(_env_file=env)
+    assert config.sync_homework_days == 30 and config.sync_homework_future_days == 60
+    for field in ("sync_homework_days", "sync_homework_future_days"):
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, **{field: -1})

@@ -7,6 +7,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from vulcan_notify.text import homework_link_text, message_html, message_text
+
 if TYPE_CHECKING:
     from vulcan_notify.db import Database
     from vulcan_notify.models import (
@@ -367,13 +369,43 @@ async def diff_homework(
 
     for hw in fetched:
         if hw.id not in stored_ids:
+            details = [f"Due: {_short_due(hw.date)}"]
+            if hw.content:
+                details.append(message_text(message_html(hw.content), include_links=True))
+            if hw.teacher:
+                details.append(f"Nauczyciel: {hw.teacher}")
+            if hw.links:
+                details.append(
+                    "Linki:\n" + "\n".join(homework_link_text(link) for link in hw.links)
+                )
+            if hw.response_required is not None:
+                details.append(f"Odpowiedź wymagana: {'Tak' if hw.response_required else 'Nie'}")
+            if hw.response_required and hw.response_deadline:
+                details.append(f"Termin odpowiedzi: {hw.response_deadline}")
+            source = hw.details or {}
+            attachments = source.get("zalaczniki")
+            if isinstance(attachments, list) and attachments:
+                details.append(
+                    "Załączniki:\n" + "\n".join(homework_link_text(item) for item in attachments)
+                )
+            response = source.get("odpowiedz")
+            if isinstance(response, dict):
+                for field, label in (
+                    ("odpowiedz", "Odpowiedź ucznia"),
+                    ("komentarzNauczyciela", "Komentarz nauczyciela"),
+                ):
+                    value = response.get(field)
+                    if isinstance(value, str) and value:
+                        details.append(
+                            f"{label}: " + message_text(message_html(value), include_links=True)
+                        )
             changes.append(
                 Change(
                     change_type="new",
                     item_type="homework",
                     student_name=student.name,
                     title=f"HW: {hw.subject}",
-                    body=f"Due: {_short_due(hw.date)}",
+                    body="\n".join(details),
                     priority=2,
                     tags=["books", "school"],
                     raw=hw,

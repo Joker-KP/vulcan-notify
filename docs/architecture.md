@@ -130,6 +130,28 @@ The full entity diagram (students + primary entities) is in the [README](../READ
 
 Each section's first successful persistence writes its baseline marker and suppresses historical changes. Missing schedule lessons are compared over the full requested local date window, extended to include returned boundary dates, so disappearing first/last lesson days are detected.
 
+Homework detail is fetched before diffing and persistence, so new change events
+carry the description, teacher, raw `links` JSON, `response_required` and
+`response_deadline` to email and MQTT. The nullable `detail_fetched_at` column
+tracks successful enrichment even when the description is empty. Additive migration
+preserves history and calendar UIDs; old records are enriched silently once, and
+failed detail requests remain eligible for retry without duplicate notifications.
+New-task details include links from HTML descriptions in plain notification text.
+Populated upstream link object shapes have not been verified live.
+
+Homework synchronization reads the date-windowed `SprawdzianyZadaniaDomowe` list
+(`typ=4`, `przedmiotNazwa`), with defaults of 365 days back and 365 days ahead,
+including today. `SYNC_HOMEWORK_DAYS` / `SYNC_HOMEWORK_FUTURE_DAYS` configure the
+window. The initial successful calendar read uses the independent
+`last_sync:<student>:homework_calendar` marker to import newly visible history
+without alerts on upgrades. Successful empty reads initialize it; failed reads do
+not. Subsequent unknown IDs emit events regardless of their school date. Soft
+deletes only cover that successful UTC interval; rolled-out history stays stored.
+The complete original detail response also persists in `homework.details` JSON,
+including attachments, response content/comments, flags and uninterpreted status
+codes. HTTP `/api/homework` and MQTT expose it alongside typed fields; email and
+plain notifications render available attachments and response text safely.
+
 Praise/notes use `diff_remarks()` and a separate `last_sync:<student>:remarks`
 baseline, initialized only after successful fetching and persistence. This also
 suppresses history when the category is added to existing installations. Unknown
