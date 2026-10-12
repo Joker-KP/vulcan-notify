@@ -22,7 +22,7 @@ from vulcan_notify.models import (
     Message,
     Remark,
 )
-from vulcan_notify.text import strip_html
+from vulcan_notify.text import attendance_category_label, strip_html
 
 if TYPE_CHECKING:
     from vulcan_notify.db import Database
@@ -39,7 +39,7 @@ except PackageNotFoundError:
 _OFFLINE_PAYLOAD = b'{"state":"offline"}'
 
 # Attendance category names (category 1 = present is never published)
-_ATTENDANCE_CATEGORIES = {2: "absent", 3: "late", 4: "excused"}
+_ATTENDANCE_CATEGORIES = {2: "absent", 3: "excused", 4: "late"}
 
 
 def _now_iso() -> str:
@@ -107,6 +107,8 @@ def build_payload(change: Change) -> dict[str, object]:
         category_name = _ATTENDANCE_CATEGORIES.get(raw.category, f"category_{raw.category}")
         base.update(
             category=category_name,
+            category_label=attendance_category_label(raw.category),
+            category_code=raw.category,
             date=raw.date,
             lesson_number=raw.lesson_number,
             source=raw.source,

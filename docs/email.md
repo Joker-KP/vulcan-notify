@@ -58,6 +58,18 @@ including when the description is empty. Exams use the module calendar with
 silently on upgrades. Existing exam details refresh silently on each sync. Failed
 detail reads preserve stored content, and new records can notify with basic data.
 
+Attendance categories use a shared Polish description followed by the upstream
+code in parentheses, for example `Spóźnienie usprawiedliwione (5)`. HTML and plain
+emails, change titles, TUI views and AI input share `attendance_category_label()`
+in `text.py`. MQTT additionally exposes `category_label` (readable description)
+and `category_code` (numeric ID). Its machine `category` assignment is corrected
+to `3=excused`, `4=late`; other existing values remain compatible.
+The live-verified legend identifies 3 as excused absence, 4 as lateness, 6 as
+school-related absence and 7 as exemption (see `docs/eduvulcan-api.md`).
+Unmapped codes display `Nieznana kategoria frekwencji (N)` without inventing a
+meaning. Stored numeric categories and change-detection identities are unchanged.
+Already queued emails retain their previously rendered content on retries.
+
 Attendance alerts cover classroom, other activities and childcare. Historical
 other-activity/childcare records baseline silently on upgrades; new non-present
 records notify afterwards. Existing attendance-category changes remain silent.

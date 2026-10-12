@@ -7,7 +7,12 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from vulcan_notify.text import homework_link_text, message_html, message_text
+from vulcan_notify.text import (
+    attendance_category_label,
+    homework_link_text,
+    message_html,
+    message_text,
+)
 
 if TYPE_CHECKING:
     from vulcan_notify.db import Database
@@ -175,9 +180,7 @@ async def diff_attendance(
         key = (entry.date, entry.lesson_number, entry.source, entry.entry_key)
         if key not in stored_keys and entry.category != 1:
             stored_keys.add(key)
-            category_name = {2: "Absent", 3: "Late", 4: "Excused"}.get(
-                entry.category, f"Category {entry.category}"
-            )
+            category_name = attendance_category_label(entry.category)
             location = (
                 f"lesson {entry.lesson_number}"
                 if entry.source == "oddzialy"

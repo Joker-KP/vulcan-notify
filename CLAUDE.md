@@ -73,6 +73,15 @@ classroom keys remain compatible while unnumbered activities use times/subject.
 `last_sync:<student>:attendance_full` silently imports additional collections on
 upgrades; new classroom alerts continue. Messages still use the first 50 entries.
 
+Attendance presentation uses `text.attendance_category_label()` across email,
+change titles, TUI and AI input: Polish description plus `(code)`, including
+`Spóźnienie usprawiedliwione (5)`. MQTT adds `category_label` and `category_code`
+with corrected machine `category` assignments `3=excused`, `4=late`; other values
+remain compatible. The October 12, 2026 live legend/client-enum check verified
+1–7: 3 is excused absence, 4 lateness, 6 school-related absence and 7 exemption.
+Sanitized public legend evidence is in `tests/fixtures/attendance_categories.json`. Unknown IDs get an explicit fallback;
+numeric persistence, baselines and notification identities stay unchanged.
+
 ## Sibling repos (cross-repo work is common)
 
 Changes here almost always need a corresponding change in the homelab repo — new API endpoints need HA REST sensors, new MQTT topics need HA automations, new deploy behavior needs CLAUDE.md updates. Always check the homelab repo before assuming infra/docs don't exist, and update both in a single session when a change spans them.

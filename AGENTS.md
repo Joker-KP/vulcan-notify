@@ -323,6 +323,16 @@ Digest delivery is tracked per sync-run/recipient; individual messages use upstr
 
 Entity persistence and email enqueue have separate commits; a crash in between can lose an unqueued notification. Ambiguous SMTP acceptance can cause duplicate delivery. Do not claim exactly-once or guaranteed inbox delivery. Use a single sync/delivery owner. See `docs/email.md` for settings and behavior.
 
+Attendance notifications use shared Polish descriptions with codes in parentheses
+from `text.attendance_category_label()`, including `Spóźnienie usprawiedliwione (5)`.
+Email, change titles, TUI and AI input reuse the formatter. MQTT adds readable
+`category_label` and numeric `category_code`; its machine `category` assignment
+is corrected to `3=excused`, `4=late`, with other values compatible. The October 12,
+2026 live legend/client-enum check verified 1–7, including school-related absence
+(6) and exemption (7); sanitized category evidence lives in
+`tests/fixtures/attendance_categories.json`. Unknown codes remain explicit without guessed meanings; SQLite retains
+numeric categories and existing change semantics. Queued emails keep old bodies.
+
 Homework models are enriched before diffing: descriptions, teachers, raw link JSON,
 response requirements and response deadlines reach email and MQTT notifications.
 Email descriptions use the existing local HTML sanitizer and retain clickable

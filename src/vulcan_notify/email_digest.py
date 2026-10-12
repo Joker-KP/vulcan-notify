@@ -11,7 +11,13 @@ from urllib.parse import urlsplit
 from vulcan_notify.client import STUDENT_PAGE_PATHS
 from vulcan_notify.email_rendering import render_email, render_template
 from vulcan_notify.models import AttendanceEntry, Exam, Grade, Homework, Lesson
-from vulcan_notify.text import homework_link_text, message_html, message_text, strip_html
+from vulcan_notify.text import (
+    attendance_category_label,
+    homework_link_text,
+    message_html,
+    message_text,
+    strip_html,
+)
 from vulcan_notify.time_utils import as_utc
 
 if TYPE_CHECKING:
@@ -78,9 +84,7 @@ def _item(change: Change, config: Settings) -> str:
         title_html = f"{_text(raw.subject)}: {value}"
         details = [raw.column_name, f"Waga: {raw.weight:g}", f"Nauczyciel: {raw.teacher}"]
     elif isinstance(raw, AttendanceEntry):
-        category = {2: "Nieobecność", 3: "Spóźnienie", 4: "Usprawiedliwiona nieobecność"}.get(
-            raw.category, f"Kategoria {raw.category}"
-        )
+        category = attendance_category_label(raw.category)
         title = f"{raw.subject}: {category}"
         source_label = {
             "dziennikiZajecInnych": "Zajęcia dodatkowe",

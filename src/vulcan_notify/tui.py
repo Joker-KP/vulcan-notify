@@ -24,14 +24,7 @@ from textual.widgets import (
 from vulcan_notify.config import settings
 from vulcan_notify.db import Database
 from vulcan_notify.display import _format_sender_short
-from vulcan_notify.text import message_text, strip_html
-
-ATTENDANCE_CATEGORIES: dict[int, str] = {
-    1: "Present",
-    2: "Absent",
-    3: "Late",
-    4: "Excused",
-}
+from vulcan_notify.text import attendance_category_label, message_text, strip_html
 
 EXAM_TYPES: dict[int, str] = {
     1: "Test",
@@ -270,7 +263,7 @@ class MainScreen(Screen[None]):
                     r["student_name"] = student_name
                     cat = r.get("category")
                     cat_int = int(cat) if isinstance(cat, int) else 0
-                    status = ATTENDANCE_CATEGORIES.get(cat_int, f"Category {cat_int}")
+                    status = attendance_category_label(cat_int)
                     table.add_row(
                         str(r.get("date", ""))[:10],
                         student_name,
@@ -427,7 +420,7 @@ class MainScreen(Screen[None]):
             elif tab_name == "attendance":
                 cat = r.get("category")
                 cat_int = int(cat) if isinstance(cat, int) else 0
-                status = ATTENDANCE_CATEGORIES.get(cat_int, f"Category {cat_int}")
+                status = attendance_category_label(cat_int)
                 table.add_row(
                     str(r.get("date", ""))[:10],
                     str(r.get("student_name", "")),
@@ -525,7 +518,7 @@ class MainScreen(Screen[None]):
         elif tab_name == "attendance":
             cat = row.get("category")
             cat_int = int(cat) if isinstance(cat, int) else 0
-            status = ATTENDANCE_CATEGORIES.get(cat_int, f"Category {cat_int}")
+            status = attendance_category_label(cat_int)
             time_from = str(row.get("time_from", "") or "")
             time_to = str(row.get("time_to", "") or "")
             time_str = f"{time_from} - {time_to}" if time_from else ""

@@ -9,6 +9,23 @@ from urllib.parse import urlsplit
 
 import nh3
 
+# Verified against the portal legend and client enum; see docs/eduvulcan-api.md.
+_ATTENDANCE_LABELS = {
+    1: "Obecność",
+    2: "Nieobecność",
+    3: "Nieobecność usprawiedliwiona",
+    4: "Spóźnienie",
+    5: "Spóźnienie usprawiedliwione",
+    6: "Nieobecność z przyczyn szkolnych",
+    7: "Zwolnienie",
+}
+
+
+def attendance_category_label(category: int) -> str:
+    """A readable category followed by its upstream code, without guessing unknown codes."""
+    label = _ATTENDANCE_LABELS.get(category, "Nieznana kategoria frekwencji")
+    return f"{label} ({category})"
+
 
 def homework_link_text(link: object) -> str:
     """Keep link labels/URLs without assuming an unverified upstream object schema."""

@@ -483,3 +483,21 @@ async def test_outbox_drains_on_retry(db: Database) -> None:
     assert first_call.args == ("school/kacper/grades/new", '{"title":"pending"}')
     assert mock_client_instance.publish.call_args_list[1].args[0] == "school/status"
     assert await db.list_mqtt_outbox() == []
+
+
+def test_attendance_payload_matches_verified_labels_and_machine_categories():
+    from dataclasses import replace
+
+    for code, machine, label in (
+        (2, "absent", "Nieobecność (2)"),
+        (3, "excused", "Nieobecność usprawiedliwiona (3)"),
+        (4, "late", "Spóźnienie (4)"),
+        (5, "category_5", "Spóźnienie usprawiedliwione (5)"),
+        (6, "category_6", "Nieobecność z przyczyn szkolnych (6)"),
+        (7, "category_7", "Zwolnienie (7)"),
+        (99, "category_99", "Nieznana kategoria frekwencji (99)"),
+    ):
+        payload = build_payload(_make_change("attendance", replace(ATTENDANCE, category=code)))
+        assert payload["category"] == machine
+        assert payload["category_label"] == label
+        assert payload["category_code"] == code

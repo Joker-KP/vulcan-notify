@@ -130,3 +130,23 @@ def test_strip_ansi() -> None:
     assert _strip_ansi("\033[1mBold\033[0m") == "Bold"
     assert _strip_ansi("\033[92mGreen\033[0m text") == "Green text"
     assert _strip_ansi("plain text") == "plain text"
+
+
+def test_attendance_ai_input_uses_same_polish_category_description():
+    from vulcan_notify.summarizer import format_changes_for_llm
+
+    text = format_changes_for_llm(
+        {
+            "attendance": [
+                {
+                    "student": "Test Student",
+                    "subject": "Math",
+                    "category": 5,
+                    "lesson_number": 3,
+                    "date": "2026-10-12",
+                }
+            ]
+        }
+    )
+    assert "Spóźnienie usprawiedliwione (5)" in text
+    assert "Category 5" not in text

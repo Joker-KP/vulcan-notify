@@ -141,7 +141,7 @@ async def test_new_absence_detected(db: Database) -> None:
     changes = await diff_attendance(STUDENT, entries, db)
 
     assert len(changes) == 1
-    assert changes[0].title == "Absent: Math"
+    assert changes[0].title == "Nieobecność (2): Math"
     assert changes[0].body == "Sat, Mar 14 • lesson 3"
     assert changes[0].student_name == "Jan Kowalski"
 
@@ -200,3 +200,28 @@ def test_short_due_formats_iso() -> None:
 def test_short_due_falls_back_on_garbage() -> None:
     assert _short_due("not-a-date") == "not-a-date"
     assert _short_due("") == ""
+
+
+async def test_excused_lateness_change_title_uses_polish_description(db):
+    await db.upsert_student(STUDENT)
+    entry = AttendanceEntry(3, 5, "2026-10-12", "Matematyka", "Teacher", "09:00", "09:45")
+    changes = await diff_attendance(STUDENT, [entry], db)
+    assert len(changes) == 1
+    assert changes[0].title == "Spóźnienie usprawiedliwione (5): Matematyka"
+    await db.upsert_attendance(STUDENT.key, entry)
+    assert await diff_attendance(STUDENT, [entry], db) == []
+
+
+def test_attendance_labels_match_verified_portal_legend():
+    import json
+    from pathlib import Path
+
+    from vulcan_notify.text import attendance_category_label
+
+    evidence = json.loads(
+        (Path(__file__).parent / "fixtures" / "attendance_categories.json").read_text()
+    )
+    assert evidence["source"] == "live-portal-legend-and-client-enum"
+    assert {row["code"] for row in evidence["categories"]} == set(range(1, 8))
+    for row in evidence["categories"]:
+        assert attendance_category_label(row["code"]) == f"{row['label']} ({row['code']})"

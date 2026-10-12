@@ -162,7 +162,31 @@ baselines the additional collections silently on upgrades, preserving classroom
 change detection. The October 11, 2026 live audit returned 101 classroom records
 and 2 other-activity records; the previous parser dropped the latter.
 
-`kategoriaFrekwencji` values (observed): 1 = present, 2 = absent. Other values (late, excused) need further observation.
+`kategoriaFrekwencji` persists as a numeric upstream ID. A live check on
+October 12, 2026 matched the `/frekwencja` legend (labels, symbols and CSS classes)
+with the numeric enum in the portal's JavaScript. These are the verified mappings:
+
+| Code | Description | Legend symbol |
+| --- | --- | --- |
+| 1 | Obecność | O |
+| 2 | Nieobecność | N |
+| 3 | Nieobecność usprawiedliwiona | NU |
+| 4 | Spóźnienie | S |
+| 5 | Spóźnienie usprawiedliwione | SU |
+| 6 | Nieobecność z przyczyn szkolnych | NS |
+| 7 | Zwolnienie | Z |
+
+The live response included code 6 and its rendered icon used the
+`nieobecnyZPrzyczynSzkolnych` class. The earlier application mapping incorrectly
+swapped 3/4, labeled 6 as exemption and omitted 7. The shared presentation formatter
+now follows the verified enum, with a Polish description followed by `(code)`.
+MQTT also corrects `category` assignment to `3=excused`, `4=late`; its generic
+`category_N` values for other codes remain compatible. Unmapped IDs remain explicit
+without guessed meanings. Original SQLite numbers are unchanged.
+`tests/fixtures/attendance_categories.json` retains only public labels, symbols,
+CSS classes and enum names; no student/profile/attendance/session data.
+The legend's UW/UZ/UO symbols describe excuse-request approval states, separate
+from these seven attendance categories.
 
 ### GET /api/FrekwencjaStatystyki?key={key}&idPrzedmiot={id}
 
@@ -648,7 +672,7 @@ Dashboard methods remain available for overview callers but do not gate module s
 
 ## Open questions
 
-- Exact mapping of `kategoriaFrekwencji` values (only observed 1=present, 2=absent so far)
+- Attendance codes outside the verified legend (1–7): meaning and notification handling require separate review.
 - `rodzaj` values in SprawdzianyTablica (1=test? 2=quiz?)
 - Session cookie expiry duration (observed to survive at least a few minutes; longer-term testing needed)
 - Pagination: does `idLastWiadomosc` work for fetching older messages beyond the first page?

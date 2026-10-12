@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from vulcan_notify.config import Settings
     from vulcan_notify.db import Database
 
+from vulcan_notify.text import attendance_category_label
 from vulcan_notify.time_utils import as_utc
 
 log = logging.getLogger(__name__)
@@ -100,14 +101,6 @@ async def summarize(
         return None
 
 
-_ATTENDANCE_CATEGORIES = {
-    2: "Absent",
-    3: "Late",
-    4: "Excused absence",
-    5: "Excused lateness",
-    6: "Exempt",
-}
-
 _EXAM_TYPES = {
     0: "Test",
     1: "Quiz",
@@ -132,7 +125,7 @@ def format_changes_for_llm(changes: dict[str, list[dict[str, object]]]) -> str:
         lines.append("Attendance:")
         for a in changes["attendance"]:
             cat_id = int(str(a["category"]))
-            category = _ATTENDANCE_CATEGORIES.get(cat_id, f"Category {cat_id}")
+            category = attendance_category_label(cat_id)
             lines.append(
                 f"  {a['student']} - {a['subject']}: {category} "
                 f"(lesson {a['lesson_number']}, {a['date']})"

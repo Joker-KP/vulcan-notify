@@ -1304,3 +1304,27 @@ def test_extra_attendance_notifications_show_source_and_mqtt_identity():
         assert "Lekcja: 0" not in output
     assert build_payload(changes[0])["source"] == entries[0].source
     assert build_payload(changes[0])["entry_key"] == entries[0].entry_key
+
+
+@pytest.mark.parametrize(
+    "category,label",
+    [
+        (1, "Obecność (1)"),
+        (2, "Nieobecność (2)"),
+        (3, "Nieobecność usprawiedliwiona (3)"),
+        (4, "Spóźnienie (4)"),
+        (5, "Spóźnienie usprawiedliwione (5)"),
+        (6, "Nieobecność z przyczyn szkolnych (6)"),
+        (7, "Zwolnienie (7)"),
+        (99, "Nieznana kategoria frekwencji (99)"),
+    ],
+)
+def test_attendance_digest_uses_description_before_category_number(category, label):
+    entry = AttendanceEntry(3, category, "2026-10-12", "Matematyka", "Anna Nowak", "09:00", "09:45")
+    change = Change("new", "attendance", STUDENT.name, f"Category {category}", "", raw=entry)
+    result = FullSyncResult([SyncResult(STUDENT, new_attendance=[change])])
+    _, plain, html, count = render_summary(result, Settings(_env_file=None))
+    assert count == 1
+    for output in (plain, html):
+        assert f"Matematyka: {label}" in output
+        assert f"Category {category}" not in output
