@@ -342,6 +342,24 @@ automatically, preserving history/calendar UIDs. Existing tasks backfill silentl
 empty descriptions count as successfully fetched and detail failures retry without
 re-notifying. Populated upstream link item shapes remain unverified live.
 
+`EMAIL_SCHEDULE_COOLDOWN_HOURS=6` applies a shared fixed email-only window to
+`substitution` and `cancellation`, across all students, independently per recipient.
+The first email is eligible immediately; SMTP acceptance starts the window.
+Further events accumulate as snapshots in `email_schedule_events` and join the
+first sync digest at/after expiry, even without new changes. No separate timer
+exists; overnight pauses defer to the next sync. Additional lessons and all other
+categories/outputs retain their existing behavior. `0` disables the timed wait.
+`email_schedule_state` reserves a prepared email until SMTP acceptance, preventing
+another immediate email during delivery failure; acceptance through `email-retry`
+also starts the window. Retry never flushes buffered events. Ingestion receipts
+suppress duplicate processing of a sync result; event payloads clear atomically
+with outbox enqueue and reservation, while sent status and the deadline commit
+together. Baselines remain silent. Category switches apply before accumulation
+and at flush, where disabled buffered events are discarded. Repeated edits remain
+separate detected events. Initialization adds both tables without manual migration;
+old outbox rows retain their original behavior and the existing persistence/enqueue
+gap and SMTP ambiguity remain. See `docs/email.md` for configuration transitions.
+
 ### MQTT
 
 MQTT is implemented for integration with home automation when `MQTT_ENABLED=true`. `publish_changes()` first enqueues events into SQLite and then drains the persistent outbox. Enqueued events that fail publication remain available for retry on a later run.
@@ -837,6 +855,7 @@ Direct environment readers do not load `.env` themselves. Compose uses `env_file
 | `SMTP_USERNAME`, `SMTP_PASSWORD` | `Settings` | Unset; optional credentials, configured together. |
 | `EMAIL_SUBJECT_PREFIX` | `Settings` | `[eduVulcan]`; followed by included, present groups and the total change count when greater than one. |
 | `EMAIL_DIGEST_GROUPS` | `Settings` | `{}`; JSON object of individual digest group switches, omitted keys enabled. |
+| `EMAIL_SCHEDULE_COOLDOWN_HOURS` | `Settings` | `6`; fixed email-only substitution/cancellation window after SMTP acceptance, independently per recipient. `0` disables the timed wait. |
 | `EMAIL_MESSAGE_SUBJECT_PREFIX` | `Settings` | `[Nowa wiadomość]`; followed by each original message subject. |
 | `EMAIL_REMARK_SUBJECT_PREFIX` | `Settings` | `[Uwagi]`; followed by student name and category for each new praise/note. |
 | `SMTP_TIMEOUT_SECONDS`, `EMAIL_AI_TIMEOUT_SECONDS` | `Settings` | Both `30`; socket-operation and AI-preparation timeouts. |

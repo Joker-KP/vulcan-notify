@@ -34,6 +34,22 @@ def test_weekly_summary_can_be_disabled_in_environment(tmp_path):
     assert Settings(_env_file=env).weekly_summary_enabled is False
 
 
+def test_schedule_email_cooldown_is_configurable_and_defaults_to_six_hours(tmp_path):
+    assert Settings(_env_file=None).email_schedule_cooldown_hours == 6
+    env = tmp_path / ".env"
+    env.write_text("EMAIL_SCHEDULE_COOLDOWN_HOURS=2.5\n")
+    assert Settings(_env_file=env).email_schedule_cooldown_hours == 2.5
+    assert (
+        Settings(_env_file=None, email_schedule_cooldown_hours=0).email_schedule_cooldown_hours == 0
+    )
+
+
+@pytest.mark.parametrize("hours", [-1, float("nan"), float("inf"), -float("inf")])
+def test_schedule_email_cooldown_rejects_invalid_durations(hours):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, email_schedule_cooldown_hours=hours)
+
+
 def test_homework_windows_are_configurable_and_nonnegative(tmp_path):
     env = tmp_path / ".env"
     env.write_text("SYNC_HOMEWORK_DAYS=30\nSYNC_HOMEWORK_FUTURE_DAYS=60\n")

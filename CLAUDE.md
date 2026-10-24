@@ -153,6 +153,22 @@ The tool follows a linear pipeline: **Auth -> Client -> Sync -> Diff -> Display*
 
 - `config.py` - `pydantic-settings` `Settings` singleton loaded from `.env`.
 
+Schedule emails use `EMAIL_SCHEDULE_COOLDOWN_HOURS=6`: the first substitution or
+cancellation is eligible immediately, then SMTP acceptance starts a fixed shared
+window for both types/all students, independently per recipient. Further events
+accumulate in `email_schedule_events`; the first sync after expiry includes them
+in the digest, even without new changes. Night pauses defer to the next sync;
+there is no timer. Other categories (including additional lessons) and outputs
+retain their existing behavior. `0` disables the timed wait. `email_schedule_state`
+reserves a prepared outbox delivery until acceptance, including via `email-retry`,
+which retries bodies without flushing buffers. Buffer ingestion, enqueue,
+consumption and reservation commit together before AI; sent status and the new
+deadline also commit together. Cleared payloads retain deduplication receipts.
+Baselines stay silent; category switches also apply at flush, discarding disabled
+buffered groups. Repeated edits remain separate events. Tables are added
+automatically; existing outbox rows and delivery limitations remain unchanged.
+See `docs/email.md` for details.
+
 ## Key dependencies
 
 - **playwright** - browser automation for auth flow only

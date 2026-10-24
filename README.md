@@ -316,6 +316,7 @@ Python settings load `.env`; Compose exports it to the containers. Direct auth/A
 | `SMTP_USERNAME`, `SMTP_PASSWORD` | (none) | Optional SMTP credentials |
 | `EMAIL_AI_SUMMARY` | `false` | Add an AI summary above the HTML change groups; also requires `LLM_API_KEY` |
 | `EMAIL_DIGEST_GROUPS` | `{}` (all enabled) | Individual digest group switches, e.g. `{"attendance":false,"homework":false}`; omitted keys stay enabled |
+| `EMAIL_SCHEDULE_COOLDOWN_HOURS` | `6` | After a substitution/cancellation email, accumulate further events of these two types until the first sync after this many hours; `0` disables the timed wait. Other categories continue normally. |
 | `EMAIL_MESSAGE_SUBJECT_PREFIX` | `[Nowa wiadomość]` | Prefix for separate new-message notifications, followed by the original subject |
 | `EMAIL_REMARK_SUBJECT_PREFIX` | `[Uwagi]` | Prefix for separate praise/note emails, followed by student name and category; full note content is included |
 | `EMAIL_INCLUDE_MESSAGE_BODIES` | `false` | Include original message bodies in individual notifications; messages are excluded from digest AI input |

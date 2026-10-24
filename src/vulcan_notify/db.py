@@ -243,6 +243,24 @@ CREATE TABLE IF NOT EXISTS email_outbox (
     last_error TEXT
 );
 
+-- One shared substitution/cancellation window per recipient (all students).
+CREATE TABLE IF NOT EXISTS email_schedule_state (
+    recipient_key TEXT PRIMARY KEY,
+    quiet_until TEXT,
+    pending_delivery_key TEXT
+);
+
+-- Clearing payload after enqueue preserves ingestion deduplication without private content.
+CREATE TABLE IF NOT EXISTS email_schedule_events (
+    recipient_key TEXT NOT NULL,
+    event_key TEXT NOT NULL,
+    payload TEXT,
+    detected_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (recipient_key, event_key)
+);
+CREATE INDEX IF NOT EXISTS email_schedule_pending
+    ON email_schedule_events (recipient_key) WHERE payload IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS sync_state (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
@@ -976,6 +994,60 @@ class Database:
             "UPDATE email_outbox SET body = ?, html_body = COALESCE(?, html_body) "
             "WHERE delivery_key = ? AND sent_at IS NULL",
             (body, html_body, delivery_key),
+        )
+
+    async def has_email_delivery(self, delivery_key: str) -> bool:
+        cursor = await self.db.execute(
+            "SELECT 1 FROM email_outbox WHERE delivery_key = ?", (delivery_key,)
+        )
+        return await cursor.fetchone() is not None
+
+    async def buffer_schedule_email(self, recipient_key: str, event_key: str, payload: str) -> None:
+        await self.db.execute(
+            "INSERT OR IGNORE INTO email_schedule_events (recipient_key, event_key, payload) "
+            "VALUES (?, ?, ?)",
+            (recipient_key, event_key, payload),
+        )
+
+    async def get_schedule_email_events(self, recipient_key: str) -> list[tuple[str, str]]:
+        cursor = await self.db.execute(
+            "SELECT event_key, payload FROM email_schedule_events "
+            "WHERE recipient_key = ? AND payload IS NOT NULL ORDER BY detected_at, rowid",
+            (recipient_key,),
+        )
+        return [(row[0], row[1]) for row in await cursor.fetchall()]
+
+    async def consume_schedule_email_events(self, recipient_key: str) -> None:
+        """Call in the same transaction as outbox enqueue; retain ingestion receipts."""
+        await self.db.execute(
+            "UPDATE email_schedule_events SET payload = NULL "
+            "WHERE recipient_key = ? AND payload IS NOT NULL",
+            (recipient_key,),
+        )
+
+    async def get_schedule_email_state(self, recipient_key: str) -> tuple[str | None, str | None]:
+        cursor = await self.db.execute(
+            "SELECT quiet_until, pending_delivery_key FROM email_schedule_state "
+            "WHERE recipient_key = ?",
+            (recipient_key,),
+        )
+        row = await cursor.fetchone()
+        return (row[0], row[1]) if row else (None, None)
+
+    async def reserve_schedule_email(self, recipient_key: str, delivery_key: str) -> None:
+        await self.db.execute(
+            "INSERT INTO email_schedule_state (recipient_key, pending_delivery_key) VALUES (?, ?) "
+            "ON CONFLICT(recipient_key) DO UPDATE SET "
+            "pending_delivery_key = excluded.pending_delivery_key",
+            (recipient_key, delivery_key),
+        )
+
+    async def complete_schedule_email(self, delivery_key: str, quiet_until: str) -> None:
+        """Start the window only after SMTP acceptance, alongside marking the email sent."""
+        await self.db.execute(
+            "UPDATE email_schedule_state SET quiet_until = ?, pending_delivery_key = NULL "
+            "WHERE pending_delivery_key = ?",
+            (quiet_until, delivery_key),
         )
 
     async def list_email_outbox(self) -> list[dict[str, str]]:

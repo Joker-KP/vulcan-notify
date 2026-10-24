@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import json
 import logging
 import smtplib
 import ssl
-from datetime import UTC, datetime
+from dataclasses import asdict, replace
+from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
 from email.utils import format_datetime, make_msgid
 from html import escape
@@ -19,22 +21,26 @@ from uuid import uuid4
 from vulcan_notify.auth import InvalidSessionError, load_session
 from vulcan_notify.client import VulcanClient
 from vulcan_notify.config import parse_email_sender, settings
+from vulcan_notify.differ import Change
 from vulcan_notify.email_digest import GROUPS, render_summary
 from vulcan_notify.email_rendering import markdown_html, render_email, render_template
-from vulcan_notify.models import Remark
+from vulcan_notify.models import Lesson, Remark, Student
 from vulcan_notify.summarizer import lessons_context, summarize
+from vulcan_notify.sync import FullSyncResult, SyncResult
 from vulcan_notify.text import message_html, message_text, strip_html
 
 if TYPE_CHECKING:
     from vulcan_notify.config import Settings
     from vulcan_notify.db import Database
-    from vulcan_notify.models import Message, Student
-    from vulcan_notify.sync import FullSyncResult
+    from vulcan_notify.models import Message
 
 log = logging.getLogger(__name__)
 _WEEKDAYS_PL = ("poniedziałek", "wtorek", "środa", "czwartek", "piątek", "sobota", "niedziela")
 AUTH_FAILURE_STATE = "email:auth_failure"
 WEEKLY_MIX_STATE = "summary:mix:weekly"
+SCHEDULE_EMAIL_TYPES: frozenset[Literal["substitution", "cancellation"]] = frozenset(
+    {"substitution", "cancellation"}
+)
 AuthFailureReason = Literal[
     "recovery_failed", "credentials_missing", "session_expired", "interactive_failed"
 ]
@@ -241,12 +247,14 @@ async def _queue_email(
     subject: str,
     body: str,
     html_body: str | None = None,
+    *,
+    recipients: list[str] | None = None,
 ) -> list[str]:
     """Queue one email per recipient, returning only newly inserted delivery keys."""
     date_header = format_datetime(datetime.now(settings.timezone))
     new_keys: list[str] = []
-    for recipient in dict.fromkeys(settings.email_to):
-        key = hashlib.sha256(f"{identity}\0{recipient}".encode()).hexdigest()
+    for recipient in dict.fromkeys(settings.email_to if recipients is None else recipients):
+        key = _delivery_key(identity, recipient)
         inserted = await db.enqueue_email(
             key,
             settings.email_from,
@@ -260,6 +268,14 @@ async def _queue_email(
         if inserted:
             new_keys.append(key)
     return new_keys
+
+
+def _delivery_key(identity: str, recipient: str) -> str:
+    return hashlib.sha256(f"{identity}\0{recipient}".encode()).hexdigest()
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 async def _mix_summary_footers(db: Database) -> tuple[str, str]:
@@ -366,16 +382,150 @@ async def queue_remarks(result: FullSyncResult, db: Database) -> None:
     await db.commit()
 
 
+def _schedule_snapshots(result: FullSyncResult) -> list[tuple[str, str]]:
+    """Capture detected events, including cancellations absent from the stored plan."""
+    events = []
+    for sr in result.student_results:
+        if sr.is_first_sync:
+            continue
+        for index, change in enumerate(sr.new_substitutions):
+            if not any(
+                change.item_type == kind and settings.email_digest_groups.get(kind, True)
+                for kind in SCHEDULE_EMAIL_TYPES
+            ):
+                continue
+            event_key = hashlib.sha256(
+                f"{result.notification_id}\0{sr.student.key}\0{index}".encode()
+            ).hexdigest()
+            payload = json.dumps(
+                {
+                    "student": asdict(sr.student),
+                    "portal_url": sr.portal_url,
+                    "change": asdict(change),
+                    "failed_sections": sr.failed_sections,
+                    "message_failure": result.message_failure,
+                },
+                ensure_ascii=False,
+            )
+            events.append((event_key, payload))
+    return events
+
+
+def _with_schedule_events(result: FullSyncResult, events: list[tuple[str, str]]) -> FullSyncResult:
+    """Rehydrate only email snapshots; never mutate the result used by other outputs."""
+    students = {sr.student.key: sr for sr in result.student_results}
+    message_failure = result.message_failure
+    for _, payload in events:
+        snapshot = json.loads(payload)
+        student = Student(**snapshot["student"])
+        change_data = snapshot["change"]
+        if change_data["raw"] is not None:
+            change_data["raw"] = Lesson(**change_data["raw"])
+        change = Change(**change_data)
+        sr = students.get(student.key) or SyncResult(student, portal_url=snapshot["portal_url"])
+        students[student.key] = replace(
+            sr,
+            is_first_sync=False,
+            portal_url=sr.portal_url or snapshot["portal_url"],
+            new_substitutions=[*sr.new_substitutions, change],
+            failed_sections=snapshot["failed_sections"] | sr.failed_sections,
+        )
+        message_failure = message_failure or snapshot["message_failure"]
+    return replace(result, student_results=list(students.values()), message_failure=message_failure)
+
+
+async def _stage_summaries(
+    result: FullSyncResult, db: Database
+) -> list[tuple[FullSyncResult, str, str, list[str]]]:
+    """Atomically ingest events, enqueue eligible digests and consume their buffers."""
+    ordinary = replace(
+        result,
+        student_results=[
+            replace(
+                sr,
+                new_substitutions=[
+                    change
+                    for change in sr.new_substitutions
+                    if change.item_type not in SCHEDULE_EMAIL_TYPES
+                ],
+            )
+            for sr in result.student_results
+        ],
+    )
+    _, _, _, ordinary_count = render_summary(ordinary, settings)
+    snapshots = _schedule_snapshots(result)
+    now = _utc_now()
+    # Share one AI preparation when recipients receive identical content.
+    jobs: dict[tuple[str, str, str], tuple[FullSyncResult, str, str, list[str]]] = {}
+    await db.db.execute("SAVEPOINT email_summary")
+    try:
+        for recipient in dict.fromkeys(settings.email_to):
+            recipient_key = hashlib.sha256(recipient.encode()).hexdigest()
+            for event_key, payload in snapshots:
+                await db.buffer_schedule_email(recipient_key, event_key, payload)
+            quiet_until, pending = await db.get_schedule_email_state(recipient_key)
+            ready = not pending and (
+                settings.email_schedule_cooldown_hours == 0
+                or quiet_until is None
+                or now >= datetime.fromisoformat(quiet_until)
+            )
+            events = await db.get_schedule_email_events(recipient_key) if ready else []
+            selected = ordinary
+            identity = result.notification_id
+            has_schedule = False
+            if events:
+                buffered = _with_schedule_events(FullSyncResult([]), events)
+                _, _, _, schedule_count = render_summary(buffered, settings)
+                has_schedule = schedule_count > 0
+                if has_schedule:
+                    # Re-delivering the same partial result must not repeat its other groups.
+                    if ordinary_count and not await db.has_email_delivery(
+                        _delivery_key(result.notification_id, recipient)
+                    ):
+                        selected = _with_schedule_events(ordinary, events)
+                    else:
+                        selected = (
+                            buffered if ordinary_count else _with_schedule_events(ordinary, events)
+                        )
+                        batch = hashlib.sha256("\0".join(key for key, _ in events).encode())
+                        identity = f"schedule:{batch.hexdigest()}"
+            subject, body, html_body, count = render_summary(selected, settings)
+            if count:
+                new_keys = await _queue_email(
+                    db, identity, subject, body, html_body, recipients=[recipient]
+                )
+                if has_schedule and new_keys:
+                    await db.reserve_schedule_email(recipient_key, new_keys[0])
+                if new_keys:
+                    job_key = (subject, body, html_body)
+                    if job_key in jobs:
+                        jobs[job_key][3].extend(new_keys)
+                    else:
+                        jobs[job_key] = (selected, body, html_body, new_keys)
+            if events:
+                # Includes groups disabled since buffering; already queued bodies stay immutable.
+                await db.consume_schedule_email_events(recipient_key)
+        await db.db.execute("RELEASE SAVEPOINT email_summary")
+    except BaseException:
+        await db.db.execute("ROLLBACK TO SAVEPOINT email_summary")
+        await db.db.execute("RELEASE SAVEPOINT email_summary")
+        raise
+    await db.commit()
+    return list(jobs.values())
+
+
 async def queue_summary(result: FullSyncResult, db: Database) -> None:
-    """Persist both digest alternatives before attempting optional AI or SMTP."""
+    """Persist current digests and schedule buffers before optional AI or SMTP."""
     if not settings.email_enabled:
         return
-    subject, body, html_body, count = render_summary(result, settings)
-    if not count:
-        return
-    new_keys = await _queue_email(db, result.notification_id, subject, body, html_body)
-    await db.commit()
+    jobs = await _stage_summaries(result, db)
+    for selected, body, html_body, new_keys in jobs:
+        await _prepare_summary_ai(selected, db, body, html_body, new_keys)
 
+
+async def _prepare_summary_ai(
+    result: FullSyncResult, db: Database, body: str, html_body: str, new_keys: list[str]
+) -> None:
     # Retry uses stored bodies. AI adds a summary while retaining every group,
     # its facts and student-specific links in both alternatives.
     if new_keys and settings.email_ai_summary and settings.llm_api_key:
@@ -480,6 +630,8 @@ async def drain_email_outbox(db: Database) -> tuple[int, int]:
             log.warning("SMTP delivery failed (%s); digest remains queued", error_type)
             await db.mark_email_failure(row["delivery_key"], error_type)
         else:
+            quiet_until = _utc_now() + timedelta(hours=settings.email_schedule_cooldown_hours)
+            await db.complete_schedule_email(row["delivery_key"], quiet_until.isoformat())
             await db.mark_email_sent(row["delivery_key"])
             delivered += 1
         # Commit each recipient's outcome before attempting the next one.

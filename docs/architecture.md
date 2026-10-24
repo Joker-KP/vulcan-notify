@@ -112,6 +112,8 @@ SQLite lives at `DB_PATH` (default `vulcan_notify.db`). Tables:
 | `schedule` | `(student_key, date, time_from, subject)` | Per-lesson schedule including substitutions (`sub_teacher`, `sub_room`), cancellations (`annotation`), and extra lessons (`is_extra`). |
 | `mqtt_outbox` | `id` AUTOINCREMENT | Every MQTT publish is enqueued first; drained on each run. Broker outages survive restarts. |
 | `email_outbox` | `delivery_key` | Digest per sync-run/recipient and notification per upstream message/recipient; pending envelopes persist across restarts. Successful rows retain deduplication metadata while clearing private content. |
+| `email_schedule_state` | `recipient_key` (address hash) | Shared substitution/cancellation quiet deadline and pending outbox delivery per recipient, across all students. |
+| `email_schedule_events` | `(recipient_key, event_key)` | Schedule event snapshots pending email; payloads clear atomically with outbox enqueue, retaining ingestion receipts. |
 | `sync_state` | `key` | Generic KV. Holds `last_sync:<student>` (has this student ever synced — drives first-sync suppression) and `last_success:<student>:<section>` (freshness, written only after a confirmed fetch). The two are deliberately separate. |
 | `sync_runs` | `id` AUTOINCREMENT | History of runs: `completed`, `degraded` (a section failed), `failed`, or `interrupted` (abandoned mid-run, reconciled on the next start). Pruned past `SYNC_HISTORY_KEEP_DAYS`. |
 | `sync_sections` | `id` AUTOINCREMENT | Per-section, per-student outcome for each run, with item counts and error detail. Without it a partial outage — grades broken, everything else fine — is invisible. |
@@ -236,6 +238,20 @@ comes from the client's authenticated base URL and URL-encoded student key.
 `EMAIL_AI_SUMMARY=true` and `LLM_API_KEY` enable the existing summarizer's default
 prompt; its output appears above the groups without removing facts or links.
 AI failures keep the original grouped digest.
+`EMAIL_SCHEDULE_COOLDOWN_HOURS=6` sends the first substitution/cancellation
+immediately, then buffers those two event types in SQLite until the first sync
+after the fixed window. All students share a window, independently per recipient.
+Other categories continue immediately and may share the first/due digest.
+`email_schedule_state` reserves a prepared outbox email until SMTP accepts it;
+only acceptance starts the window. `email_schedule_events` snapshots survive
+restarts and deleted schedule rows, retaining repeated edits as separate events.
+Buffer consumption, enqueue and reservation commit together before AI; acceptance
+and the new deadline commit together. Ingestion receipts prevent repeating the
+same sync's events. Category switches also apply at flush; disabled buffered
+events are discarded. `0` disables the timed wait, including for existing buffers.
+There is no timer: overnight pauses defer flushing to a later sync. `email-retry`
+only retries already prepared bodies. Existing pre-upgrade outbox rows retain
+their original behavior; these tables are added automatically.
 The CLI also calls the email adapter on exhausted authentication failures,
 including before a sync database/result exists. `auth_failure.html` uses the
 same layout and a derived text alternative with noVNC recovery instructions.

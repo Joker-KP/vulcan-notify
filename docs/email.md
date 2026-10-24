@@ -1,7 +1,8 @@
 # Email notifications and change digests
 
-With `EMAIL_ENABLED=true`, each sync prepares one HTML digest of detected student
-changes. Each student has separate sections, in this order: **Oceny**,
+With `EMAIL_ENABLED=true`, each sync prepares an HTML digest per recipient of
+eligible detected student changes and any due buffered schedule changes.
+Each student has separate sections, in this order: **Oceny**,
 **Frekwencja**, **Zastępstwa**, **Anulowane zajęcia**, **Dodatkowe zajęcia**,
 **Sprawdziany**, **Zadania domowe**. Empty sections are omitted. Each group has its
 own heading, item count, formatting and a final link to the relevant student view.
@@ -73,6 +74,72 @@ Already queued emails retain their previously rendered content on retries.
 Attendance alerts cover classroom, other activities and childcare. Historical
 other-activity/childcare records baseline silently on upgrades; new non-present
 records notify afterwards. Existing attendance-category changes remain silent.
+
+### Accumulating substitutions and cancellations
+
+`EMAIL_SCHEDULE_COOLDOWN_HOURS` defaults to **6**. The first detected substitution
+or cancellation is eligible immediately, in the usual sync digest alongside any
+other categories. Once SMTP accepts that email for a recipient, a fixed quiet
+window begins for both **Zastępstwa** (`substitution`) and **Anulowane zajęcia**
+(`cancellation`). Further events of these types accumulate in SQLite. They are
+excluded from emails and digest AI input during the window, including digests
+containing other categories. New events do not extend the window.
+
+The first sync reaching the email adapter at/after expiry includes the accumulated
+events and newly detected schedule events in one digest per recipient, grouped
+by student and category. It does so even if the sync detected no new changes.
+Other changes from that sync may share the digest. SMTP acceptance starts the
+next quiet window. Empty buffers do not produce emails or start another window;
+after an idle expired window, the next change is eligible immediately.
+
+For example, an accepted email at 08:00 starts a window until 14:00. Schedule
+changes detected at 09:00 and 12:00 accumulate, while a grade detected at 10:00
+is emailed normally. The first sync at/after 14:00 emails the buffered changes.
+There is no separate timer or background sender: if expiry falls during the
+overnight sync pause, delivery waits until the next morning's sync. Full auth
+failures can also postpone flushing until a sync reaches email processing.
+`email-retry` retries prepared emails only; it does not flush the buffer.
+
+The window is shared across all students in this database/account, independently
+for each recipient. Student keys preserve identity even for duplicate names.
+Grades, attendance, exams, homework, **additional lessons** (`addition`), inbox
+messages, praise/notes, authentication alerts and standalone/weekly summaries
+retain their existing behavior. Fetching, diffing, stored school state, MQTT,
+HTTP API and calendar outputs retain their existing behavior too.
+
+A failed SMTP attempt keeps one prepared schedule email reserved for that
+recipient. Further schedule events accumulate behind it, without creating more
+immediate emails. The window begins at actual SMTP acceptance, including acceptance
+through `email-retry`. Its duration uses the configured value at acceptance.
+Successful delivery of an ordinary email does not restart the schedule window.
+
+The buffer stores event snapshots, student context and portal links, including
+cancellations whose plan rows have already been deleted. Repeated edits to the
+same lesson are retained as separate detected events rather than collapsed into
+its final state. Baselines stay silent. Reprocessing the same `FullSyncResult`
+does not duplicate buffered or already queued events. Buffer ingestion, outbox
+enqueue, buffer consumption and delivery reservation commit atomically before
+optional AI preparation; SMTP success and the new deadline also commit together.
+The existing gap between school-state persistence and email processing still
+applies; this does not guarantee exactly-once delivery.
+
+Nonnegative fractional hours are supported. Setting the value to **0** disables
+the timed wait and makes buffered changes eligible on the next sync; existing
+SMTP reservations still prevent duplicating an email awaiting retry. Disabling
+email pauses both accumulation and delivery, preserving existing buffers and
+prepared emails. Removing a recipient pauses their buffer until that address is
+configured again; prepared emails retain their original envelope and retry rules.
+
+`EMAIL_DIGEST_GROUPS` applies before accumulation and again at flush. A disabled
+category is not newly buffered; previously buffered events in that category are
+discarded when an eligible flush processes the buffer. Prepared outbox emails
+retain their stored content regardless of later category-switch changes.
+
+Database initialization creates `email_schedule_state` and `email_schedule_events`
+automatically, preserving existing data and outbox rows. No manual migration is
+needed. Consumed event payloads are cleared while their ingestion identities
+remain for deduplication. Store the database on the usual persistent volume and
+keep a single sync/delivery owner.
 
 ### Choosing digest groups
 
@@ -367,6 +434,7 @@ settings unset for a relay that does not require authentication.
 | `EMAIL_TO` | `[]` | Required recipient list. |
 | `EMAIL_SUBJECT_PREFIX` | `[eduVulcan]` | Subject is `<prefix> <present groups> (sumarycznie <N> zmian)`, with Polish count inflection. |
 | `EMAIL_DIGEST_GROUPS` | `{}` (all enabled) | JSON object of group switches; omitted keys stay enabled. Filtering applies to digest body, subject, count and AI input; one change has no subject count suffix. |
+| `EMAIL_SCHEDULE_COOLDOWN_HOURS` | `6` | Nonnegative hours between accepted substitution/cancellation emails per recipient; further events accumulate until an eligible sync. `0` disables the timed wait. |
 | `EMAIL_MESSAGE_SUBJECT_PREFIX` | `[Nowa wiadomość]` | Separate message email subject is `<prefix> <original subject>`; upstream line breaks are flattened. |
 | `EMAIL_REMARK_SUBJECT_PREFIX` | `[Uwagi]` | Separate praise/note email subject is `<prefix> <student>: <category>`. |
 | `TZ` | `Europe/Warsaw` | Shared runtime/display timezone; dates use `YYYY-MM-DD HH:MM (dzień tygodnia)`. `QUIET_HOURS_TZ` remains a legacy fallback. |

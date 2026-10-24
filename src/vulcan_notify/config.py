@@ -141,6 +141,8 @@ class Settings(BaseSettings):
     email_subject_prefix: str = "[eduVulcan]"
     # Omitted groups are enabled; JSON object in .env, e.g. {"attendance": false}.
     email_digest_groups: dict[EmailDigestGroup, bool] = Field(default_factory=dict)
+    # First schedule email is immediate; later substitutions/cancellations accumulate.
+    email_schedule_cooldown_hours: float = Field(default=6, ge=0, allow_inf_nan=False)
     email_message_subject_prefix: str = "[Nowa wiadomość]"
     email_remark_subject_prefix: str = "[Uwagi]"
     email_include_message_bodies: bool = False
