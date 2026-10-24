@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timedelta
+from itertools import permutations
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
@@ -189,6 +190,109 @@ async def test_sync_student_persists_and_reports(db: Database) -> None:
     assert result2.is_first_sync is False
     assert len(result2.new_substitutions) == 1
     assert result2.new_substitutions[0].change_type == "updated"
+
+
+@pytest.mark.parametrize("baseline_with_duplicates", [False, True])
+@pytest.mark.parametrize("reverse_order", [False, True])
+async def test_sync_duplicate_schedule_is_idempotent(
+    db: Database, monkeypatch, baseline_with_duplicates, reverse_order
+) -> None:
+    """A plain API duplicate must not erase and re-report a substitution."""
+    clock = MagicMock(wraps=datetime)
+    clock.now.return_value = datetime(2026, 4, 15, 12, tzinfo=settings.timezone)
+    monkeypatch.setattr(sync_mod, "datetime", clock)
+    client = AsyncMock()
+    client.student_portal_url = MagicMock(return_value=None)
+    for method in (
+        "get_periods",
+        "get_attendance",
+        "get_exams",
+        "get_homework",
+        "get_remarks",
+        "get_completed_lessons",
+    ):
+        getattr(client, method).return_value = []
+
+    regular = make_lesson()
+    substituted = replace(regular, sub_teacher="Substitute T", sub_type=7, annotation=1)
+    duplicates = [substituted, substituted, regular]
+    if reverse_order:
+        duplicates.reverse()
+    client.get_schedule.return_value = duplicates if baseline_with_duplicates else [regular]
+    assert (await sync_student(client, db, STUDENT)).new_substitutions == []
+
+    client.get_schedule.return_value = duplicates
+    changes = (await sync_student(client, db, STUDENT)).new_substitutions
+    assert len(changes) == (0 if baseline_with_duplicates else 1)
+    if changes:
+        assert changes[0].change_type == "updated"
+        assert changes[0].raw == substituted
+    rows = await db.get_lessons_for_student(STUDENT.key)
+    assert len(rows) == 1
+    assert rows[0]["sub_teacher"] == "Substitute T"
+    assert rows[0]["sub_type"] == 7
+    assert rows[0]["annotation"] == 1
+
+    # Reopen SQLite and reorder the response: neither can trigger another event.
+    await db.close()
+    await db.connect()
+    client.get_schedule.return_value = list(reversed(duplicates))
+    assert (await sync_student(client, db, STUDENT)).new_substitutions == []
+
+    # A real edit still notifies once, even alongside the plain duplicate.
+    updated = replace(substituted, sub_teacher="Another substitute")
+    client.get_schedule.return_value = [regular, updated, updated]
+    changes = (await sync_student(client, db, STUDENT)).new_substitutions
+    assert len(changes) == 1
+    assert changes[0].change_type == "updated"
+    assert changes[0].raw == updated
+    assert (await sync_student(client, db, STUDENT)).new_substitutions == []
+
+    # Removing the substitution must clear it rather than retain old DB fields.
+    client.get_schedule.return_value = [regular, regular]
+    assert (await sync_student(client, db, STUDENT)).new_substitutions == []
+    rows = await db.get_lessons_for_student(STUDENT.key)
+    assert rows[0]["sub_teacher"] is None
+    assert rows[0]["sub_type"] is None
+    assert rows[0]["annotation"] == 0
+
+    client.get_schedule.return_value = []
+    changes = (await sync_student(client, db, STUDENT)).new_substitutions
+    assert len(changes) == 1
+    assert changes[0].item_type == "cancellation"
+    assert (await sync_student(client, db, STUDENT)).new_substitutions == []
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"sub_teacher": "Substitute T"},
+        {"sub_room": "20"},
+        {"remarks": "Changed lesson"},
+        {"is_extra": True},
+        {"annotation": 1},
+    ],
+)
+def test_normalize_schedule_preserves_changed_entry(changes) -> None:
+    regular = make_lesson()
+    changed = replace(regular, **changes)
+    other = replace(regular, subject="Another subject")
+    for entries in permutations([regular, changed, other]):
+        normalized = sync_mod._normalize_schedule(list(entries))
+        assert len(normalized) == 2
+        assert changed in normalized
+        assert other in normalized
+
+
+def test_normalize_schedule_conflicting_variants_ignore_response_order() -> None:
+    regular = make_lesson()
+    first = replace(regular, sub_teacher="Teacher A", annotation=1)
+    second = replace(regular, sub_teacher="Teacher B", sub_room="20", annotation=1)
+    expected = sync_mod._normalize_schedule([regular, first, second])
+    assert len(expected) == 1
+    assert expected[0] in (first, second)
+    for entries in permutations([regular, first, second]):
+        assert sync_mod._normalize_schedule(list(entries)) == expected
 
 
 @pytest.mark.parametrize("removed", [(0,), (2,), (0, 1, 2)])

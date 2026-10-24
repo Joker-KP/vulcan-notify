@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -24,11 +25,38 @@ from vulcan_notify.differ import (
 if TYPE_CHECKING:
     from vulcan_notify.client import VulcanClient
     from vulcan_notify.db import Database
-    from vulcan_notify.models import Grade, Message, Student
+    from vulcan_notify.models import Grade, Lesson, Message, Student
 
 logger = logging.getLogger(__name__)
 
 _STUDENT_SECTIONS = ("grades", "attendance", "exams", "homework", "schedule")
+
+
+def _normalize_schedule(lessons: list[Lesson]) -> list[Lesson]:
+    """Choose one complete API entry per persisted lesson key before diff/save.
+
+    PlanZajec can return both substituted and plain entries for the same slot.
+    Prefer the substituted entry so a later plain duplicate cannot erase it.
+    Extra/annotated entries take precedence next; conflicting variants use a
+    stable content tie-breaker because this API provides no revision timestamp.
+    Only this fetch is considered, so removed substitutions can still clear.
+    """
+
+    def priority(lesson: Lesson) -> tuple[bool, bool, bool, str]:
+        return (
+            lesson.is_substituted,
+            lesson.is_extra,
+            bool(lesson.annotation),
+            json.dumps(asdict(lesson), sort_keys=True, ensure_ascii=False),
+        )
+
+    by_key: dict[tuple[str, str, str], Lesson] = {}
+    for lesson in lessons:
+        key = (lesson.date, lesson.time_from, lesson.subject)
+        existing = by_key.get(key)
+        if existing is None or priority(lesson) > priority(existing):
+            by_key[key] = lesson
+    return [by_key[key] for key in sorted(by_key)]
 
 
 def _api_date_window(now: datetime, days_past: int, days_future: int) -> tuple[str, str]:
@@ -344,7 +372,9 @@ async def sync_student(
         # Whole local days, converted to UTC ISO for the API.
         date_from_api, date_to_api = _api_date_window(now, 7, 14)
 
-        lessons = await client.get_schedule(student, date_from_api, date_to_api)
+        lessons = _normalize_schedule(
+            await client.get_schedule(student, date_from_api, date_to_api)
+        )
 
         # Include the full requested window, even when its boundary days vanish.
         # Extend it for returned boundary dates to retain timezone-drift tolerance.

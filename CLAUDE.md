@@ -133,6 +133,12 @@ The tool follows a linear pipeline: **Auth -> Client -> Sync -> Diff -> Display*
 
   Grades, attendance, exams, homework and schedule now also have independent successful-section baselines. Failed initial sections baseline silently on recovery. Legacy initialization preserves prior confirmed successes (or the student marker when no section history exists). Schedule comparison covers the full requested local window, including missing boundary days.
 
+  Schedule duplicates sharing `(date, time_from, subject)` normalize before both
+  diff and persistence: prefer substituted, then extra and annotated entries,
+  resolving other ties by stable content. Selection considers only the current
+  fetch, allowing substitution removal. The existing single-entry key remains;
+  parallel variants are not stored separately. No schema migration is needed.
+
 - `api.py` - `/api/students` discovers stable profile keys. Student endpoints support `student_key` and `keyed=1`; unique-name response keys remain compatible, while ambiguous names return HTTP 409. Calendar feeds accept explicit profile keys; historical profile merging requires a matching nonempty mailbox identity.
 
 - Session writes are atomic and mode 0600. Invalid session files use the existing recovery policy without exposing file contents. Calendar transient failures preserve stored UIDs for retry; `CALENDAR_TIMEOUT_SECONDS` bounds AppleScript and kills/reaps timed-out or cancelled processes.

@@ -267,6 +267,12 @@ on repeat without duplicate events. Populated exam data remains mock-tested only
 
 The schedule comparison includes the full requested local window (previous 7 through next 14 days), extending to any returned boundary dates. Missing first/last lesson days are compared even when no remaining fetched lesson has that date.
 
+Schedule API duplicates sharing `(date, time_from, subject)` normalize to one
+complete entry before both diff and persistence. Substituted entries take
+precedence, then extra and annotated entries, with a stable content tie-breaker.
+Only the current fetch is considered, so removed substitutions still clear.
+This preserves the existing single-entry key; it does not store parallel variants.
+
 Prefer stable upstream identifiers as keys whenever available. Keep comparison scope explicit and preserve student/account boundaries.
 
 When an upstream item can disappear because it was cancelled or deleted, consider soft-delete semantics rather than destructive deletion.

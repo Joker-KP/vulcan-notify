@@ -132,6 +132,16 @@ The full entity diagram (students + primary entities) is in the [README](../READ
 
 Each section's first successful persistence writes its baseline marker and suppresses historical changes. Missing schedule lessons are compared over the full requested local date window, extended to include returned boundary dates, so disappearing first/last lesson days are detected.
 
+Before schedule comparison and persistence, duplicate API entries with the same
+`(date, time_from, subject)` are reduced to one complete entry. Substituted entries
+take precedence, followed by extra and annotated entries; a stable content
+tie-breaker resolves remaining conflicts independently of response order. This
+prevents a plain duplicate from overwriting a substitution and triggering it on
+every sync. Selection uses only the current fetch, so removed substitution fields
+still clear. The existing key represents one entry per slot/subject, rather than
+all parallel variants; no schema migration is required. Existing overwritten
+substitutions can notify once when first recovered, then remain silent.
+
 Homework detail is fetched before diffing and persistence, so new change events
 carry the description, teacher, raw `links` JSON, `response_required` and
 `response_deadline` to email and MQTT. The nullable `detail_fetched_at` column

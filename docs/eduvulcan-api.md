@@ -419,6 +419,13 @@ Response: list of lesson dicts with keys:
   - `dzien`, `nrLekcji`, `godzinaOd`, `godzinaDo`, `grupa`, `zajecia`, `informacjeNieobecnosc` — nullable overrides for reschedules/absences
 - `zmianyUwagi` — list of free-text remarks about the change
 
+The October 24, 2026 live check found four pairs sharing `data`, `godzinaOd`
+and `przedmiot`, each with a substituted entry followed by a plain entry. Their
+`podzial` values were empty string and null (both normalize to no group). Do not
+use response order to overwrite substitution state. Synchronization selects one
+complete entry per persisted schedule key before both diffing and saving, with
+substituted entries taking precedence and stable resolution of other ties.
+
 ### GET /api/RealizacjaZajec13?key={key}&dataOd={from}&dataDo={to}&status={status}
 
 Lesson realization, used by the web `/realizacjaZajec` page. Both tabs use this
