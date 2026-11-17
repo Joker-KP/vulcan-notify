@@ -507,6 +507,22 @@ and forwards to Telegram.
 3. If the client detects an HTML response (eduVulcan's expired-session sentinel) and credentials are available (from `.env` or the macOS Keychain service `vulcan-notify`), it restores persistent Chromium, imports stored cookies, tries browser reuse and then credential login, before retrying once. Docker supplies Xvfb for headed recovery; manual authentication remains explicit through the `vulcan-auth` profile.
 4. SSL uses certifi's bundled root store so it works inside minimal containers.
 
+Automatic browser authentication has one additional bounded fallback when a
+saved session exists: a failed journal-profile handoff or rejected exported
+Context closes Chromium and reopens the same profile without JSON cookie import.
+Navigation events and dashboard state are recreated, and browser reuse is tried
+before credentials again. A repeated failure propagates. Credential/CAPTCHA,
+unavailable-validation, browser-startup and file-write failures do not trigger
+this fallback. The shared profile lock covers both attempts.
+
+Imports omit expired cookies and host-only `RPE_…` cookies on `eduvulcan.pl` at
+`/`. The same portal family is cleared from Chromium before a new authentication
+flow and after completed student/messages handoffs, before exporting and testing
+the replacement snapshot. This prevents old JSON from restoring that buildup;
+cleanup does not run during an active handoff. SSO chunks and unexpired verification
+cookies are retained. The cookie-growth mitigation is locally regression-tested;
+the upstream cookie lifecycle and live resolution remain unverified.
+
 Session writes flush/fsync a mode-0600 temporary file in the same directory before atomic replacement. Failed writes leave the previous session intact. JSON and structure validation raises a sanitized error; normal sync attempts existing credential-backed recovery, or asks for explicit manual authentication when credentials are unavailable. No browser starts merely to validate a corrupt file.
 
 HTTP cookie selection respects host-only versus domain cookies, path boundaries,

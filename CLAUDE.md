@@ -125,6 +125,15 @@ The tool follows a linear pipeline: **Auth -> Client -> Sync -> Diff -> Display*
 
 - `auth.py` - Persistent Playwright Chromium under `/app/data/chromium-profile`, guarded by a shared profile lock. Imports `session.json` cookies, tries browser reuse before credentials and verifies exported HTTP API access before saving refreshed state. Interactive auth always forces headed mode; automatic selection opens the first journal profile. `cookie_header_for_url()` honors host-only/domain, path, expiry and Secure metadata and preserves same-name cookies in path order; `cookies_for_url()` retains a compatibility mapping. API/validation requests refuse redirects with manual cookie headers and use the existing bounded recovery. Also provides `_make_ssl_context()` used by the client.
 
+  With a saved session, a failed journal handoff or rejected exported Context
+  retries once by closing/reopening the same profile without JSON import and
+  with fresh navigation tracking. Unrelated login/validation/IO failures do not
+  retry. Imports skip expired cookies and host-only parent-portal `RPE_…` cookies
+  at `/`; Chromium removes that family before a new flow and after completed
+  student/messages handoffs. SSO chunks and unexpired verification cookies stay.
+  Failed authentication preserves the old JSON; replacement still requires
+  HTTP validation. Unit-tested policy; live resolution remains unverified.
+
 - `client.py` - `VulcanClient` wraps aiohttp for the uczen.eduvulcan.pl JSON API. Handles cookie auth, SSL (certifi), and session expiry detection (HTML response = expired). Returns typed dataclasses from `models.py`.
 
 - `models.py` - Dataclasses for all API response types: `Student`, `Grade`, `AttendanceEntry`, `Exam`, `Homework`, `ClassificationPeriod`, `DashboardData`.

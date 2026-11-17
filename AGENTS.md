@@ -451,6 +451,15 @@ header; redirects request the existing bounded browser recovery instead.
 
 Do not unnecessarily overwrite or invalidate a working session.
 
+Browser authentication filters expired cookies and host-only `RPE_…` cookies
+at `eduvulcan.pl` path `/` out of JSON imports. It removes that accumulated
+portal cookie family from Chromium before starting a new flow and after the
+student/messages handoffs, before exporting and validating replacement cookies.
+Cleanup never runs during a handoff; SSO chunks and unexpired verification
+cookies remain intact. The old file stays unchanged until API validation and
+atomic replacement succeed. This targeted cleanup is locally tested; its live
+effect on the reported cookie-growth failure remains unverified.
+
 ### Session reuse first
 
 Normal `sync` uses `_ensure_session()` in `__main__.py`:
@@ -525,6 +534,14 @@ Credential submission waits up to 30 seconds for the final portal/student redire
 and handles student access in another tab; it does not require a POST to a specific
 URL or resubmit credentials after an ambiguous click timeout. Session saving still
 requires reaching the student application and confirming its HTTP API access.
+
+When a saved session exists, automatic authentication retries a failed journal
+profile handoff or rejected exported Context once: close Chromium, reopen the
+same persistent profile under the same lock, reset navigation tracking and skip
+JSON cookie import. The second attempt still tries browser reuse before credentials.
+Repeated handoff failures propagate to normal manual-recovery instructions.
+Credential/CAPTCHA rejection, unavailable validation, browser startup and file-write
+failures do not trigger this additional retry. No profile/session file is deleted.
 
 Mid-sync `SessionExpiredError` propagates to the CLI for one credential-backed recovery attempt. Partial results carry already persisted changes to the CLI for output delivery before retry, so a fresh diff does not silently discard them. A degraded sync exits nonzero after publishing successful changes; the loop counts it as a failure. HTML server failures are retried as fetch failures, rather than interpreted as expired sessions.
 

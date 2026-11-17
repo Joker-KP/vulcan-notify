@@ -66,7 +66,7 @@ async def test_persistent_context_can_force_headed_mode(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("interactive", [False, True])
 async def test_browser_reuse_precedes_credentials_or_manual_login(monkeypatch, interactive):
-    context = MagicMock()
+    context = MagicMock(cookies=AsyncMock(return_value=[]))
     context.close = AsyncMock()
     page = AsyncMock()
     monkeypatch.setattr(auth, "_browser_profile_lock", lambda: nullcontext())
@@ -355,10 +355,11 @@ async def test_login_recognizes_student_journal_in_another_tab():
     await auth._submit_login_form(page, MagicMock(click=AsyncMock()), complete)
 
 
+@pytest.mark.parametrize("handoff", ["success", "missing", "timeout"])
 async def test_auto_login_continues_from_portal_to_journal_without_login_post(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, handoff
 ):
-    context = MagicMock(close=AsyncMock())
+    context = MagicMock(close=AsyncMock(), cookies=AsyncMock(return_value=[]))
     page = MagicMock(url=auth.EDUVULCAN_LOGIN_URL)
     page.goto = AsyncMock()
     field = MagicMock(
@@ -375,9 +376,14 @@ async def test_auto_login_continues_from_portal_to_journal_without_login_post(
         assert predicate(page.url)
 
     async def open_profile(*args):
-        tracking["dashboard"]["url"] = "https://uczen.eduvulcan.pl/fixture/App/profile/tablica"
-        tracking["complete"].set()
-        return True
+        if handoff == "success":
+            tracking["dashboard"]["url"] = "https://uczen.eduvulcan.pl/fixture/App/profile/tablica"
+            tracking["complete"].set()
+        return handoff != "missing"
+
+    async def timeout(awaitable, **kwargs):
+        awaitable.close()
+        raise TimeoutError
 
     page.wait_for_url = AsyncMock(side_effect=redirect)
     monkeypatch.setattr(auth, "_browser_profile_lock", lambda: nullcontext())
@@ -392,17 +398,152 @@ async def test_auto_login_continues_from_portal_to_journal_without_login_post(
     monkeypatch.setattr(auth, "_wait_for_captcha", AsyncMock())
     monkeypatch.setattr(auth, "_get_login_delay_seconds", lambda: 0)
     monkeypatch.setattr(auth.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(auth.asyncio, "wait_for", timeout)
+    screenshot = AsyncMock()
+    monkeypatch.setattr(auth, "_save_screenshot", screenshot)
     monkeypatch.setattr(auth, "_open_student_profile", AsyncMock(side_effect=open_profile))
     save = AsyncMock(return_value={"recovered": True})
     monkeypatch.setattr(auth, "_save_current_session", save)
 
-    assert await auth.auto_login(tmp_path / "session.json", "fixture", "fixture") == {
-        "recovered": True
-    }
+    if handoff == "success":
+        assert await auth.auto_login(tmp_path / "session.json", "fixture", "fixture") == {
+            "recovered": True
+        }
+        assert save.call_args.args[3] == tracking["dashboard"]["url"]
+        screenshot.assert_not_awaited()
+    else:
+        with pytest.raises(auth._JournalHandoffError):
+            await auth.auto_login(tmp_path / "session.json", "fixture", "fixture")
+        save.assert_not_awaited()
+        assert screenshot.call_args.args[2] == (
+            "journal-profile-error" if handoff == "missing" else "student-redirect-error"
+        )
     page.expect_response.assert_not_called()
     assert page.goto.call_args.args[0] == auth.JOURNAL_ACCESS_URL
-    assert save.call_args.args[3] == tracking["dashboard"]["url"]
     context.close.assert_awaited_once()
+
+
+@pytest.mark.parametrize("second_failure", [False, True])
+async def test_handoff_retry_is_bounded_and_skips_saved_snapshot(
+    monkeypatch, tmp_path, second_failure
+):
+    path = tmp_path / "session.json"
+    path.write_text("previous session")
+    monkeypatch.setattr(auth, "_browser_profile_lock", lambda: nullcontext())
+    monkeypatch.setattr(auth, "_cleanup_chromium_singleton_locks", MagicMock())
+    monkeypatch.setattr(auth, "async_playwright", MagicMock())
+    attempt = AsyncMock(
+        side_effect=[
+            auth._JournalHandoffError(),
+            auth._JournalHandoffError() if second_failure else {"recovered": True},
+        ]
+    )
+    monkeypatch.setattr(auth, "_auto_login_attempt", attempt)
+    if second_failure:
+        with pytest.raises(auth._JournalHandoffError):
+            await auth.auto_login(path, "fixture", "fixture")
+    else:
+        assert await auth.auto_login(path, "fixture", "fixture") == {"recovered": True}
+    assert [call.kwargs["seed_session"] for call in attempt.await_args_list] == [True, False]
+    assert path.read_text() == "previous session"
+
+
+@pytest.mark.parametrize("outcome", ["success", "rejected", "unavailable", "cancelled"])
+async def test_journal_recovery_reopens_profile_once_without_reimport(
+    monkeypatch, tmp_path, outcome, caplog
+):
+    path = tmp_path / "session.json"
+    original = '{"base_url":"https://example.test","cookies":[]}'
+    path.write_text(original)
+    contexts = [MagicMock(close=AsyncMock(), cookies=AsyncMock(return_value=[])) for _ in range(2)]
+    events = []
+    tracking = []
+
+    async def launch(playwright):
+        if events:
+            contexts[0].close.assert_awaited_once()
+            assert path.read_text() == original
+        events.append("launch")
+        return contexts[len(events) - 1]
+
+    def attach(context, complete, dashboard):
+        assert not complete.is_set()
+        assert not dashboard["url"]
+        tracking.append((complete, dashboard))
+        # Navigation flags from the first browser must not survive its retry.
+        complete.set()
+        dashboard["url"] = "https://uczen.eduvulcan.pl/district/App/profile"
+
+    async def save(context, page, session_path, dashboard_url):
+        assert path.read_text() == original
+        if context is contexts[0] or outcome == "rejected":
+            raise auth.InvalidSessionError("private saved-session detail")
+        if outcome == "unavailable":
+            raise auth.SessionValidationError("private network detail")
+        if outcome == "cancelled":
+            raise asyncio.CancelledError
+        return {"recovered": True}
+
+    monkeypatch.setattr(auth, "_browser_profile_lock", lambda: nullcontext())
+    monkeypatch.setattr(auth, "_cleanup_chromium_singleton_locks", MagicMock())
+    monkeypatch.setattr(auth, "async_playwright", MagicMock())
+    monkeypatch.setattr(auth, "_launch_browser_context", AsyncMock(side_effect=launch))
+    monkeypatch.setattr(auth, "_attach_navigation_tracking", attach)
+    seed = AsyncMock()
+    monkeypatch.setattr(auth, "_seed_context_from_session", seed)
+    monkeypatch.setattr(auth, "_get_page", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr(auth, "_try_reuse_browser_session", AsyncMock(return_value=True))
+    monkeypatch.setattr(auth, "_save_current_session", AsyncMock(side_effect=save))
+
+    if outcome == "success":
+        assert await auth.auto_login(path, "fixture", "fixture") == {"recovered": True}
+    else:
+        error = {
+            "rejected": auth.InvalidSessionError,
+            "unavailable": auth.SessionValidationError,
+            "cancelled": asyncio.CancelledError,
+        }[outcome]
+        with pytest.raises(error):
+            await auth.auto_login(path, "fixture", "fixture")
+
+    assert len(events) == 2
+    assert tracking[0][0] is not tracking[1][0]
+    assert tracking[0][1] is not tracking[1][1]
+    seed.assert_awaited_once_with(contexts[0], path)
+    for context in contexts:
+        context.close.assert_awaited_once()
+    assert path.read_text() == original
+    assert "once without importing the saved session" in caplog.text
+    assert "private" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "error",
+    [RuntimeError("login rejected"), auth.SessionValidationError("unavailable"), OSError()],
+)
+async def test_auto_login_does_not_retry_unrelated_failures(monkeypatch, tmp_path, error):
+    path = tmp_path / "session.json"
+    path.write_text("previous session")
+    monkeypatch.setattr(auth, "_browser_profile_lock", lambda: nullcontext())
+    monkeypatch.setattr(auth, "_cleanup_chromium_singleton_locks", MagicMock())
+    monkeypatch.setattr(auth, "async_playwright", MagicMock())
+    attempt = AsyncMock(side_effect=error)
+    monkeypatch.setattr(auth, "_auto_login_attempt", attempt)
+    with pytest.raises(type(error)):
+        await auth.auto_login(path, "fixture", "fixture")
+    attempt.assert_awaited_once()
+    assert path.read_text() == "previous session"
+
+
+async def test_handoff_failure_without_saved_session_does_not_retry(monkeypatch, tmp_path):
+    monkeypatch.setattr(auth, "_browser_profile_lock", lambda: nullcontext())
+    monkeypatch.setattr(auth, "_cleanup_chromium_singleton_locks", MagicMock())
+    monkeypatch.setattr(auth, "async_playwright", MagicMock())
+    attempt = AsyncMock(side_effect=auth._JournalHandoffError())
+    monkeypatch.setattr(auth, "_auto_login_attempt", attempt)
+    with pytest.raises(auth._JournalHandoffError):
+        await auth.auto_login(tmp_path / "absent.json", "fixture", "fixture")
+    attempt.assert_awaited_once()
 
 
 async def test_valid_http_session_never_launches_browser(monkeypatch):

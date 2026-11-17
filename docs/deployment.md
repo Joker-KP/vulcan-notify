@@ -170,6 +170,21 @@ normal recovery step. Automatic browser recovery is headed under Xvfb by default
 always headed. Authentication opens the first journal profile, then synchronization
 processes every student discovered for the account.
 
+With an existing saved session, a journal-profile handoff failure or rejected
+exported Context triggers one extra browser attempt. Chromium closes and reopens
+the same profile without importing `session.json`, allowing recovery without
+deleting the snapshot. A second failure uses the normal manual-auth instructions;
+credential/CAPTCHA failures and unavailable validation do not trigger this retry.
+
+Cookie cleanup is automatic during browser authentication. Imports omit expired
+cookies and the accumulated host-only `RPE_…` family on `eduvulcan.pl` at `/`.
+That family is also cleared from Chromium before a new flow and after completed
+student/messages handoffs, before export and API validation. Other cookies,
+including SSO chunks and unexpired verification cookies, are retained. Cleanup
+does not run during a handoff. No configuration or manual data migration is
+needed. This policy is unit-tested; live resolution of the reported growth near
+56 KiB remains unverified. File size itself is not a recovery threshold.
+
 Transient connectivity/server/malformed session-validation failures retry once,
 then preserve the session for the next poll. Context HTTP 409 requests session
 recovery; mid-sync recovery is limited to one attempt. Exhausted authentication

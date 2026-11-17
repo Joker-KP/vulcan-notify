@@ -247,6 +247,13 @@ VULCAN_PASSWORD=your_password
 
 When credentials are available, `vulcan-notify sync` detects expired sessions, imports saved cookies into persistent Chromium and attempts browser-session recovery before credential login. Docker provides Xvfb for headed recovery by default; `VULCAN_BROWSER_HEADLESS=true` opts into headless mode. If automatic recovery fails, stop `vulcan-sync` and run `docker compose --profile auth up vulcan-auth` for manual headed authentication through noVNC, then restart the worker. All services share the persistent `/app/data` volume.
 
+If journal entry fails with a saved session, automatic recovery reopens the same
+profile once without importing that snapshot. Browser authentication also filters
+expired imports and clears accumulated parent-portal `RPE_…` cookies at flow
+boundaries, preserving SSO and unexpired verification cookies. Replacement
+sessions still require API validation. No manual deletion or configuration change
+is required; this mitigation is unit-tested and awaits live confirmation.
+
 Session files are replaced atomically with permissions 0600. Invalid saved sessions use the same recovery policy, preserving the file until authentication succeeds.
 
 Session checks retry connectivity/server failures once (30 seconds per attempt,

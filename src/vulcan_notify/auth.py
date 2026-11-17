@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import platform
+import re
 import ssl
 import subprocess
 import tempfile
@@ -30,7 +31,7 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from vulcan_notify.config import settings
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Mapping
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,10 @@ class InvalidSessionError(ValueError):
 
 class SessionValidationError(RuntimeError):
     """API validation failed; the saved session's validity is unknown."""
+
+
+class _JournalHandoffError(RuntimeError):
+    """Portal login completed, but entry into the student journal failed."""
 
 
 def _write_session(session_path: Path, session_data: dict[str, Any]) -> None:
@@ -499,10 +504,14 @@ async def _seed_context_from_session(
     try:
         data = json.loads(session_path.read_text(encoding="utf-8"))
 
-        cookies = data.get(
-            "cookies",
-            [],
-        )
+        # RPE cookies from earlier portal handoffs must not be resurrected.
+        # Retain SSO chunks and all unexpired verification cookies.
+        now = time.time()
+        cookies = [
+            cookie
+            for cookie in data.get("cookies", [])
+            if not _is_portal_handoff_cookie(cookie) and not _cookie_expired(cookie, now)
+        ]
 
         if not cookies:
             return
@@ -514,11 +523,34 @@ async def _seed_context_from_session(
             len(cookies),
         )
 
-    except Exception:
+    except Exception as exc:
         logger.warning(
-            "Browser: could not import cookies from session.json",
-            exc_info=True,
+            "Browser: could not import cookies from session.json (%s)",
+            type(exc).__name__,
         )
+
+
+def _is_portal_handoff_cookie(cookie: Mapping[str, Any]) -> bool:
+    """Scope cleanup to the accumulated host-only parent portal cookie family."""
+    return (
+        cookie.get("domain") == "eduvulcan.pl"
+        and cookie.get("path", "/") == "/"
+        and cookie.get("name", "").startswith("RPE_")
+    )
+
+
+def _cookie_expired(cookie: dict[str, Any], now: float) -> bool:
+    expires = cookie.get("expires", -1)
+    return isinstance(expires, (int, float)) and expires != -1 and expires <= now
+
+
+async def _cleanup_portal_handoff_cookies(context: BrowserContext) -> None:
+    """Remove leftovers only at flow boundaries, never during an active handoff."""
+    cookies = await context.cookies()
+    count = sum(_is_portal_handoff_cookie(cookie) for cookie in cookies)
+    if count:
+        await context.clear_cookies(name=re.compile(r"^RPE_"), domain="eduvulcan.pl", path="/")
+        logger.info("Browser: removed %d leftover portal handoff cookie(s)", count)
 
 
 def _get_page(
@@ -938,6 +970,7 @@ async def _save_current_session(
         tenant,
     )
 
+    await _cleanup_portal_handoff_cookies(context)
     cookies = await context.cookies()
 
     session_data: dict[str, Any] = {
@@ -1003,6 +1036,7 @@ async def login_and_save_session(
                     session_path,
                 )
 
+                await _cleanup_portal_handoff_cookies(context)
                 page = _get_page(context)
 
                 # First try to use the currently valid session.json /
@@ -1094,213 +1128,221 @@ async def auto_login(
     login: str,
     password: str,
 ) -> dict[str, Any]:
-    """Restore/authenticate eduVULCAN using persistent Chromium.
-
-    Order:
-      1. Open persistent Chromium profile.
-      2. Import any remaining cookies from session.json.
-      3. Try to enter Dziennik WITHOUT credentials.
-      4. Only if that fails, perform normal login/password flow.
-    """
-
-    diagnostics_dir = session_path.parent
-
-    login_complete = asyncio.Event()
-
-    dashboard_holder = {
-        "url": "",
-    }
-
+    """Restore access, retrying a failed journal handoff once without JSON import."""
     with _browser_profile_lock():
         _cleanup_chromium_singleton_locks()
-
         async with async_playwright() as playwright:
-            context = await _launch_browser_context(playwright)
-
-            try:
-                _attach_navigation_tracking(
-                    context,
-                    login_complete,
-                    dashboard_holder,
-                )
-
-                # Even if test_session() says the student API session has
-                # expired, some portal cookies in session.json may still be
-                # useful for refreshing access.
-                await _seed_context_from_session(
-                    context,
-                    session_path,
-                )
-
-                page = _get_page(context)
-
-                # -----------------------------------------------------------
-                # 1. Try persistent profile first.
-                # -----------------------------------------------------------
-
-                if await _try_reuse_browser_session(
-                    page,
-                    login_complete,
-                ):
-                    dashboard_url = dashboard_holder["url"]
-
-                    return await _save_current_session(
-                        context,
-                        page,
-                        session_path,
-                        dashboard_url,
+            for attempt in range(2):
+                try:
+                    return await _auto_login_attempt(
+                        playwright, session_path, login, password, seed_session=attempt == 0
                     )
+                except (_JournalHandoffError, InvalidSessionError):
+                    if attempt or not session_path.exists():
+                        raise
+                    logger.warning(
+                        "Auto-login: journal access failed; reopening persistent profile "
+                        "once without importing the saved session"
+                    )
+    raise AssertionError("Automatic authentication attempts exhausted")
 
-                # -----------------------------------------------------------
-                # 2. Full credentials login.
-                # -----------------------------------------------------------
 
-                logger.info(
-                    "Auto-login: persistent portal session unavailable; performing full login"
+async def _auto_login_attempt(
+    playwright: Playwright,
+    session_path: Path,
+    login: str,
+    password: str,
+    *,
+    seed_session: bool,
+) -> dict[str, Any]:
+    """Run one browser attempt; closing it flushes the profile before any retry."""
+    diagnostics_dir = session_path.parent
+    login_complete = asyncio.Event()
+    dashboard_holder = {"url": ""}
+
+    context = await _launch_browser_context(playwright)
+
+    try:
+        _attach_navigation_tracking(
+            context,
+            login_complete,
+            dashboard_holder,
+        )
+
+        # Even if test_session() says the student API session has
+        # expired, some portal cookies in session.json may still be
+        # useful for refreshing access.
+        if seed_session:
+            await _seed_context_from_session(context, session_path)
+
+        await _cleanup_portal_handoff_cookies(context)
+
+        page = _get_page(context)
+
+        # -----------------------------------------------------------
+        # 1. Try persistent profile first.
+        # -----------------------------------------------------------
+
+        if await _try_reuse_browser_session(
+            page,
+            login_complete,
+        ):
+            dashboard_url = dashboard_holder["url"]
+
+            return await _save_current_session(
+                context,
+                page,
+                session_path,
+                dashboard_url,
+            )
+
+        # -----------------------------------------------------------
+        # 2. Full credentials login.
+        # -----------------------------------------------------------
+
+        logger.info("Auto-login: persistent portal session unavailable; performing full login")
+
+        await page.goto(
+            EDUVULCAN_LOGIN_URL,
+            wait_until="domcontentloaded",
+            timeout=30000,
+        )
+
+        await _accept_cookie_banner(page)
+
+        # Username.
+        login_field = page.locator("#UserName")
+
+        if not await login_field.count():
+            login_field = page.locator(
+                'input[type="text"], input[name="UserName"], input[type="email"]'
+            ).first
+
+        await login_field.wait_for(
+            state="visible",
+            timeout=10000,
+        )
+
+        await login_field.fill(login)
+
+        next_button = page.locator("#btNext")
+
+        if not await next_button.count():
+            next_button = page.locator('button:has-text("Dalej")').first
+
+        await next_button.click(
+            timeout=10000,
+        )
+
+        # Password.
+        password_field = page.locator("#Password")
+
+        if not await password_field.count():
+            password_field = page.locator('input[type="password"]').first
+
+        await password_field.wait_for(
+            state="visible",
+            timeout=15000,
+        )
+
+        await password_field.fill(password)
+
+        await _wait_for_captcha(
+            page,
+            diagnostics_dir,
+        )
+
+        delay = _get_login_delay_seconds()
+
+        if delay > 0:
+            logger.info(
+                "Auto-login: waiting %.1f seconds before submitting login",
+                delay,
+            )
+
+            await asyncio.sleep(delay)
+
+        login_button = page.locator("#btLogOn")
+
+        if not await login_button.count():
+            login_button = page.locator('button:has-text("Zaloguj")').first
+
+        await login_button.wait_for(
+            state="visible",
+            timeout=10000,
+        )
+
+        logger.info("Auto-login: submitting login form")
+
+        try:
+            await _submit_login_form(page, login_button, login_complete)
+        except RuntimeError:
+            logger.error("Auto-login: login redirect failed; URL=%s", _safe_url(page.url))
+            await _save_screenshot(
+                page,
+                diagnostics_dir,
+                "login-redirect-error",
+            )
+            raise
+
+        logger.info(
+            "Auto-login: credentials accepted; URL=%s",
+            _safe_url(page.url),
+        )
+
+        # -----------------------------------------------------------
+        # 3. Enter first available student journal.
+        # -----------------------------------------------------------
+
+        if not login_complete.is_set():
+            await page.goto(
+                JOURNAL_ACCESS_URL,
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+
+            await asyncio.sleep(1)
+
+        if not login_complete.is_set() and not await _open_student_profile(page):
+            await _save_screenshot(
+                page,
+                diagnostics_dir,
+                "journal-profile-error",
+            )
+
+            raise _JournalHandoffError(
+                "Could not open a journal profile; run vulcan-notify auth for interactive recovery"
+            )
+
+        if not login_complete.is_set():
+            try:
+                await asyncio.wait_for(
+                    login_complete.wait(),
+                    timeout=30,
                 )
 
-                await page.goto(
-                    EDUVULCAN_LOGIN_URL,
-                    wait_until="domcontentloaded",
-                    timeout=30000,
-                )
-
-                await _accept_cookie_banner(page)
-
-                # Username.
-                login_field = page.locator("#UserName")
-
-                if not await login_field.count():
-                    login_field = page.locator(
-                        'input[type="text"], input[name="UserName"], input[type="email"]'
-                    ).first
-
-                await login_field.wait_for(
-                    state="visible",
-                    timeout=10000,
-                )
-
-                await login_field.fill(login)
-
-                next_button = page.locator("#btNext")
-
-                if not await next_button.count():
-                    next_button = page.locator('button:has-text("Dalej")').first
-
-                await next_button.click(
-                    timeout=10000,
-                )
-
-                # Password.
-                password_field = page.locator("#Password")
-
-                if not await password_field.count():
-                    password_field = page.locator('input[type="password"]').first
-
-                await password_field.wait_for(
-                    state="visible",
-                    timeout=15000,
-                )
-
-                await password_field.fill(password)
-
-                await _wait_for_captcha(
+            except TimeoutError as exc:
+                await _save_screenshot(
                     page,
                     diagnostics_dir,
+                    "student-redirect-error",
                 )
 
-                delay = _get_login_delay_seconds()
+                raise _JournalHandoffError("Timed out waiting for uczen.eduvulcan.pl") from exc
 
-                if delay > 0:
-                    logger.info(
-                        "Auto-login: waiting %.1f seconds before submitting login",
-                        delay,
-                    )
+        dashboard_url = dashboard_holder["url"]
 
-                    await asyncio.sleep(delay)
+        return await _save_current_session(
+            context,
+            page,
+            session_path,
+            dashboard_url,
+        )
 
-                login_button = page.locator("#btLogOn")
-
-                if not await login_button.count():
-                    login_button = page.locator('button:has-text("Zaloguj")').first
-
-                await login_button.wait_for(
-                    state="visible",
-                    timeout=10000,
-                )
-
-                logger.info("Auto-login: submitting login form")
-
-                try:
-                    await _submit_login_form(page, login_button, login_complete)
-                except RuntimeError:
-                    logger.error("Auto-login: login redirect failed; URL=%s", _safe_url(page.url))
-                    await _save_screenshot(
-                        page,
-                        diagnostics_dir,
-                        "login-redirect-error",
-                    )
-                    raise
-
-                logger.info(
-                    "Auto-login: credentials accepted; URL=%s",
-                    _safe_url(page.url),
-                )
-
-                # -----------------------------------------------------------
-                # 3. Enter first available student journal.
-                # -----------------------------------------------------------
-
-                if not login_complete.is_set():
-                    await page.goto(
-                        JOURNAL_ACCESS_URL,
-                        wait_until="domcontentloaded",
-                        timeout=30000,
-                    )
-
-                    await asyncio.sleep(1)
-
-                if not login_complete.is_set() and not await _open_student_profile(page):
-                    await _save_screenshot(
-                        page,
-                        diagnostics_dir,
-                        "journal-profile-error",
-                    )
-
-                    raise RuntimeError(
-                        "Could not open a journal profile; run "
-                        "vulcan-notify auth for interactive recovery"
-                    )
-
-                if not login_complete.is_set():
-                    try:
-                        await asyncio.wait_for(
-                            login_complete.wait(),
-                            timeout=30,
-                        )
-
-                    except TimeoutError as exc:
-                        await _save_screenshot(
-                            page,
-                            diagnostics_dir,
-                            "student-redirect-error",
-                        )
-
-                        raise TimeoutError("Timed out waiting for uczen.eduvulcan.pl") from exc
-
-                dashboard_url = dashboard_holder["url"]
-
-                return await _save_current_session(
-                    context,
-                    page,
-                    session_path,
-                    dashboard_url,
-                )
-
-            finally:
-                # launch_persistent_context() returns a BrowserContext.
-                # Closing it also closes Chromium and flushes profile state.
-                await context.close()
+    finally:
+        # launch_persistent_context() returns a BrowserContext.
+        # Closing it also closes Chromium and flushes profile state.
+        await context.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1367,9 +1409,8 @@ def _matching_cookies(session_data: dict[str, Any], url: str) -> list[dict[str, 
             and (cookie_path.endswith("/") or path[len(cookie_path) :].startswith("/"))
         ):
             continue
-        expires = cookie.get("expires", -1)
         # Playwright uses -1 for session cookies. Older session exports may omit it.
-        if isinstance(expires, (int, float)) and expires != -1 and expires <= now:
+        if _cookie_expired(cookie, now):
             continue
         if cookie.get("secure", False) and parsed.scheme != "https":
             continue
