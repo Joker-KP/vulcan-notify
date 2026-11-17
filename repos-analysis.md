@@ -19,17 +19,17 @@ Najbardziej użyteczne pomysły do zastosowania tutaj:
 
    Szpontniczek przekazuje kursor `idLastWiadomosc` i identyfikator konkretnej skrzynki oraz udostępnia odebrane, wysłane i usunięte wiadomości. Iris przechowuje także identyfikator wątku, odbiorców i listę załączników. [Obsługa folderów](https://github.com/szponciciel04/DzienniczekSzpontniczek/blob/main/composeApp/src/commonMain/kotlin/io/github/szpontium/api/prometheus/PrometheusMessagesApi.kt), [model wiadomości](https://github.com/bbrjpl1310b/iris/blob/master/iris/models/_message.py).
 
-   U nas [client.py](/home/joker/vulcan/vulcan-poc/src/vulcan_notify/client.py:604) pobiera pierwszą stronę, domyślnie 50 wiadomości. Szczegóły sprowadza do treści HTML; zachowujemy tylko informację, że załączniki istnieją. Proponowałbym ograniczony import historii z paginacją, potem synchronizację do napotkania znanych wiadomości, oraz zapis metadanych załączników. **Samo zwiększenie `pageSize` nie zapewnia kompletności.**
+   U nas [client.py](src/vulcan_notify/client.py) pobiera pierwszą stronę, domyślnie 50 wiadomości. Szczegóły sprowadza do treści HTML; zachowujemy tylko informację, że załączniki istnieją. Proponowałbym ograniczony import historii z paginacją, potem synchronizację do napotkania znanych wiadomości, oraz zapis metadanych załączników. **Samo zwiększenie `pageSize` nie zapewnia kompletności.**
 
 2. **Ogłoszenia, zebrania i dni wolne jako normalne synchronizowane kategorie.**
 
    Iris ma konkretne metody i modele zebrań, ogłoszeń, wycieczek, wydarzeń oraz dni wolnych. Tumski pobiera dni wolne i ogłoszenia przez ten sam rodzaj API przeglądarkowego, którego używamy. [Metody Iris](https://github.com/bbrjpl1310b/iris/blob/master/iris/api/_base.py), [pobieranie w CLI](https://github.com/tumski/eduvulcan-cli/blob/main/src/fetch.ts).
 
-   To dobry kierunek z niewielką liczbą niewiadomych: lokalny [kontrakt API](/home/joker/vulcan/vulcan-poc/docs/eduvulcan/README.md) zawiera już m.in. `Zebrania`, `DniWolne`, `Informacje` i `Nauczyciele`. Ogłoszenia mają nawet metodę w kliencie, lecz nie przechodzą przez standardowy sync → baza → zdarzenia. W pierwszej kolejności wybrałbym ogłoszenia, zebrania i dni wolne; jadłospisy czy przedszkole zależą od potrzeb konta.
+   To dobry kierunek z niewielką liczbą niewiadomych: lokalny [kontrakt API](docs/eduvulcan/README.md) zawiera już m.in. `Zebrania`, `DniWolne`, `Informacje` i `Nauczyciele`. Ogłoszenia mają nawet metodę w kliencie, lecz nie przechodzą przez standardowy sync → baza → zdarzenia. W pierwszej kolejności wybrałbym ogłoszenia, zebrania i dni wolne; jadłospisy czy przedszkole zależą od potrzeb konta.
 
 3. **Rozszerzenie kalendarza ICS o sprawdziany, zadania i zebrania.**
 
-   To moja propozycja wynikająca z dostępnych danych. Obecny [generator ICS](/home/joker/vulcan/vulcan-poc/src/vulcan_notify/ics.py:121) obejmuje plan lekcji. Sprawdziany i zadania są już zapisane lokalnie, a zebrania w Iris mają termin, miejsce, agendę i link online. [Model zebrania](https://github.com/bbrjpl1310b/iris/blob/master/iris/models/_meeting.py).
+   To moja propozycja wynikająca z dostępnych danych. Obecny [generator ICS](src/vulcan_notify/ics.py) obejmuje plan lekcji. Sprawdziany i zadania są już zapisane lokalnie, a zebrania w Iris mają termin, miejsce, agendę i link online. [Model zebrania](https://github.com/bbrjpl1310b/iris/blob/master/iris/models/_meeting.py).
 
    Można więc dodać osobne subskrypcje lub wybór kategorii w jednym feedzie. Dałoby to kalendarz obowiązków szkolnych działający również w obecnym wdrożeniu Linux/Docker.
 
@@ -37,13 +37,13 @@ Najbardziej użyteczne pomysły do zastosowania tutaj:
 
    Iris obsługuje statystyki miesięczne i przedmiotowe, a typ frekwencji opisuje flagami takimi jak nieobecność, spóźnienie i usprawiedliwienie. [Statystyki przedmiotowe](https://github.com/bbrjpl1310b/iris/blob/master/iris/models/_presence_subject_stats.py), [typ frekwencji](https://github.com/bbrjpl1310b/iris/blob/master/iris/models/_presence_type.py).
 
-   U nas frekwencja jest synchronizowana, ale brakuje jej endpointu HTTP i statystyk. [Differ](/home/joker/vulcan/vulcan-poc/src/vulcan_notify/differ.py:157) zgłasza tylko nowe wpisy; zmiana istniejącej nieobecności na usprawiedliwioną pozostaje bez powiadomienia. Przydatne byłyby miesięczne zestawienia, procent obecności na przedmiotach i zdarzenia takich korekt. Numerów kategorii z mobilnego API trzeba jednak zweryfikować względem API webowego.
+   U nas frekwencja jest synchronizowana, ale brakuje jej endpointu HTTP i statystyk. [Differ](src/vulcan_notify/differ.py) zgłasza tylko nowe wpisy; zmiana istniejącej nieobecności na usprawiedliwioną pozostaje bez powiadomienia. Przydatne byłyby miesięczne zestawienia, procent obecności na przedmiotach i zdarzenia takich korekt. Numerów kategorii z mobilnego API trzeba jednak zweryfikować względem API webowego.
 
 5. **Oceny z wartością liczbową i średnimi otrzymanymi ze źródła.**
 
    Mobilny model Iris zawiera osobno tekst oceny i `Value`, komentarz, czas utworzenia/modyfikacji oraz autora zmiany. Biblioteka ma też endpoint średnich. [Model oceny](https://github.com/bbrjpl1310b/iris/blob/master/iris/models/_grade.py), [endpoint średnich](https://github.com/bbrjpl1310b/iris/blob/master/iris/api/_base.py).
 
-   Obecnie [api.py](/home/joker/vulcan/vulcan-poc/src/vulcan_notify/api.py:274) przelicza tekst ocen, stosując stałe `+0.5` i `−0.25`. Wartość źródłowa mogłaby poprawić zgodność między szkołami. Nowymi funkcjami byłyby też komentarze i historia korekt. **Średnie i oceny przewidywane/końcowe już mamy** — rozszerzenie dotyczyłoby dokładności i dodatkowych informacji.
+   Obecnie [api.py](src/vulcan_notify/api.py) przelicza tekst ocen, stosując stałe `+0.5` i `−0.25`. Wartość źródłowa mogłaby poprawić zgodność między szkołami. Nowymi funkcjami byłyby też komentarze i historia korekt. **Średnie i oceny przewidywane/końcowe już mamy** — rozszerzenie dotyczyłoby dokładności i dodatkowych informacji.
 
 6. **Opcjonalny dostęp przez zarejestrowane urządzenie HebeCE.**
 
