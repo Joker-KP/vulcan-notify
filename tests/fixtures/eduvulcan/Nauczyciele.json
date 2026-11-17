@@ -1,0 +1,31 @@
+{
+  "endpoint": "/api/Nauczyciele",
+  "source": "sanitized-live",
+  "responses": [
+    {
+      "nauczyciele": [
+        {
+          "przedmiot": "SYNTHETIC",
+          "imie": "SYNTHETIC",
+          "nazwisko": "SYNTHETIC",
+          "wychowawca": false,
+          "globalKeySkrzynka": "00000000-0000-4000-8000-000000000001"
+        },
+        {
+          "przedmiot": "SYNTHETIC",
+          "imie": "SYNTHETIC",
+          "nazwisko": "SYNTHETIC",
+          "wychowawca": false,
+          "globalKeySkrzynka": null
+        },
+        {
+          "przedmiot": "SYNTHETIC",
+          "imie": "SYNTHETIC",
+          "nazwisko": "SYNTHETIC",
+          "wychowawca": false,
+          "globalKeySkrzynka": "00000000-0000-4000-8000-000000000001"
+        }
+      ]
+    }
+  ]
+}

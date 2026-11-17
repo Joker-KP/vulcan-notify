@@ -1,8 +1,11 @@
 # Architecture
 
-This document explains how `vulcan-notify` is put together: the sync pipeline, persistence, change detection, and the fan-out to notification channels (terminal, macOS Calendar, MQTT, HTTP/iCalendar).
+This document explains how `vulcan-notify` is put together: the sync pipeline, persistence, change detection, and the fan-out to notification channels (terminal, SMTP email, macOS Calendar, MQTT, HTTP/iCalendar).
 
-For deployment topology (Docker + Proxmox LXC + systemd), see [`deployment.md`](deployment.md). For the reverse-engineered upstream API, see [`eduvulcan-api.md`](eduvulcan-api.md).
+For the default Docker Hub deployment, see [`deployment.md`](deployment.md) and
+the [Ansible example](deployment-ansible.md). The existing Proxmox setup is an
+[alternative](deployment-proxmox.md). For the reverse-engineered upstream API,
+see [`eduvulcan-api.md`](eduvulcan-api.md).
 
 ## Overview
 
@@ -35,7 +38,7 @@ node "Home Assistant" as ha
 actor "Browser /\niOS Calendar" as browser
 actor "Terminal /\ncron" as cron
 
-auth --> vulcan : interactive + headless login
+auth --> vulcan : persistent browser + explicit interactive login
 client --> vulcan : HTTPS + cookies
 sync --> client
 sync --> differ
@@ -62,14 +65,14 @@ The CLI always follows the same six-phase pipeline:
 
 | Phase | Module | Entry point | Role |
 |-------|--------|-------------|------|
-| Auth | `auth.py` | `get_session()` | Load cookies; open Playwright for interactive login on first run or after expiry. Fall back to headless re-auth if credentials are available. |
+| Auth | `auth.py`, `__main__.py` | `_ensure_session()` | Validate stored cookies through HTTP; with credentials, reuse persistent Chromium before credential login. Interactive headed recovery is explicit via `vulcan-auth`. |
 | Fetch | `client.py` | `VulcanClient` methods | Pull students, grades (all periods), attendance (last N days), exams, homework (full body), messages, lesson schedule with substitutions. |
 | Diff | `differ.py` | `diff_*` | Produce `Change` objects by comparing fetched data to the DB. |
 | Persist | `db.py` | `Database.upsert_*` | Apply `ON CONFLICT ... DO UPDATE` upserts; soft-delete removed exams/homework. |
-| Publish | `display.py`, `calendar.py`, `mqtt.py` | Fan-out | Print to terminal, sync macOS Calendar events, enqueue + publish MQTT messages. |
+| Publish | `display.py`, `email.py`, `calendar.py`, `mqtt.py` | Fan-out | Print to terminal, queue + send SMTP digests, sync macOS Calendar events, enqueue + publish MQTT messages. |
 | Serve | `api.py` (separate process/command) | aiohttp app | Expose HTTP endpoints and iCalendar feeds over the same SQLite. |
 
-On first sync for a student, every item is treated as baseline: stored silently, no change events emitted. Only subsequent runs report diffs.
+Each student's grades, attendance, exams, homework and schedule has a successful-persistence baseline at `last_sync:<student>:<section>`. A section's first successful fetch stores history silently, including after another section already completed. Successful empty fetches initialize the marker; failures do not. `baseline_sections:<student>` initializes these markers once on upgrades: confirmed `last_success` timestamps are inherited when section history exists, while legacy installations without section history retain their student baseline. Past failures without recorded section outcomes cannot be reconstructed. No schema migration or manual database action is required.
 
 ## Modules
 
@@ -77,19 +80,21 @@ On first sync for a student, every item is treated as baseline: stored silently,
 |------|----------------|-------------|
 | `__main__.py` | CLI entry. Dispatches subcommands: `auth`, `test`, `sync`, `calendar`, `tui`, `summarize`. | `main()` |
 | `config.py` | `pydantic-settings` singleton loaded from `.env` + env vars. | `Settings`, `settings` |
-| `auth.py` | Playwright browser + headless login; cookie jar persistence; macOS Keychain fallback. | `get_session()`, `cookies_for_url()` |
+| `auth.py` | Persistent Chromium recovery before credentials; explicit headed interactive login; macOS Keychain fallback. | `auto_login()`, `login_and_save_session()`, `cookies_for_url()` |
 | `client.py` | aiohttp wrapper over the eduVulcan web API. Detects HTML responses as expired-session sentinel. | `VulcanClient` |
+| `eduvulcan_contract.py` | Explicit upstream OpenAPI gathering and structural checks; sanitized fixtures and reports, independent of SQLite sync and notification delivery. | `api-gather`, `api-check` |
 | `models.py` | Dataclasses for API responses: `Student`, `Grade`, `AttendanceEntry`, `Exam`, `Homework`, `Message`, `Lesson`. | — |
 | `sync.py` | Orchestrates one full sync run per student; writes a `sync_runs` row; fans out to channels. | `sync_all()`, `SyncResult` |
 | `differ.py` | Detects new/updated/deleted items. Returns `Change` dataclasses. | `diff_grades`, `diff_attendance`, `diff_exams`, `diff_homework`, `diff_messages`, `diff_schedule` |
 | `db.py` | Async SQLite persistence via aiosqlite. All writes are `ON CONFLICT ... DO UPDATE`. | `Database` |
 | `display.py` | Terminal output with ANSI colors (auto-disabled when piped). | `format_result()` |
 | `calendar.py` | macOS Calendar integration via AppleScript. Dedup by stored UID; soft-deleted items remove events. | `sync_calendar()` |
+| `email.py`, `email_digest.py`, `email_rendering.py`, `email_templates/` | Per-sync HTML student-change groups with optional AI summary; separate templated notifications per new message or note; per-recipient durable retries. | `render_summary()`, `format_summary()`, `format_remark()`, `queue_summary()`, `queue_messages()`, `drain_email_outbox()`, `publish_email()` |
 | `mqtt.py` | Maps `Change` → topic + JSON payload; writes to the `mqtt_outbox` table; drains outbox to Mosquitto on every sync and publishes a retained heartbeat + LWT on `<prefix>/status`. | `topic_for()`, `build_payload()`, `build_status_payload()`, `drain_outbox()` |
 | `api.py` | aiohttp HTTP server (port 8585). Grade aggregates, homework/messages/schedule endpoints, iCalendar feed. | `build_app()` |
 | `ics.py` | Zero-dependency RFC 5545 iCalendar writer. | `build_calendar()` |
-| `summarizer.py` | Optional AI digest via OpenAI-compatible APIs (profiles: `sync`, `messages`). | `summarize()` |
-| `tui.py` | Optional Textual TUI for browsing synced content (extra `tui` install). | `VulcanApp` |
+| `summarizer.py` | Optional AI summaries via OpenAI-compatible APIs (profiles: `default`, `messages`, `lessons`). | `summarize()`, `lessons_context()` |
+| `tui.py` | Optional Textual TUI for browsing synced content (extra `tui` install); Remarks tab (`6`) includes praise/notes, student filtering, sorting and full-content details with Vulcan URL. | `VulcanTuiApp` |
 
 ## Data model
 
@@ -99,11 +104,16 @@ SQLite lives at `DB_PATH` (default `vulcan_notify.db`). Tables:
 |-------|-------------|-------|
 | `students` | `key` | One row per student on the account. |
 | `grades` | `(student_key, column_id)` | `column_id` is the upstream grade-column id; `last_seen` tracks re-appearance. |
-| `attendance` | `(student_key, date, lesson_number)` | Append-only in practice. |
+| `attendance` | `(student_key, date, lesson_number, source, entry_key)` | Classroom keys stay compatible; unnumbered activities use times/subject and source. |
 | `exams`, `homework` | `id` | `deleted_at` for soft-delete; `calendar_uid` for macOS Calendar dedup. |
 | `messages` | `id` with `UNIQUE(api_global_key)` | `content` is backfilled in batches of `SYNC_MESSAGE_BACKFILL_BATCH` per run for legacy rows. |
+| `remarks` | `(student_key, id)` | Praise and behavior notes, original content, category, author, numeric type/kind, optional points and student view URL; first/last seen and soft deletion. Created additively on startup. |
+| `completed_lessons` | `(student_key, id)` | Completed lesson topic, teacher, subject, number, thematic block, online link, JSON collections/resources, first/last seen and window-scoped soft deletion. Created additively on startup. |
 | `schedule` | `(student_key, date, time_from, subject)` | Per-lesson schedule including substitutions (`sub_teacher`, `sub_room`), cancellations (`annotation`), and extra lessons (`is_extra`). |
 | `mqtt_outbox` | `id` AUTOINCREMENT | Every MQTT publish is enqueued first; drained on each run. Broker outages survive restarts. |
+| `email_outbox` | `delivery_key` | Digest per sync-run/recipient and notification per upstream message/recipient; pending envelopes persist across restarts. Successful rows retain deduplication metadata while clearing private content. |
+| `email_schedule_state` | `recipient_key` (address hash) | Shared substitution/cancellation quiet deadline and pending outbox delivery per recipient, across all students. |
+| `email_schedule_events` | `(recipient_key, event_key)` | Schedule event snapshots pending email; payloads clear atomically with outbox enqueue, retaining ingestion receipts. |
 | `sync_state` | `key` | Generic KV. Holds `last_sync:<student>` (has this student ever synced — drives first-sync suppression) and `last_success:<student>:<section>` (freshness, written only after a confirmed fetch). The two are deliberately separate. |
 | `sync_runs` | `id` AUTOINCREMENT | History of runs: `completed`, `degraded` (a section failed), `failed`, or `interrupted` (abandoned mid-run, reconciled on the next start). Pruned past `SYNC_HISTORY_KEEP_DAYS`. |
 | `sync_sections` | `id` AUTOINCREMENT | Per-section, per-student outcome for each run, with item counts and error detail. Without it a partial outage — grades broken, everything else fine — is invisible. |
@@ -115,12 +125,110 @@ The full entity diagram (students + primary entities) is in the [README](../READ
 `differ.py` compares the freshly fetched API list against the stored rows. The keying strategy per entity:
 
 - **Grades** — keyed by `column_id`. Value or category change → `updated`.
-- **Attendance** — keyed by `(date, lesson_number)`. New row → alert (no "updated" path).
-- **Exams / homework** — keyed by upstream `id`. Disappearance → soft-delete (`deleted_at` set, calendar event removed).
+- **Attendance** — classroom identity remains `(date, lesson_number)`; other activities and childcare add source and times/subject. New non-present row → alert (no "updated" path).
+- **Exams / homework** — keyed by upstream `id`. Missing within a successfully fetched date window → soft-delete (`deleted_at` set, calendar event removed); no update/delete change events.
 - **Messages** — keyed by `api_global_key`. Content is pulled lazily; the MQTT payload for a newly-appeared message includes the body once fetched.
 - **Schedule** — keyed by `(date, time_from, subject)`. Three independent change types are emitted: `substitution` (teacher/room swap), `cancellation` (annotation flag set), `addition` (is_extra lesson inserted).
 
-First sync for a student writes a `sync_state` marker and suppresses all changes, so new installs don't flood channels with backlog noise.
+Each section's first successful persistence writes its baseline marker and suppresses historical changes. Missing schedule lessons are compared over the full requested local date window, extended to include returned boundary dates, so disappearing first/last lesson days are detected.
+
+Before schedule comparison and persistence, duplicate API entries with the same
+`(date, time_from, subject)` are reduced to one complete entry. Substituted entries
+take precedence, followed by extra and annotated entries; a stable content
+tie-breaker resolves remaining conflicts independently of response order. This
+prevents a plain duplicate from overwriting a substitution and triggering it on
+every sync. Selection uses only the current fetch, so removed substitution fields
+still clear. The existing key represents one entry per slot/subject, rather than
+all parallel variants; no schema migration is required. Existing overwritten
+substitutions can notify once when first recovered, then remain silent.
+
+Homework detail is fetched before diffing and persistence, so new change events
+carry the description, teacher, raw `links` JSON, `response_required` and
+`response_deadline` to email and MQTT. The nullable `detail_fetched_at` column
+tracks successful enrichment even when the description is empty. Additive migration
+preserves history and calendar UIDs; all returned records refresh details silently
+on each sync. Successful reads replace cleared values; failed reads retain previous detail content and retry
+without duplicate notifications.
+New-task details include links from HTML descriptions in plain notification text.
+Populated upstream link object shapes have not been verified live.
+
+Homework synchronization reads the date-windowed `SprawdzianyZadaniaDomowe` list
+(`typ=4`, `przedmiotNazwa`), with defaults of 365 days back and 365 days ahead,
+including today. `SYNC_HOMEWORK_DAYS` / `SYNC_HOMEWORK_FUTURE_DAYS` configure the
+window. The initial successful calendar read uses the independent
+`last_sync:<student>:homework_calendar` marker to import newly visible history
+without alerts on upgrades. Successful empty reads initialize it; failed reads do
+not. Subsequent unknown IDs emit events regardless of their school date. Soft
+deletes only cover that successful UTC interval; rolled-out history stays stored.
+The complete original detail response also persists in `homework.details` JSON,
+including attachments, response content/comments, flags and uninterpreted status
+codes. HTTP `/api/homework` and MQTT expose it alongside typed fields; email and
+plain notifications render available attachments and response text safely.
+
+Exams use the same calendar source (all numeric types other than `typ=4`), with
+`SYNC_EXAM_DAYS=365` / `SYNC_EXAM_FUTURE_DAYS=365`. Their independent successful
+`last_sync:<student>:exams_calendar` marker imports expanded history silently.
+Details are refreshed before diffing, including empty descriptions and teachers;
+original JSON persists in `exams.details`. Calendar deletion is scoped to the
+successful UTC interval, including empty results. Exam details migrate additively.
+
+Attendance reads `oddzialy`, `dziennikiZajecInnych` and `dziennikiSwietlicy`.
+The table migration copies original rows and `first_seen` into the expanded key;
+classroom rows keep their identity with an empty `entry_key`. Other sections use
+JSON-encoded `(time_from, time_to, subject)` and source because observed records
+lack upstream IDs and lesson numbers. `last_sync:<student>:attendance_full`
+baselines the additional sections on upgrades without suppressing new classroom
+absences. Failures do not initialize either expanded-source marker.
+
+Praise/notes use `diff_remarks()` and a separate `last_sync:<student>:remarks`
+baseline, initialized only after successful fetching and persistence. This also
+suppresses history when the category is added to existing installations. Unknown
+IDs emit `Change(item_type="remark", change_type="new")`; edits are persisted
+silently, missing entries are soft-deleted and restored IDs remain known.
+Confirmed fetches update `last_success:<student>:remarks` and section outcomes.
+
+Notes have separate emails (`queue_remarks()`) prefixed by
+`EMAIL_REMARK_SUBJECT_PREFIX` (default `[Uwagi]`), containing the full note and a
+student-specific Pochwały i uwagi link. They are excluded from digest/AI input.
+Deduplication scopes note ID by student and recipient. Existing SMTP/outbox delivery
+limitations also apply to these emails. MQTT emits `school/<student>/remarks/new`
+(with the configurable topic prefix), including the raw numeric type/kind and URL.
+
+Completed lessons use `CompletedLesson`, `diff_completed_lessons()` and the
+independent `last_sync:<student>:completed_lessons` baseline. The first successful
+fetch and persistence, including an empty response and upgrades, initializes it
+silently. Failures roll back that section and preserve its old baseline/freshness.
+The default lookback is 90 days plus today (`SYNC_COMPLETED_LESSONS_DAYS`, minimum
+0), with full local days serialized as UTC instants. Rows are keyed by student
+and upstream ID. New IDs and changes to source fields emit `completed_lesson`
+events (`new`/`updated`), delivered through the existing MQTT outbox to
+`<prefix>/<student-slug>/completed_lessons/new` or `.../updated`. Payloads contain
+all model fields, including structured collections/resources and the student page
+URL. Missing entries are soft-deleted only within the successful fetch interval;
+restoration stays silent and older history remains stored. As with other MQTT
+categories, persistence and enqueue use separate commits and do not guarantee
+exactly-once delivery. The existing name-based MQTT student slug is unchanged.
+HTTP freshness includes this section; terminal output shows changes and TUI tab
+7 browses active stored records and their full details, with filtering and sorting.
+The email digest allowlist excludes completed lesson events from individual
+emails, digest groups and counts. `LLM_INCLUDE_LESSONS=true` optionally
+adds stored topics as historical AI context for students with included digest
+changes, using `LLM_LESSONS_DAYS=7` local calendar days including today.
+The standalone `summarize --type lessons [--days N]` command reads the
+same stored topics. Prompts group by student/subject and omit routine activities;
+lesson-only changes still create no email or AI request. Exams/homework
+calendar adapters and the scheduled-lesson iCalendar feed do not consume them.
+Explicit `summarize --type mix [--days N]` runs the messages and lessons AI
+profiles separately, using the same range argument (default 7). Nonempty results
+form at most two email sections through `summary_messages.html` and
+`summary_lessons.html`, sharing `layout.html`. It requires enabled email and AI,
+converts Markdown results to sanitized HTML with inline email styles, and adds
+inbox/active student lesson-list links from the saved session when available. It
+persists the final MIME bodies in the existing outbox, then drains SMTP retries.
+It operates independently of automatic digest AI/context switches and does not
+change synchronization notifications or the database schema.
+The recorded API contract and synthetic populated resource JSON are tested;
+live upstream behavior has not been verified in this implementation task.
 
 ## Notification channels
 
@@ -128,13 +236,81 @@ First sync for a student writes a `sync_state` marker and suppresses all changes
 
 Primary, always on. Groups output by student, then data type. ANSI colors are auto-disabled when stdout is not a TTY, so piping to a log file stays clean. This is the shape meant for cron (`vulcan-notify sync >> sync.log`).
 
+### Email (`email.py` + `email_outbox`)
+
+Optional (`EMAIL_ENABLED=true`). The CLI passes each completed or interrupted
+`FullSyncResult` to the email adapter before other optional outputs. Baseline events
+are suppressed independently for students and messages. HTML and its derived text
+alternative are committed before optional AI preparation. Each of seven change
+groups has its own bundled template, heading and student-specific module link;
+the subject lists present groups and their total count. `SyncResult.portal_url`
+comes from the client's authenticated base URL and URL-encoded student key.
+`EMAIL_AI_SUMMARY=true` and `LLM_API_KEY` enable the existing summarizer's default
+prompt; its output appears above the groups without removing facts or links.
+AI failures keep the original grouped digest.
+`EMAIL_SCHEDULE_COOLDOWN_HOURS=6` sends the first substitution/cancellation
+immediately, then buffers those two event types in SQLite until the first sync
+after the fixed window. All students share a window, independently per recipient.
+Other categories continue immediately and may share the first/due digest.
+`email_schedule_state` reserves a prepared outbox email until SMTP accepts it;
+only acceptance starts the window. `email_schedule_events` snapshots survive
+restarts and deleted schedule rows, retaining repeated edits as separate events.
+Buffer consumption, enqueue and reservation commit together before AI; acceptance
+and the new deadline commit together. Ingestion receipts prevent repeating the
+same sync's events. Category switches also apply at flush; disabled buffered
+events are discarded. `0` disables the timed wait, including for existing buffers.
+There is no timer: overnight pauses defer flushing to a later sync. `email-retry`
+only retries already prepared bodies. Existing pre-upgrade outbox rows retain
+their original behavior; these tables are added automatically.
+The CLI also calls the email adapter on exhausted authentication failures,
+including before a sync database/result exists. `auth_failure.html` uses the
+same layout and a derived text alternative with noVNC recovery instructions.
+An outage UUID in `sync_state["email:auth_failure"]` is committed with the
+per-recipient outbox records to suppress repeat alerts across restarts. Completed
+non-expired syncs and successful explicit authentication reset the outage marker.
+Pending retries are retained; no AI or upstream school content is used.
+`EMAIL_DIGEST_GROUPS` filters categories before rendering and AI preparation;
+omitted switches default to enabled. Only included changes count toward the
+subject, and one change has no count suffix. An empty filtered digest queues
+nothing. Acquisition, persisted state, other outputs and individual emails are
+unaffected, as are already queued retries. `email_rendering.py` loads the bundled
+templates; `layout.html` supplies the shared card/background/typography, with
+separate `message.html` and `remark.html` content and a shared button footer.
+New messages are queued separately before digest AI preparation, with subjects
+`<EMAIL_MESSAGE_SUBJECT_PREFIX> <original subject>` (default `[Nowa wiadomość]`).
+Their bodies require `EMAIL_INCLUDE_MESSAGE_BODIES=true`; individual messages do
+not use AI and are excluded from digest AI input. Upstream message identity plus
+recipient prevents repeated enqueue across sync runs.
+
+`client.get_messages()` also sets `Message.mailbox_url` from the session's tenant:
+`https://wiadomosci.eduvulcan.pl/<tenant>/App/odebrane`. Individual notifications
+include a text link and an HTML alternative with an inbox button. Metadata is
+escaped, the sender value is bold, and dates include a Polish weekday after
+conversion to the household timezone. With bodies enabled, the original layout is
+preserved through `text.message_html()` using a local `nh3` sanitizer; the plain
+version uses `text.message_text()` to preserve block/line/list/table boundaries.
+Both
+versions are stored in `email_outbox`; the additive `html_body` migration preserves
+older plain-text queue records, and successful delivery clears both bodies.
+
+SMTP uses certificate-verified STARTTLS by default, with implicit TLS and plain
+relay modes available. Blocking operations run in a worker thread. Delivery is
+recorded per recipient; failures remain queued, and subsequent syncs or
+`email-retry` retry the stored body. Failure does not prevent MQTT or Calendar output.
+Stable `Message-ID` headers are preserved on retries, but ambiguous SMTP acceptance
+can still cause duplicates. Entity writes and email enqueue are separate commits;
+a crash between them can lose a notification. A single delivery owner is required.
+See [email configuration and limitations](email.md).
+
 ### macOS Calendar (`calendar.py`)
 
 Optional. Driven by `CALENDAR_MAP` (JSON dict: student name → macOS calendar name). For each new/updated exam and homework, AppleScript creates an all-day event with a reminder alarm (`CALENDAR_REMINDER_HOURS`). The macOS-assigned UID is stored back in the DB so subsequent syncs update in-place and soft-deletes remove the event. iCloud handles propagation to iPhone/iPad.
 
+Transient updates/deletions preserve UIDs for retry. Only successful deletion (including an already absent event) or explicitly confirmed absence during update clears the UID. Forced re-sync also preserves failed deletions. `CALENDAR_TIMEOUT_SECONDS` defaults to 30 seconds per operation; timeout/cancellation kills and reaps the child process. Confirmed missing active events are recreated on a later sync.
+
 ### MQTT (`mqtt.py` + `mqtt_outbox`)
 
-Optional (`MQTT_ENABLED=true`). Every `Change` is enqueued in `mqtt_outbox` inside the same transaction that persists the entity. A separate drain step publishes to Mosquitto; failures stay in the outbox and are retried on the next run. This gives at-least-once delivery without requiring the broker to be up at sync time.
+Optional (`MQTT_ENABLED=true`). Every `Change` is enqueued in `mqtt_outbox` after entity persistence, using a separate commit. A drain step publishes to Mosquitto; failures stay in the outbox and are retried on the next run. A crash before enqueue can lose an event, and change publication does not explicitly use acknowledged QoS 1; end-to-end at-least-once delivery is not guaranteed.
 
 **Topic scheme:** `<MQTT_TOPIC_PREFIX>/<student-slug>/<segment>/<change_type>`
 
@@ -149,7 +325,7 @@ Optional (`MQTT_ENABLED=true`). Every `Change` is enqueued in `mqtt_outbox` insi
   "student": "Alice Smith",
   "title": "New grade: Math",
   "message": "5 (Sprawdzian, weight 3)",
-  "timestamp": "2026-04-14T09:12:03+00:00",
+  "timestamp": "2026-04-14T11:12:03+02:00",
   "subject": "Math",
   "value": "5",
   "category": "Sprawdzian",
@@ -235,6 +411,7 @@ Long-running aiohttp server on port 8585, reading the same SQLite the sync write
 | Route | Purpose |
 |-------|---------|
 | `GET /api/alive` | Pure liveness. 200 whenever the process is serving. |
+| `GET /api/students` | Active profiles keyed by stable student key, with name/class/school metadata. |
 | `GET /api/health` | Data freshness. **503 when stale or failed.** `?soft=1` forces 200. |
 | `GET /api/grades?n=` | Latest N grades plus diagnostics, per student. |
 | `GET /api/grades/average?student=&window=&period=` | Weighted rolling average. |
@@ -244,10 +421,14 @@ Long-running aiohttp server on port 8585, reading the same SQLite the sync write
 | `GET /api/homework?n=` | Recent homework. |
 | `GET /api/exams?student=&days=` | Upcoming exams. |
 | `GET /api/messages?n=` | Recent messages (with content once backfilled). |
+| `GET /api/remarks?student=&n=` | Latest active praise/notes per active student from SQLite; optional exact student name filter, default 20 rows per student, limit 1–1000. Includes remarks freshness metadata. |
+| `GET /api/completed-lessons?student=&n=` | Latest active completed lessons per active student from SQLite, default 20, limit 1–1000; supports `student_key`/`keyed=1` and completed-lessons freshness metadata. Collections/resources remain structured JSON. |
 | `GET /api/schedule?student=&only_substitutions=&days=` | Lesson schedule including substitutions/cancellations. |
 | `GET /calendar/<student>.ics` | Per-student iCalendar feed (see below). |
 
 All responses are JSON except the ICS feed.
+
+All student data endpoints accept either `student=<exact name>` or `student_key=<key>`. `keyed=1` returns all selected profiles keyed by their stable keys; supplying `student_key` also uses key-based output. Student payloads include `name` and `student_key`. Existing unique-name keys remain compatible. Ambiguous name-based responses return HTTP 409 with candidate keys rather than losing one student's data. Supplying both filters returns HTTP 400. Homework is ordered by its ISO source date, newest first, with ID as a deterministic tie-breaker.
 
 #### Freshness (`_meta`)
 
@@ -279,22 +460,29 @@ ages past the threshold before midnight, so real failures are not forgiven; only
 pause the loop was told to take is. `/api/health` also returns a `quiet_hours` block so
 an idle-but-green service explains itself.
 
-The window is evaluated in `QUIET_HOURS_TZ`, not the container clock. The clock stays UTC
-deliberately: every timestamp in the database is a naive `datetime.now()`, so moving it
-would reinterpret every existing row and produce a phantom age jump on the first health
-check after deploy.
+The shared `TZ` (default `Europe/Warsaw`) controls container and Python clocks, logs,
+Chromium, quiet hours and displayed timestamps. The legacy `QUIET_HOURS_TZ` is a fallback
+alias only. SQLite timestamps and Python persistence use explicit UTC; naive historical
+stamps continue to mean UTC. Freshness normalizes both naive and offset-bearing stamps
+to UTC before calculating age, so changing the runtime zone does not reinterpret history.
+API health diagnostics and MQTT timestamps include the local UTC offset. Local-day API
+request bounds are converted to UTC with the correct offset at each bound. iCalendar
+encodes instants in UTC and uses `TZ` for warning dates and descriptions.
 
 Errors are structured rather than tracebacks: a bad query param is a 400, a locked or
 missing database is a 503.
 
 ### iCalendar feed (`ics.py`)
 
+Freshness for student-filtered endpoints and calendar warnings uses that student's active keys; account health still uses the stalest active student.
+
 `GET /calendar/<student>.ics` returns an RFC 5545 feed of the student's lesson schedule. Zero external deps — hand-rolled so it builds in any minimal container. Point a calendar client (iOS, macOS Calendar subscribe, Google Calendar "from URL", Thunderbird) at the URL for a self-updating timetable that reflects substitutions and cancellations.
+
+`?student_key=<key>` restricts the feed to that exact profile, including retired profiles. A name-based feed selects one active profile (ambiguous names return HTTP 409). Retired profiles are included only when their nonempty mailbox identity matches the selected profile; names alone never link their schedules. If mailbox identity is absent or changes across years, access old history with an explicit key.
 
 Three properties matter for a feed nobody actively checks:
 
-- **`DTSTAMP` comes from the row's `last_seen`**, not the request time. Regenerating it
-  per request made every poll look like every event had changed.
+- **`DTSTAMP` comes from the row's `last_seen`**, which advances on successful upserts, rather than the request time. This stabilizes repeated feed requests between syncs; it does not track actual field modification time.
 - **`X-PUBLISHED-TTL` / `REFRESH-INTERVAL` hints** are emitted, because Apple Calendar's
   "Auto" refresh is opaque and can sit on a changed timetable for hours.
 - **A stale feed says so.** When the schedule section goes stale the feed gains one
@@ -314,10 +502,54 @@ and forwards to Telegram.
 
 ## Auth & session management
 
-1. `vulcan-notify auth` opens a real Chromium window via Playwright. After the user logs in, cookies are serialized to `SESSION_FILE` (`session.json`).
+1. `vulcan-notify auth` opens a real Chromium window via Playwright. After login, the exported cookies must pass HTTP `/api/Context` validation before being serialized to `SESSION_FILE` (`session.json`). Failed validation preserves the previous file.
 2. Every subsequent run loads the cookie jar and hits the API directly — no browser needed.
-3. If the client detects an HTML response (eduVulcan's expired-session sentinel) and credentials are available (from `.env` or the macOS Keychain service `vulcan-notify`), it runs headless Playwright to re-auth, then retries. Fully unattended on a home server.
+3. If the client detects an HTML response (eduVulcan's expired-session sentinel) and credentials are available (from `.env` or the macOS Keychain service `vulcan-notify`), it restores persistent Chromium, imports stored cookies, tries browser reuse and then credential login, before retrying once. Docker supplies Xvfb for headed recovery; manual authentication remains explicit through the `vulcan-auth` profile.
 4. SSL uses certifi's bundled root store so it works inside minimal containers.
+
+Automatic browser authentication has one additional bounded fallback when a
+saved session exists: a failed journal-profile handoff or rejected exported
+Context closes Chromium and reopens the same profile without JSON cookie import.
+Navigation events and dashboard state are recreated, and browser reuse is tried
+before credentials again. A repeated failure propagates. Credential/CAPTCHA,
+unavailable-validation, browser-startup and file-write failures do not trigger
+this fallback. The shared profile lock covers both attempts.
+
+Imports omit expired cookies and host-only `RPE_…` cookies on `eduvulcan.pl` at
+`/`. The same portal family is cleared from Chromium before a new authentication
+flow and after completed student/messages handoffs, before exporting and testing
+the replacement snapshot. This prevents old JSON from restoring that buildup;
+cleanup does not run during an active handoff. SSO chunks and unexpired verification
+cookies are retained. The cookie-growth mitigation is locally regression-tested;
+the upstream cookie lifecycle and live resolution remain unverified.
+
+Session writes flush/fsync a mode-0600 temporary file in the same directory before atomic replacement. Failed writes leave the previous session intact. JSON and structure validation raises a sanitized error; normal sync attempts existing credential-backed recovery, or asks for explicit manual authentication when credentials are unavailable. No browser starts merely to validate a corrupt file.
+
+HTTP cookie selection respects host-only versus domain cookies, path boundaries,
+expiry and Secure metadata. Same-name cookies remain in descending path-length
+order, and headers are built for the exact endpoint in both sync and contract
+probes. API/validation requests refuse redirects so a manual Cookie header cannot
+be forwarded to a different host/path; HTTP 301/302/303/307/308 requests recovery.
+
+`test_session()` requires a JSON object containing an `uczniowie` list (empty is
+valid), and returns false for HTTP 401/403 or HTTP 200 HTML. An observed
+HTTP 409 from upstream `/api/Context` also returns false to request session-context
+recovery, without assuming every 409 means expired authentication. Student
+discovery applies the same policy through `SessionExpiredError`, allowing the
+existing bounded mid-sync recovery/retry; a repeated conflict ends the run.
+Other module conflicts remain fetch errors. Transient
+connection/server failures and malformed JSON retry once after two seconds;
+each request has a 30-second total and 10-second connection timeout. Exhaustion
+raises `SessionValidationError`, so `sync` and `test` exit nonzero while preserving
+the session, without browser recovery or an authentication-failure alert. The
+poll loop retries on a later cycle. Credential submission uses Playwright's
+final-URL wait (30 seconds), with context tracking for student tabs, instead of
+requiring a POST response from `/logowanie`. An ambiguous click timeout checks
+the redirect without resubmitting credentials; the student application must
+still be reached and exported API access confirmed before a session is saved.
+HTTP errors log safe response-kind, redirect-count and cookie-byte-count metadata,
+without printing cookies, response bodies or redirect destinations. HTTP 400
+still preserves the saved session rather than being assumed to prove expiry.
 
 ## Home Assistant integration
 
@@ -330,11 +562,20 @@ The iCalendar feed is orthogonal — it's meant to be consumed directly by calen
 
 ## Deployment topology
 
-Production runs on a Proxmox LXC (Ubuntu 24.04) as a Docker container with headless Chromium for auto-reauth. Two systemd timers on the host handle CI/CD (poll GitHub, rebuild on new commits) and daily backups of the SQLite file. The MQTT broker runs inside the Home Assistant OS VM on the same Proxmox node. Full details: [`deployment.md`](deployment.md).
+The default deployment pulls `macjoker/vulcan-notify` on a Linux Docker host,
+using separate API and sync services plus an explicit noVNC auth profile. All
+share `/app/data` for SQLite, session and persistent Chromium state. Ansible can
+install configuration and converge the services; image publication and upgrades
+are explicit maintainer/operator actions. See [`deployment.md`](deployment.md).
+
+The diagram below shows the existing Proxmox homelab alternative. Its systemd
+timers poll GitHub/rebuild source and back up SQLite, while Mosquitto runs in the
+Home Assistant OS VM. Those timers are not part of the default deployment.
+See [`deployment-proxmox.md`](deployment-proxmox.md).
 
 ```plantuml
 @startuml
-title Deployment (production)
+title Deployment (Proxmox homelab alternative)
 
 node "Proxmox host" {
   node "LXC: tools" {

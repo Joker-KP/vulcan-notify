@@ -1,0 +1,57 @@
+{
+  "endpoint": "/api/WiadomoscSzczegoly",
+  "source": "sanitized-live",
+  "responses": [
+    {
+      "data": "2000-01-03T08:00:00+01:00",
+      "apiGlobalKey": "00000000-0000-4000-8000-000000000001",
+      "nadawca": "SYNTHETIC",
+      "nadawcaTyp": 1,
+      "odbiorcy": [
+        "SYNTHETIC"
+      ],
+      "temat": "SYNTHETIC",
+      "tresc": "SYNTHETIC",
+      "odczytana": false,
+      "zalaczniki": [],
+      "nadawcaInfo": "",
+      "wycofana": false,
+      "dataWycofania": null,
+      "id": 1
+    },
+    {
+      "data": "2000-01-03T08:00:00+01:00",
+      "apiGlobalKey": "00000000-0000-4000-8000-000000000001",
+      "nadawca": "SYNTHETIC",
+      "nadawcaTyp": 1,
+      "odbiorcy": [
+        "SYNTHETIC"
+      ],
+      "temat": "SYNTHETIC",
+      "tresc": "SYNTHETIC",
+      "odczytana": false,
+      "zalaczniki": [],
+      "nadawcaInfo": "",
+      "wycofana": false,
+      "dataWycofania": null,
+      "id": 1
+    },
+    {
+      "data": "2000-01-03T08:00:00+01:00",
+      "apiGlobalKey": "00000000-0000-4000-8000-000000000001",
+      "nadawca": "SYNTHETIC",
+      "nadawcaTyp": 1,
+      "odbiorcy": [
+        "SYNTHETIC"
+      ],
+      "temat": "SYNTHETIC",
+      "tresc": "SYNTHETIC",
+      "odczytana": false,
+      "zalaczniki": [],
+      "nadawcaInfo": "",
+      "wycofana": false,
+      "dataWycofania": null,
+      "id": 1
+    }
+  ]
+}

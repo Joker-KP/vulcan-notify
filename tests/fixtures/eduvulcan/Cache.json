@@ -1,0 +1,18 @@
+{
+  "endpoint": "/api/Cache",
+  "source": "sanitized-live",
+  "responses": [
+    {
+      "oneDriveClientId": "00000000-0000-4000-8000-000000000001",
+      "googleDriveClientId": "",
+      "googleDriveApiKey": "",
+      "wychowankowieOn": false
+    },
+    {
+      "oneDriveClientId": "00000000-0000-4000-8000-000000000001",
+      "googleDriveClientId": "",
+      "googleDriveApiKey": "",
+      "wychowankowieOn": false
+    }
+  ]
+}

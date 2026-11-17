@@ -1,0 +1,7 @@
+{
+  "endpoint": "/api/KomunikatStartowy",
+  "source": "sanitized-live",
+  "responses": [
+    []
+  ]
+}

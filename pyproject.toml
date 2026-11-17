@@ -12,6 +12,10 @@ dependencies = [
     "certifi>=2026.2.25",
     "openai>=1.0",
     "aiomqtt>=2.0",
+    "pyyaml>=6.0",
+    "jsonschema>=4.23",
+    "nh3>=0.3.6",
+    "markdown-it-py>=4.0",
 ]
 
 [project.optional-dependencies]
@@ -21,10 +25,13 @@ tui = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
-    "ruff>=0.9",
+    "ruff==0.15.6",
     "pre-commit>=4.0",
     "mypy>=1.14",
     "textual-dev>=1.0",
+    "openapi-spec-validator>=0.7",
+    "types-pyyaml>=6.0",
+    "types-jsonschema>=4.23",
 ]
 
 [project.scripts]

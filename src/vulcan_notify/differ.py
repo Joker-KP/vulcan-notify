@@ -3,18 +3,27 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
+
+from vulcan_notify.text import (
+    attendance_category_label,
+    homework_link_text,
+    message_html,
+    message_text,
+)
 
 if TYPE_CHECKING:
     from vulcan_notify.db import Database
     from vulcan_notify.models import (
         AttendanceEntry,
+        CompletedLesson,
         Exam,
         Grade,
         Homework,
         Lesson,
+        Remark,
         Student,
     )
 
@@ -53,6 +62,55 @@ class Change:
     tags: list[str] | None = None
     raw: object | None = None  # original model for structured MQTT payloads
     old_value: str | None = None  # previous value (for updated grades)
+
+
+async def diff_completed_lessons(
+    student: Student, fetched: list[CompletedLesson], db: Database
+) -> list[Change]:
+    """Detect new IDs and content changes; restoration alone stays silent."""
+    stored = {row["id"]: row for row in await db.get_completed_lessons_for_student(student.key)}
+    changes: list[Change] = []
+    for lesson in {lesson.id: lesson for lesson in fetched}.values():
+        existing = stored.get(lesson.id)
+        state = asdict(lesson)
+        state.pop("url")
+        if existing is not None and (
+            existing["deleted_at"] is not None
+            or all(existing[name] == value for name, value in state.items())
+        ):
+            continue
+        changes.append(
+            Change(
+                change_type="new" if existing is None else "updated",
+                item_type="completed_lesson",
+                student_name=student.name,
+                title=f"Zajęcia zrealizowane: {lesson.subject}",
+                body=lesson.topic,
+                raw=lesson,
+            )
+        )
+    return changes
+
+
+async def diff_remarks(student: Student, fetched: list[Remark], db: Database) -> list[Change]:
+    """Announce new upstream IDs only; edits and restored notes stay silent."""
+    known = {row["id"] for row in await db.get_remarks_for_student(student.key)}
+    changes: list[Change] = []
+    for remark in fetched:
+        if remark.id in known:
+            continue
+        known.add(remark.id)
+        changes.append(
+            Change(
+                change_type="new",
+                item_type="remark",
+                student_name=student.name,
+                title=f"Pochwały i uwagi: {remark.category}",
+                body=remark.content,
+                raw=remark,
+            )
+        )
+    return changes
 
 
 async def diff_grades(
@@ -110,16 +168,26 @@ async def diff_attendance(
 ) -> list[Change]:
     """Compare fetched attendance against stored records.
 
-    New (date, lesson_number) combo = new record.
+    Classroom keys remain compatible; unnumbered activities also use source/times/subject.
     """
     stored = await db.get_attendance_for_student(student.key)
-    stored_keys = {(row["date"], row["lesson_number"]) for row in stored}
+    stored_keys = {
+        (row["date"], row["lesson_number"], row["source"], row["entry_key"]) for row in stored
+    }
     changes: list[Change] = []
 
     for entry in fetched:
-        if (entry.date, entry.lesson_number) not in stored_keys and entry.category != 1:
-            category_name = {2: "Absent", 3: "Late", 4: "Excused"}.get(
-                entry.category, f"Category {entry.category}"
+        key = (entry.date, entry.lesson_number, entry.source, entry.entry_key)
+        if key not in stored_keys and entry.category != 1:
+            stored_keys.add(key)
+            category_name = attendance_category_label(entry.category)
+            location = (
+                f"lesson {entry.lesson_number}"
+                if entry.source == "oddzialy"
+                else {
+                    "dziennikiZajecInnych": "Zajęcia dodatkowe",
+                    "dziennikiSwietlicy": "Świetlica",
+                }.get(entry.source, entry.source)
             )
             changes.append(
                 Change(
@@ -127,7 +195,7 @@ async def diff_attendance(
                     item_type="attendance",
                     student_name=student.name,
                     title=f"{category_name}: {entry.subject}",
-                    body=f"{_short_due(entry.date)} • lesson {entry.lesson_number}",
+                    body=f"{_short_due(entry.date)} • {location}",
                     priority=3,
                     tags=["calendar", "school"],
                     raw=entry,
@@ -155,7 +223,17 @@ async def diff_exams(
                     item_type="exam",
                     student_name=student.name,
                     title=f"{exam_type}: {exam.subject}",
-                    body=_short_due(exam.date),
+                    body="\n".join(
+                        part
+                        for part in (
+                            _short_due(exam.date),
+                            message_text(message_html(exam.description))
+                            if exam.description
+                            else "",
+                            f"Nauczyciel: {exam.teacher}" if exam.teacher else "",
+                        )
+                        if part
+                    ),
                     priority=3,
                     tags=["memo", "school"],
                     raw=exam,
@@ -222,7 +300,9 @@ async def diff_schedule(
     if date_to is None:
         date_to = max((lsn.date for lsn in fetched), default=None)
     stored_rows = await db.get_lessons_for_student(student.key, date_from, date_to)
-    stored_by_key = {(r["date"], r["time_from"], r["subject"]): r for r in stored_rows}
+    stored_by_key = {
+        (str(r["date"]), str(r["time_from"]), str(r["subject"])): r for r in stored_rows
+    }
     fetched_keys = {(lsn.date, lsn.time_from, lsn.subject) for lsn in fetched}
     changes: list[Change] = []
 
@@ -314,13 +394,43 @@ async def diff_homework(
 
     for hw in fetched:
         if hw.id not in stored_ids:
+            details = [f"Due: {_short_due(hw.date)}"]
+            if hw.content:
+                details.append(message_text(message_html(hw.content), include_links=True))
+            if hw.teacher:
+                details.append(f"Nauczyciel: {hw.teacher}")
+            if hw.links:
+                details.append(
+                    "Linki:\n" + "\n".join(homework_link_text(link) for link in hw.links)
+                )
+            if hw.response_required is not None:
+                details.append(f"Odpowiedź wymagana: {'Tak' if hw.response_required else 'Nie'}")
+            if hw.response_required and hw.response_deadline:
+                details.append(f"Termin odpowiedzi: {hw.response_deadline}")
+            source = hw.details or {}
+            attachments = source.get("zalaczniki")
+            if isinstance(attachments, list) and attachments:
+                details.append(
+                    "Załączniki:\n" + "\n".join(homework_link_text(item) for item in attachments)
+                )
+            response = source.get("odpowiedz")
+            if isinstance(response, dict):
+                for field, label in (
+                    ("odpowiedz", "Odpowiedź ucznia"),
+                    ("komentarzNauczyciela", "Komentarz nauczyciela"),
+                ):
+                    value = response.get(field)
+                    if isinstance(value, str) and value:
+                        details.append(
+                            f"{label}: " + message_text(message_html(value), include_links=True)
+                        )
             changes.append(
                 Change(
                     change_type="new",
                     item_type="homework",
                     student_name=student.name,
                     title=f"HW: {hw.subject}",
-                    body=f"Due: {_short_due(hw.date)}",
+                    body="\n".join(details),
                     priority=2,
                     tags=["books", "school"],
                     raw=hw,

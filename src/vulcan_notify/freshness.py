@@ -14,37 +14,18 @@ forgiven, which is the distinction the alerting was missing.
 
 from __future__ import annotations
 
-import logging
-from datetime import UTC, datetime, time, timedelta
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from datetime import datetime, time, timedelta
 
 from vulcan_notify.config import settings
-
-logger = logging.getLogger(__name__)
+from vulcan_notify.time_utils import as_utc
 
 _HOUR = 3600.0
 _DAY = 24 * _HOUR
 
 
 def _local(moment: datetime) -> datetime:
-    """Render a stored timestamp as local wall time in the quiet-hours zone.
-
-    Every stamp in the database is a naive `datetime.now()` written by a container
-    whose clock is UTC, so naive means UTC here. The quiet window is a human schedule
-    and only makes sense in the household's own time, hence the conversion rather
-    than moving the container clock and invalidating every existing row.
-    """
-    try:
-        zone = ZoneInfo(settings.quiet_hours_tz)
-    except (ZoneInfoNotFoundError, ValueError):
-        logger.warning(
-            "Unknown QUIET_HOURS_TZ %r, evaluating quiet hours in UTC",
-            settings.quiet_hours_tz,
-        )
-        return moment.replace(tzinfo=None)
-
-    aware = moment.replace(tzinfo=UTC) if moment.tzinfo is None else moment
-    return aware.astimezone(zone).replace(tzinfo=None)
+    """Render a UTC storage timestamp as wall time in the shared TZ."""
+    return as_utc(moment).astimezone(settings.timezone).replace(tzinfo=None)
 
 
 def _quiet_seconds_before(moment: datetime) -> float:
@@ -82,6 +63,7 @@ def quiet_seconds_between(start: datetime, end: datetime) -> float:
     runs on local wall clock. That is twice a year, in one direction, on a threshold
     with hours of headroom -- not worth the complexity of instant-wise integration.
     """
+    start, end = as_utc(start), as_utc(end)
     if end <= start:
         return 0.0
     return _quiet_seconds_before(end) - _quiet_seconds_before(start)
@@ -97,10 +79,11 @@ def ages(raw: str | None, now: datetime) -> tuple[float, float] | None:
     if not raw:
         return None
     try:
-        stamp = datetime.fromisoformat(raw)
+        stamp = as_utc(datetime.fromisoformat(raw))
     except ValueError:
         return None
 
+    now = as_utc(now)
     wall = (now - stamp).total_seconds()
     return wall, max(0.0, wall - quiet_seconds_between(stamp, now))
 
@@ -126,4 +109,4 @@ def next_wakeup(moment: datetime) -> datetime | None:
     resume = datetime.combine(local.date(), time(hour=end))
     if resume <= local:
         resume += timedelta(days=1)
-    return resume
+    return resume.replace(tzinfo=settings.timezone)

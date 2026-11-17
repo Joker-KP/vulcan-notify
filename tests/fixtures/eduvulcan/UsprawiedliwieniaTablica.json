@@ -1,0 +1,16 @@
+{
+  "endpoint": "/api/UsprawiedliwieniaTablica",
+  "source": "sanitized-live",
+  "responses": [
+    {
+      "usprawiedliwieniaAktywne": false,
+      "usprawiedliwieniaBlokada": null,
+      "usprawiedliwienia": []
+    },
+    {
+      "usprawiedliwieniaAktywne": false,
+      "usprawiedliwieniaBlokada": null,
+      "usprawiedliwienia": []
+    }
+  ]
+}

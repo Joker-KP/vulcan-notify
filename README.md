@@ -3,7 +3,7 @@
 > [!TIP]
 > ✨ ***Push notifications, calendars, and dashboards from a school e-journal that refuses to give them to you.***
 
-CLI tool that syncs data from the eduVulcan school e-journal to a local SQLite database, detects changes between runs, and fans them out to a terminal, macOS Calendar, an MQTT broker, and an HTTP/iCalendar API.
+CLI tool that syncs data from the eduVulcan school e-journal to a local SQLite database, detects changes between runs, and fans them out to a terminal, SMTP email, macOS Calendar, an MQTT broker, and an HTTP/iCalendar API.
 
 Solves the problem of eduVulcan paywalling push notifications behind a subscription, while the web version (which is legally required to remain free) has no notification support. Also exposes a local HTTP + MQTT surface so Home Assistant (or anything else) can react to school events in real time.
 
@@ -17,25 +17,56 @@ Solves the problem of eduVulcan paywalling push notifications behind a subscript
 - **Exams** - upcoming tests and quizzes, with description and teacher
 - **Homework** - upcoming assignments, with full description
 - **Messages** - unread count and body, with optional sender whitelist filtering
+- **Praise and behavior notes** - per-student persistence, new-item events and separate emails with a link to the Pochwały i uwagi view
 - **Lesson schedule** - substitutions, cancellations, and extra lessons
+- **Completed lessons** - topics, subjects, teachers and lesson resources; SQLite, TUI, MQTT and HTTP API, with no email notifications
 
 Supports multiple students under one parent account.
+
+Homework comes from the date-windowed school calendar, including past tasks,
+with 365 days back and 365 days ahead by default. Notifications include available
+descriptions, teachers, links, response requirements/deadlines, attachments and
+response comments. Full upstream details are stored locally and exposed via HTTP
+and MQTT. Upgrading from dashboard-only sync imports the expanded history silently
+once; subsequent new tasks notify. See [email behavior](docs/email.md).
 
 ## What it exposes
 
 - **Terminal output** - colored when interactive, plain when piped
 - **macOS Calendar** - exams and homework as all-day events with reminders (iCloud syncs to iOS)
 - **MQTT events** - every detected change published to Mosquitto (with a persistent outbox for retries)
-- **HTTP API** - grade aggregates, homework, messages, and schedule over aiohttp on port 8585
+- **Email notifications** - change digests with optional AI summary, plus a separate email for each new message; persistent SMTP retries ([setup](docs/email.md))
+- **HTTP API** - grade aggregates, homework, messages, praise/notes, completed lessons and schedule over aiohttp on port 8585
 - **iCalendar feed** - per-student `.ics` feed for subscribing from iOS/macOS Calendar, Google Calendar, or Home Assistant
-- **AI summaries** - optional digest of recent changes or messages via any OpenAI-compatible API
+- **AI summaries** - optional digest of recent changes, messages or completed lesson topics via any OpenAI-compatible API
 
 ## 📦 Installation <a name="installation"></a>
+
+### Docker Hub deployment (default)
+
+Deploy `macjoker/vulcan-notify` with separate API, sync and explicit noVNC auth
+services. The host pulls the image; SQLite, sessions and Chromium state persist
+under `data/`.
+
+- [Deploy with Docker Compose](docs/deployment.md)
+- [Deploy with the example Ansible playbook](docs/deployment-ansible.md)
+- [Build and publish an image manually](docs/publishing.md)
+- [Docker Hub overview text](docs/docker-hub.md)
+
+The publishing setup is prepared for review; no image was published in this
+change. Publish a reviewed version before using the deployment instructions.
+The [existing Proxmox homelab setup](docs/deployment-proxmox.md) remains an
+alternative, including its independent source-build auto-deploy timer.
+
+### Local development / source installation
+
+The root `docker-compose.yml` still builds locally. Use it for development, or
+run the CLI directly as below.
 
 **Requirements:** Python 3.12+, [uv](https://docs.astral.sh/uv/) package manager
 
 ```bash
-git clone https://github.com/yourname/vulcan-notify.git
+git clone https://github.com/Joker-KP/vulcan-notify.git
 cd vulcan-notify
 uv sync
 
@@ -62,12 +93,52 @@ uv run vulcan-notify sync
 |---------|-------------|
 | `vulcan-notify auth` | Interactive browser login, saves session cookies |
 | `vulcan-notify test` | Test if saved session is still valid |
+| `vulcan-notify api-gather` | On-demand upstream OpenAPI gathering and sanitized fixture update |
+| `vulcan-notify api-check` | On-demand live check against the saved upstream contract |
 | `vulcan-notify sync` | Fetch latest data and show changes (default) |
+| `vulcan-notify email-retry` | Retry queued SMTP digests without contacting eduVULCAN |
 | `vulcan-notify calendar` | Force re-sync all exams/homework to macOS Calendar |
 | `vulcan-notify tui` | Interactive Textual browser for synced content (requires `uv sync --extra tui`) |
-| `vulcan-notify summarize [--type sync\|messages] [--days N]` | AI summary of recent changes or messages (requires `LLM_API_KEY`) |
+| `vulcan-notify summarize [--type sync\|messages\|lessons\|mix] [--days N]` | AI summary of stored changes, messages or lesson topics; `mix` emails messages and lessons together (requires `LLM_API_KEY`) |
+
+In the TUI, press `6` for **Remarks** (praise and behavior notes). The list shows
+date, student, category, author, optional points and a content preview. Press Enter
+for full content and the student's Vulcan URL; use `s` to cycle the student filter
+and `o` / `O` to sort. Soft-deleted notes are hidden. All views read local SQLite.
+
+Press `7` for **Completed lessons**: date, student, lesson number, subject, teacher
+and topic. Enter opens the full topic, thematic block, online link and stored
+collections/resources. The same filtering and sorting controls apply.
+Completed lessons are fetched from `/api/RealizacjaZajec13` with `status=1`,
+stored per student and exposed at `/api/completed-lessons?n=20&student_key=...`.
+New and changed records emit `school/<student-slug>/completed_lessons/new` or
+`.../updated` MQTT events. The first successful import is silent, including when
+upgrading; this category does not trigger emails. Stored topics can optionally
+enter AI summaries with `LLM_INCLUDE_LESSONS=true`, covering seven local
+calendar days including today by default (`LLM_LESSONS_DAYS=7`).
+The prompt groups by student/subject and omits routine activities such as lunch
+or commuting. A standalone topic summary uses `summarize --type lessons
+--days 7`; see [AI configuration](docs/email.md#optional-ai-summary).
+Use `vulcan-notify summarize --type mix --days 7` to email separate AI summaries
+of messages and completed lessons in one styled email. Empty results are omitted.
+Markdown output is rendered as HTML with **Wiadomości** and **Przeprowadzone
+zajęcia** sections, each ending with links to the corresponding eduVULCAN views
+when the saved session is available.
+This requires `EMAIL_ENABLED=true` and configured SMTP; `--days` defaults to 7
+for both sections. See [mixed summary emails](docs/email.md#mixed-summary-email).
+With email and an LLM key configured, the first successful Friday `sync` starting
+at or after 15:00 in `TZ` (default `Europe/Warsaw`) automatically sends a seven-day
+mixed summary. SQLite remembers the week across restarts; SMTP retries reuse
+the saved email. Set `WEEKLY_SUMMARY_ENABLED=false` to disable this action.
+The default window is the past 90 days plus today (`SYNC_COMPLETED_LESSONS_DAYS`).
+Missing entries are soft-deleted within the fetched window; older history is kept.
+The table is created automatically on startup. Recorded/synthetic responses are
+tested; live eduVULCAN behavior remains unverified.
 
 ## ⚙️ How it works <a name="how-it-works"></a>
+
+For upstream API verification and discovery, see the
+[OpenAPI contract guide](docs/eduvulcan/README.md). These jobs run only when invoked.
 
 End-to-end flow from the eduVulcan API down to a push notification on your phone and a tile on your Home Assistant dashboard:
 
@@ -75,7 +146,7 @@ End-to-end flow from the eduVulcan API down to a push notification on your phone
 %%{init: {'theme':'base','flowchart':{'curve':'basis','nodeSpacing':50,'rankSpacing':60}}}%%
 flowchart TB
     accTitle: vulcan-notify end-to-end flow
-    accDescr: A scheduled sync pulls grades, attendance, exams, homework, messages, and schedule from eduVulcan. Changes are diffed against SQLite and fanned out to the terminal, macOS Calendar, MQTT, and an HTTP/iCalendar API. Home Assistant consumes MQTT events and the HTTP API to drive a school dashboard and push notifications. Both iCloud Calendar and HA push converge on the parent's phone.
+    accDescr: A scheduled sync pulls grades, attendance, exams, homework, messages, and schedule from eduVulcan. Changes are diffed against SQLite and fanned out to the terminal, SMTP email, macOS Calendar, MQTT, and an HTTP/iCalendar API. Home Assistant consumes MQTT events and the HTTP API to drive a school dashboard and push notifications. Calendar, email and HA push converge on the parent's phone.
 
     Vulcan([uczen.eduvulcan.pl])
 
@@ -91,6 +162,7 @@ flowchart TB
         Fanout --> CalSync[calendar sync]
         Fanout --> Outbox[(MQTT outbox)]
         API[api · aiohttp :8585] --> DB
+        EmailOutbox[(Email outbox)]
     end
 
     subgraph HA[Home Assistant]
@@ -110,11 +182,14 @@ flowchart TB
     API -->|/calendar/<name>.ics| iCloud
     iCloud --> Phone
     Push --> Phone
+    Fanout --> EmailOutbox
+    EmailOutbox -->|SMTP digest · optional AI| Inbox[Parent email inbox]
+    Inbox --> Phone
 
     classDef storage fill:#ecfdf5,stroke:#16a34a,color:#064e3b;
     classDef external fill:#fef3c7,stroke:#d97706,color:#78350f;
     classDef actor fill:#eef2ff,stroke:#4f46e5,color:#312e81;
-    class DB,Outbox,Mosq,iCloud storage;
+    class DB,Outbox,EmailOutbox,Mosq,iCloud storage;
     class Vulcan external;
     class Phone actor;
 
@@ -125,11 +200,14 @@ flowchart TB
     linkStyle 12,13 stroke:#9333ea,stroke-width:1.5px,stroke-dasharray: 4 3
 ```
 
-1. **Auth** - Playwright opens a browser for you to log into eduvulcan.pl. After login, session cookies are saved locally. If login credentials are provided, expired sessions are renewed headlessly on subsequent runs.
+1. **Auth** - Playwright opens a browser for you to log into eduvulcan.pl. After login, session cookies are saved locally. Subsequent syncs validate cookies over HTTP. With credentials available, expired sessions first try persistent-browser recovery, then credential login.
 2. **Fetch** - The tool calls the eduVulcan web API directly (using saved cookies) to pull grades (all periods), attendance (last 90 days), exams, homework with full body, messages, and the lesson schedule including substitutions.
-3. **Diff** - Each item is compared against the local SQLite database. New or changed items are reported; exams and homework that disappear from the API are soft-deleted.
-4. **Persist** - All upserts are idempotent (`INSERT OR REPLACE`). Each run is recorded in a `sync_runs` table.
-5. **Publish** - Changes fan out in parallel: printed to the terminal, written to macOS Calendar (if configured), enqueued in the MQTT outbox and drained to Mosquitto (if configured). The outbox survives broker outages.
+
+   Exams and homework use the date-windowed module calendar, rather than upcoming-only dashboard lists. Their details refresh on every sync for returned items; new notifications include description and teacher. Existing details update silently, and failed detail reads retain stored content. Expanded exam history and additional attendance sections baseline silently on upgrades. SQLite migrates automatically while preserving history and calendar UIDs.
+
+3. **Diff** - Each item is compared against the local SQLite database. New grades and value changes, new non-present attendance, new exams/homework, and supported schedule changes are reported. Missing exams/homework are soft-deleted only inside a successfully fetched calendar window. Known exam/homework detail edits persist silently.
+4. **Persist** - All upserts are idempotent (`INSERT ... ON CONFLICT DO UPDATE`). Each run is recorded in a `sync_runs` table.
+5. **Publish** - Changes are printed to the terminal, summarized for SMTP email (optionally using AI), written to macOS Calendar, and published to MQTT when those channels are configured. Email and MQTT have separate persistent retry outboxes.
 6. **Serve** (separate command, long-running) - `vulcan-notify api` (via Docker or systemd service) exposes the HTTP + iCalendar endpoints backed by the same SQLite file.
 
 On first sync, all existing data is stored without reporting changes (baseline). Only subsequent syncs show what's new.
@@ -138,12 +216,16 @@ For the full module breakdown, database schema, MQTT topic map, and HTTP endpoin
 
 ## 🏠 Home Assistant integration <a name="home-assistant-integration"></a>
 
-Production setup runs vulcan-notify as a Docker container on a Proxmox LXC, publishing MQTT events to the Mosquitto broker inside Home Assistant OS. Two ways to wire it up:
+The Docker deployment can publish MQTT events to a broker reachable from its
+containers, including Mosquitto inside Home Assistant OS. Two ways to wire it up:
 
 - **Event-driven (MQTT)** - subscribe to `school/#` and build sensors or automations. Topic scheme: `<prefix>/<student-slug>/<segment>/<change_type>`, e.g. `school/alice/grades/new`, `school/alice/exams/updated`, `school/alice/attendance/alert`, `school/alice/substitutions/new`. Payloads are structured JSON with the full change metadata.
 - **Pull-based (HTTP)** - HA's REST sensor polls `/api/grades/monthly`, `/api/messages`, `/api/schedule`, etc. for dashboards and history graphs. The iCalendar feed at `/calendar/<name>.ics` can be subscribed directly from any calendar client.
 
-See [`docs/architecture.md`](docs/architecture.md) for the full endpoint list, MQTT topic map, and payload examples. See [`docs/deployment.md`](docs/deployment.md) for the Proxmox/Docker/systemd setup.
+See [`docs/architecture.md`](docs/architecture.md) for endpoints, MQTT topics and
+payloads, and [`docs/deployment.md`](docs/deployment.md) for the default Docker Hub
+deployment. The API defaults to loopback; configure a trusted LAN bind address
+when Home Assistant runs on another host.
 
 ## 🔐 Auto-login <a name="auto-login"></a>
 
@@ -163,7 +245,29 @@ VULCAN_LOGIN=your.email@example.com
 VULCAN_PASSWORD=your_password
 ```
 
-When credentials are available, `vulcan-notify sync` detects expired sessions and re-authenticates headlessly via Playwright - no manual browser interaction needed.
+When credentials are available, `vulcan-notify sync` detects expired sessions, imports saved cookies into persistent Chromium and attempts browser-session recovery before credential login. Docker provides Xvfb for headed recovery by default; `VULCAN_BROWSER_HEADLESS=true` opts into headless mode. If automatic recovery fails, stop `vulcan-sync` and run `docker compose --profile auth up vulcan-auth` for manual headed authentication through noVNC, then restart the worker. All services share the persistent `/app/data` volume.
+
+If journal entry fails with a saved session, automatic recovery reopens the same
+profile once without importing that snapshot. Browser authentication also filters
+expired imports and clears accumulated parent-portal `RPE_…` cookies at flow
+boundaries, preserving SSO and unexpired verification cookies. Replacement
+sessions still require API validation. No manual deletion or configuration change
+is required; this mitigation is unit-tested and awaits live confirmation.
+
+Session files are replaced atomically with permissions 0600. Invalid saved sessions use the same recovery policy, preserving the file until authentication succeeds.
+
+Session checks retry connectivity/server failures once (30 seconds per attempt,
+with a two-second delay). If validation remains unavailable, synchronization exits
+nonzero and keeps the saved session for the next cycle, without browser login or
+an authentication-failure email. Confirmed expired sessions still trigger recovery.
+Credential login recognizes the final portal/student redirect without requiring
+a POST to a particular URL; it never resubmits credentials after a submit timeout.
+An HTTP 409 from upstream `/api/Context` requests recovery of the session context
+instead of treating it as an outage. The same rule applies during student discovery;
+the existing mid-sync recovery retries only once. Conflicts from other modules do
+not trigger this rule. Timeout, 429 and 5xx handling remains unchanged.
+
+Student API endpoints keep existing name-based response keys when names are unique. `/api/students` lists stable keys; use `?student_key=KEY` for one profile or `?keyed=1` for responses keyed by profile. Each student payload includes `name` and `student_key`. Ambiguous name lookups return HTTP 409. Calendar subscriptions can use `/calendar/<name>.ics?student_key=KEY`; historical profiles are combined by name only when their nonempty mailbox identity matches.
 
 ## 📅 Calendar integration <a name="calendar-integration"></a>
 
@@ -179,9 +283,13 @@ The calendar names must match existing calendars in macOS Calendar. Each student
 
 When configured, `vulcan-notify sync` automatically creates and updates calendar events. Use `vulcan-notify calendar` to force a clean re-sync of all events. Events are deduplicated by storing the macOS calendar UID in the database; when exams or homework are removed from the API (soft-deleted), their calendar events are also removed.
 
+Transient update/deletion failures retain UIDs for retry, including forced re-sync. `CALENDAR_TIMEOUT_SECONDS` defaults to 30 seconds per AppleScript operation; timeout or cancellation kills and reaps the subprocess. Missing events are recreated on a later sync after Calendar confirms their absence.
+
 ## 🔧 Configuration <a name="configuration"></a>
 
-All settings are via environment variables or `.env` file:
+Set `TZ=Europe/Warsaw` in `.env` (the default) for all Docker services, application logs, Chromium, quiet hours, email dates, MQTT timestamps and API diagnostics. The IANA zone applies daylight-saving rules automatically. `TZ` takes precedence over the legacy `QUIET_HOURS_TZ` alias. SQLite timestamps remain explicitly UTC; old UTC history needs no migration. UTC encodings in upstream requests and iCalendar preserve the same instants. Docker daemon log metadata (`docker logs --timestamps`) is managed by Docker and remains UTC; timestamps inside application log lines use `TZ`.
+
+Python settings load `.env`; Compose exports it to the containers. Direct auth/API/shell readers need exported variables outside Docker. See the commented [`.env.example`](.env.example) for all settings:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -189,13 +297,18 @@ All settings are via environment variables or `.env` file:
 | `SESSION_FILE` | `session.json` | Saved session cookies path |
 | `VULCAN_LOGIN` | (none) | eduVulcan login email for auto-login |
 | `VULCAN_PASSWORD` | (none) | eduVulcan password for auto-login |
-| `SYNC_ATTENDANCE_DAYS` | `90` | How many days back to sync attendance |
+| `SYNC_ATTENDANCE_DAYS` | `90` | Attendance lookback, including classroom, other activities and childcare |
+| `SYNC_EXAM_DAYS` | `365` | Exam calendar lookback in full local days, plus today |
+| `SYNC_EXAM_FUTURE_DAYS` | `365` | Exam calendar lookahead in full local days |
+| `SYNC_COMPLETED_LESSONS_DAYS` | `90` | How many days back to sync completed lessons, plus today; no email notifications |
 | `SYNC_MESSAGE_BACKFILL_BATCH` | `10` | Legacy messages to refetch bodies for, per run |
 | `POLL_INTERVAL` | `1800` | Seconds between polls when run as a service |
+| `SYNC_HOMEWORK_DAYS` | `365` | Homework calendar lookback in full local days, plus today |
+| `SYNC_HOMEWORK_FUTURE_DAYS` | `365` | Homework calendar lookahead in full local days |
 | `QUIET_HOURS_START` | `0` | Hour (0-23) to start quiet window, sync paused |
 | `QUIET_HOURS_END` | `5` | Hour (0-23) to end quiet window, sync resumes |
-| `QUIET_HOURS_TZ` | `Europe/Warsaw` | Zone the quiet window is read in. Not the container clock, which stays UTC |
-| `MESSAGE_SENDER_WHITELIST` | (empty) | Comma-separated sender names to filter messages |
+| `TZ` | `Europe/Warsaw` | Shared runtime, log, scheduling and display timezone; `QUIET_HOURS_TZ` is a legacy fallback |
+| `MESSAGE_SENDER_WHITELIST` | `[]` | JSON list of sender substrings to filter displayed messages |
 | `CALENDAR_MAP` | (empty) | JSON dict mapping student names to macOS calendar names |
 | `CALENDAR_REMINDER_HOURS` | `24` | Hours before event for calendar alarm |
 | `MQTT_ENABLED` | `false` | Enable MQTT publishing |
@@ -204,15 +317,32 @@ All settings are via environment variables or `.env` file:
 | `MQTT_USERNAME` | (none) | Optional MQTT auth |
 | `MQTT_PASSWORD` | (none) | Optional MQTT auth |
 | `MQTT_TOPIC_PREFIX` | `school` | Topic namespace root |
+| `EMAIL_ENABLED` | `false` | Enable SMTP digests; [full configuration and retry behavior](docs/email.md) |
+| `SMTP_HOST`, `EMAIL_FROM`, `EMAIL_TO` | (empty) | Required email server, sender, and JSON recipient list |
+| `SMTP_PORT`, `SMTP_SECURITY` | `587`, `starttls` | SMTP port and TLS mode (`starttls`, `ssl`, `none`) |
+| `SMTP_USERNAME`, `SMTP_PASSWORD` | (none) | Optional SMTP credentials |
+| `EMAIL_AI_SUMMARY` | `false` | Add an AI summary above the HTML change groups; also requires `LLM_API_KEY` |
+| `EMAIL_DIGEST_GROUPS` | `{}` (all enabled) | Individual digest group switches, e.g. `{"attendance":false,"homework":false}`; omitted keys stay enabled |
+| `EMAIL_SCHEDULE_COOLDOWN_HOURS` | `6` | After a substitution/cancellation email, accumulate further events of these two types until the first sync after this many hours; `0` disables the timed wait. Other categories continue normally. |
+| `EMAIL_MESSAGE_SUBJECT_PREFIX` | `[Nowa wiadomość]` | Prefix for separate new-message notifications, followed by the original subject |
+| `EMAIL_REMARK_SUBJECT_PREFIX` | `[Uwagi]` | Prefix for separate praise/note emails, followed by student name and category; full note content is included |
+| `EMAIL_INCLUDE_MESSAGE_BODIES` | `false` | Include original message bodies in individual notifications; messages are excluded from digest AI input |
 | `NTFY_TOPIC` | `vulcan-notify` | ntfy.sh topic (if used) |
 | `NTFY_SERVER` | `https://ntfy.sh` | ntfy server base URL |
 | `LLM_BASE_URL` | `https://api.cerebras.ai/v1` | OpenAI-compatible API base URL for AI summaries |
 | `LLM_API_KEY` | (none) | API key for AI summaries (disabled if unset) |
 | `LLM_MODEL` | `gpt-oss-120b` | Model name for AI summaries |
+| `LLM_INCLUDE_LESSONS` | `false` | Add stored lesson topics to email/CLI AI change summaries; topics alone do not trigger emails |
+| `LLM_LESSONS_DAYS` | `7` | Local calendar days including today for topic summaries; standalone CLI accepts `--days` |
 | `LOG_LEVEL` | `INFO` | Logging level |
 
 ## 📚 Documentation <a name="documentation"></a>
 
 - [`docs/architecture.md`](docs/architecture.md) - internal architecture, pipeline, database schema, MQTT payloads, endpoint reference
-- [`docs/deployment.md`](docs/deployment.md) - Docker + Proxmox LXC + systemd setup
+- [`docs/email.md`](docs/email.md) - HTML groups/templates, SMTP digests, optional AI summary, configuration and retries
+- [`docs/deployment.md`](docs/deployment.md) - default Docker Hub deployment and operations
+- [`docs/deployment-ansible.md`](docs/deployment-ansible.md) - example Ansible deployment
+- [`docs/publishing.md`](docs/publishing.md) - manual image build and Docker Hub publication
+- [`docs/docker-hub.md`](docs/docker-hub.md) - compact Docker Hub description
+- [`docs/deployment-proxmox.md`](docs/deployment-proxmox.md) - alternative Proxmox LXC + source builds + systemd
 - [`docs/eduvulcan-api.md`](docs/eduvulcan-api.md) - reverse-engineered eduVulcan web API reference

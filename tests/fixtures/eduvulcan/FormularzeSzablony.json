@@ -1,0 +1,7 @@
+{
+  "endpoint": "/api/FormularzeSzablony",
+  "source": "sanitized-live",
+  "responses": [
+    []
+  ]
+}

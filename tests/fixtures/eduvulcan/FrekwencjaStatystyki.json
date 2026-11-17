@@ -1,0 +1,98 @@
+{
+  "endpoint": "/api/FrekwencjaStatystyki",
+  "source": "sanitized-live",
+  "responses": [
+    {
+      "podsumowanie": 1.5,
+      "statystyki": [
+        {
+          "kategoriaFrekwencji": 1,
+          "miesiace": [
+            {
+              "miesiac": 1,
+              "wartosc": 1
+            },
+            {
+              "miesiac": 1,
+              "wartosc": 1
+            }
+          ],
+          "okresy": [
+            1,
+            1
+          ],
+          "razem": 1
+        },
+        {
+          "kategoriaFrekwencji": 1,
+          "miesiace": [],
+          "okresy": [
+            1,
+            1
+          ],
+          "razem": 1
+        },
+        {
+          "kategoriaFrekwencji": 1,
+          "miesiace": [
+            {
+              "miesiac": 1,
+              "wartosc": 1
+            }
+          ],
+          "okresy": [
+            1,
+            1
+          ],
+          "razem": 1
+        }
+      ]
+    },
+    {
+      "podsumowanie": 1.5,
+      "statystyki": [
+        {
+          "kategoriaFrekwencji": 1,
+          "miesiace": [
+            {
+              "miesiac": 1,
+              "wartosc": 1
+            },
+            {
+              "miesiac": 1,
+              "wartosc": 1
+            }
+          ],
+          "okresy": [
+            1,
+            1
+          ],
+          "razem": 1
+        },
+        {
+          "kategoriaFrekwencji": 1,
+          "miesiace": [],
+          "okresy": [
+            1,
+            1
+          ],
+          "razem": 1
+        },
+        {
+          "kategoriaFrekwencji": 1,
+          "miesiace": [
+            {
+              "miesiac": 1,
+              "wartosc": 1
+            }
+          ],
+          "okresy": [
+            1,
+            1
+          ],
+          "razem": 1
+        }
+      ]
+    }
+  ]
+}

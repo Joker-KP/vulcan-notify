@@ -1,6 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
+export TZ="${TZ:-${QUIET_HOURS_TZ:-Europe/Warsaw}}"
+
 DATA_DIR="/opt/vulcan-notify/data"
 BACKUP_DIR="$DATA_DIR/backups"
 DB_PATH="$DATA_DIR/vulcan_notify.db"

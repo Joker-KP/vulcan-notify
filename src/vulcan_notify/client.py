@@ -5,25 +5,41 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+from datetime import datetime
 from typing import Any
+from urllib.parse import quote, urlencode, urlsplit
 
 import aiohttp
 
-from vulcan_notify.auth import _make_ssl_context, cookies_for_url
+from vulcan_notify.auth import _make_ssl_context, cookie_header_for_url
 from vulcan_notify.models import (
     AttendanceEntry,
     ClassificationPeriod,
+    CompletedLesson,
     DashboardData,
     Exam,
     Grade,
     Homework,
     Lesson,
     Message,
+    Remark,
     Student,
     SubjectSummary,
 )
 
 logger = logging.getLogger(__name__)
+
+# Public student-app modules used by notification links (not API endpoints).
+STUDENT_PAGE_PATHS = {
+    "grade": "oceny",
+    "attendance": "frekwencja",
+    "substitution": "planZajec",
+    "cancellation": "planZajec",
+    "addition": "planZajec",
+    "exam": "sprawdzianyZadaniaDomowe",
+    "homework": "sprawdzianyZadaniaDomowe",
+    "completed_lesson": "realizacjaZajec",
+}
 
 # Mimic a real Chrome browser to avoid bot detection
 _BROWSER_HEADERS = {
@@ -58,7 +74,7 @@ _TIMEOUT = aiohttp.ClientTimeout(total=60, connect=15)
 
 
 class SessionExpiredError(Exception):
-    """Raised when the session cookies are no longer valid."""
+    """Session access needs recovery, including a conflict at the Context endpoint."""
 
 
 class VulcanFetchError(Exception):
@@ -90,15 +106,14 @@ class VulcanClient:
     def __init__(self, session_data: dict[str, Any]) -> None:
         self._session_data = session_data
         self._base_url: str = session_data["base_url"]
-        self._tenant: str = session_data.get("tenant", "")
+        self._tenant: str = session_data.get("tenant") or urlsplit(self._base_url).path.strip("/")
         self._messages_base = f"https://wiadomosci.eduvulcan.pl/{self._tenant}"
         self._ssl_ctx = _make_ssl_context()
         self._http: aiohttp.ClientSession | None = None
 
     def _cookie_header(self) -> str:
         url = f"{self._base_url}/api/"
-        cookies = cookies_for_url(self._session_data, url)
-        return "; ".join(f"{k}={v}" for k, v in cookies.items())
+        return cookie_header_for_url(self._session_data, url)
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if self._http is None or self._http.closed:
@@ -132,20 +147,43 @@ class VulcanClient:
 
             try:
                 async with session.get(
-                    url, ssl=self._ssl_ctx, headers=extra_headers or {}
+                    url,
+                    ssl=self._ssl_ctx,
+                    headers=extra_headers or {},
+                    allow_redirects=False,
                 ) as resp:
                     content_type = resp.headers.get("content-type", "")
 
-                    if "text/html" in content_type:
+                    if resp.status in (301, 302, 303, 307, 308):
+                        raise SessionExpiredError(
+                            "Student API redirected; session recovery required"
+                        )
+
+                    if (
+                        resp.status == 409
+                        and url.split("?", 1)[0] == f"{self._base_url}/api/Context"
+                    ):
+                        # Limit this policy to student Context. Conflicts in other
+                        # modules can have meanings unrelated to authentication.
+                        logger.warning(
+                            "Student Context returned HTTP 409; session recovery required"
+                        )
+                        raise SessionExpiredError(
+                            "Student Context conflict (HTTP 409); session recovery required"
+                        )
+
+                    if resp.status in (401, 403) or (
+                        resp.status == 200 and "text/html" in content_type.lower()
+                    ):
                         # Login redirect. Let the caller re-auth; retrying won't help.
                         raise SessionExpiredError(
                             "Session expired. Run 'vulcan-notify auth' to re-authenticate."
                         )
 
                     if resp.status != 200:
-                        text = await resp.text()
                         error = VulcanFetchError(
-                            f"HTTP {resp.status} for {url}: {text[:200]}",
+                            # Response bodies can contain private data or tokens.
+                            f"HTTP {resp.status} for {url.split('?')[0]}",
                             url=url,
                             status=resp.status,
                         )
@@ -160,7 +198,10 @@ class VulcanClient:
                             _MAX_ATTEMPTS,
                         )
                     else:
-                        return await resp.json()
+                        data = await resp.json()
+                        if data is None:
+                            raise VulcanFetchError("Unexpected null API response", url=url)
+                        return data
 
             except (TimeoutError, aiohttp.ClientError) as exc:
                 last_error = exc
@@ -187,16 +228,33 @@ class VulcanClient:
         Builds a per-request Cookie header matching the URL's domain,
         since different subdomains need different cookies.
         """
-        cookie_header = "; ".join(
-            f"{k}={v}" for k, v in cookies_for_url(self._session_data, url).items()
-        )
+        cookie_header = cookie_header_for_url(self._session_data, url)
         return await self._fetch(url, extra_headers={"Cookie": cookie_header, "Referer": url})
 
     async def _request(self, path: str) -> Any:
         """Make a GET request to the API. Returns parsed JSON."""
-        return await self._fetch(f"{self._base_url}{path}")
+        url = f"{self._base_url}{path}"
+        return await self._fetch(
+            url, extra_headers={"Cookie": cookie_header_for_url(self._session_data, url)}
+        )
 
     # ── Student context ──────────────────────────────────────────────
+
+    def student_portal_url(self, student: Student) -> str:
+        """Public student app URL, without session cookies or tokens."""
+        return f"{self._base_url.rstrip('/')}/App/{quote(student.key, safe='')}"
+
+    def student_module_url(self, student_key: str, module: str) -> str:
+        """Public module URL for a locally stored student profile."""
+        return (
+            f"{self._base_url.rstrip('/')}/App/{quote(student_key, safe='')}/"
+            f"{STUDENT_PAGE_PATHS[module]}"
+        )
+
+    @property
+    def message_inbox_url(self) -> str:
+        """Public unified inbox URL for this tenant."""
+        return f"{self._messages_base}/App/odebrane"
 
     async def get_students(self) -> list[Student]:
         data = await self._request("/api/Context")
@@ -217,6 +275,108 @@ class VulcanClient:
             for s in data["uczniowie"]
             if s.get("aktywny", True)
         ]
+
+    async def get_remarks(self, student: Student) -> list[Remark]:
+        """Fetch both praise and notes from the student's Pochwały i uwagi view."""
+        key = quote(student.key, safe="")
+        data = await self._request(f"/api/Uwagi?key={key}")
+        if not isinstance(data, list):
+            raise VulcanFetchError("/api/Uwagi response is not a list")
+        remarks: list[Remark] = []
+        required = {"id", "data", "kategoria", "typ", "autor", "tresc", "rodzaj", "liczbaPunktow"}
+        for item in data:
+            if not isinstance(item, dict) or not required.issubset(item):
+                raise VulcanFetchError("/api/Uwagi item is missing required fields")
+            if any(
+                not isinstance(item[name], str) for name in ("data", "kategoria", "autor", "tresc")
+            ):
+                raise VulcanFetchError("/api/Uwagi item has invalid text fields")
+            for name in ("id", "typ", "rodzaj"):
+                value = item[name]
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or value != int(value)
+                ):
+                    raise VulcanFetchError("/api/Uwagi item has invalid numeric fields")
+            points = item["liczbaPunktow"]
+            if points is not None and (
+                isinstance(points, bool) or not isinstance(points, (int, float))
+            ):
+                raise VulcanFetchError("/api/Uwagi item has invalid points")
+            remarks.append(
+                Remark(
+                    id=int(item["id"]),
+                    date=item["data"],
+                    category=item["kategoria"],
+                    type=int(item["typ"]),
+                    author=item["autor"],
+                    content=item["tresc"],
+                    kind=int(item["rodzaj"]),
+                    points=points,
+                    url=f"{self.student_portal_url(student)}/pochwalyUwagi",
+                )
+            )
+        return remarks
+
+    async def get_completed_lessons(
+        self, student: Student, date_from: str, date_to: str
+    ) -> list[CompletedLesson]:
+        """Fetch completed lessons only; retain unverified resource shapes as JSON."""
+        endpoint = "/api/RealizacjaZajec13"
+        data = await self._request(
+            f"{endpoint}?key={quote(student.key, safe='')}&dataOd={quote(date_from, safe='')}"
+            f"&dataDo={quote(date_to, safe='')}&status=1"
+        )
+        if not isinstance(data, list):
+            raise VulcanFetchError(f"{endpoint} response is not a list")
+        lessons: dict[int, CompletedLesson] = {}
+        text_fields = ("data", "przedmiot", "nauczyciel", "tematOpis", "blokTematyczny", "online")
+        required = {
+            *text_fields,
+            "id",
+            "nrLekcji",
+            "kolekcjePoLekcji",
+            "existsKolekcjePoLekcji",
+            "zasoby",
+        }
+        for item in data:
+            if not isinstance(item, dict) or not required.issubset(item):
+                raise VulcanFetchError(f"{endpoint} item is missing required fields")
+            if any(not isinstance(item[name], str) for name in text_fields):
+                raise VulcanFetchError(f"{endpoint} item has invalid text fields")
+            for name in ("id", "nrLekcji"):
+                value = item[name]
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise VulcanFetchError(f"{endpoint} item has invalid numeric fields")
+                if not float(value).is_integer():
+                    raise VulcanFetchError(f"{endpoint} item has invalid numeric fields")
+            try:
+                datetime.fromisoformat(item["data"])
+            except ValueError:
+                raise VulcanFetchError(f"{endpoint} item has invalid date") from None
+            if not isinstance(item["kolekcjePoLekcji"], list) or not isinstance(
+                item["existsKolekcjePoLekcji"], bool
+            ):
+                raise VulcanFetchError(f"{endpoint} item has invalid collection fields")
+            lesson = CompletedLesson(
+                id=int(item["id"]),
+                date=item["data"],
+                lesson_number=int(item["nrLekcji"]),
+                subject=item["przedmiot"],
+                teacher=item["nauczyciel"],
+                topic=item["tematOpis"],
+                thematic_block=item["blokTematyczny"],
+                online=item["online"],
+                collections=item["kolekcjePoLekcji"],
+                has_collections=item["existsKolekcjePoLekcji"],
+                resources=item["zasoby"],
+                url=self.student_module_url(student.key, "completed_lesson"),
+            )
+            if lesson.id in lessons and lessons[lesson.id] != lesson:
+                raise VulcanFetchError(f"{endpoint} has conflicting duplicate IDs")
+            lessons[lesson.id] = lesson
+        return list(lessons.values())
 
     # ── Grades ───────────────────────────────────────────────────────
 
@@ -308,27 +468,45 @@ class VulcanClient:
         data = await self._request(
             f"/api/Frekwencja?key={student.key}&dataOd={date_from}&dataDo={date_to}"
         )
-        if not data:
-            return []
-
+        if not isinstance(data, dict) or "oddzialy" not in data:
+            raise VulcanFetchError("/api/Frekwencja response has no 'oddzialy' key")
         entries: list[AttendanceEntry] = []
-        for entry in data.get("oddzialy", []):
-            entries.append(
-                AttendanceEntry(
-                    lesson_number=entry.get("numerLekcji", 0),
-                    category=entry.get("kategoriaFrekwencji", 0),
-                    date=entry.get("data", ""),
-                    subject=entry.get("opisZajec", ""),
-                    teacher=entry.get("nauczyciel", ""),
-                    time_from=entry.get("godzinaOd", ""),
-                    time_to=entry.get("godzinaDo", ""),
+        for source in ("oddzialy", "dziennikiZajecInnych", "dziennikiSwietlicy"):
+            rows = data.get(source, [])
+            if not isinstance(rows, list):
+                raise VulcanFetchError(f"/api/Frekwencja {source} is not a list")
+            for entry in rows:
+                if not isinstance(entry, dict) or not {
+                    "data",
+                    "kategoriaFrekwencji",
+                    "opisZajec",
+                }.issubset(entry):
+                    raise VulcanFetchError(f"/api/Frekwencja {source} has invalid records")
+                entries.append(
+                    AttendanceEntry(
+                        lesson_number=entry.get("numerLekcji", 0),
+                        category=entry["kategoriaFrekwencji"],
+                        date=entry["data"],
+                        subject=entry["opisZajec"],
+                        teacher=entry.get("nauczyciel") or "",
+                        time_from=entry.get("godzinaOd") or "",
+                        time_to=entry.get("godzinaDo") or "",
+                        source=source,
+                    )
                 )
-            )
         return entries
 
     # ── Dashboard (Tablica) endpoints ────────────────────────────────
 
-    async def get_exams(self, student: Student) -> list[Exam]:
+    async def get_exams(
+        self, student: Student, date_from: str | None = None, date_to: str | None = None
+    ) -> list[Exam]:
+        if date_from is not None or date_to is not None:
+            items = await self._get_calendar_items(student, date_from, date_to, homework=False)
+            return [
+                Exam(item["id"], item["data"], item["przedmiotNazwa"], item["typ"])
+                for item in items
+            ]
         data = await self._request(f"/api/SprawdzianyTablica?key={student.key}")
         if not data:
             return []
@@ -342,7 +520,13 @@ class VulcanClient:
             for e in data
         ]
 
-    async def get_homework(self, student: Student) -> list[Homework]:
+    async def get_homework(
+        self, student: Student, date_from: str | None = None, date_to: str | None = None
+    ) -> list[Homework]:
+        """Read the calendar when a window is supplied; dashboard callers keep their overview."""
+        if date_from is not None or date_to is not None:
+            items = await self._get_calendar_items(student, date_from, date_to, homework=True)
+            return [Homework(item["id"], item["data"], item["przedmiotNazwa"]) for item in items]
         data = await self._request(f"/api/ZadaniaDomoweTablica?key={student.key}")
         if not data:
             return []
@@ -354,6 +538,38 @@ class VulcanClient:
             )
             for h in data
         ]
+
+    async def _get_calendar_items(
+        self, student: Student, date_from: str | None, date_to: str | None, *, homework: bool
+    ) -> list[dict[str, Any]]:
+        """Read the module list, preserving exam type codes without guessing enums."""
+        if date_from is None or date_to is None:
+            raise ValueError("Both calendar date bounds are required")
+        endpoint = "/api/SprawdzianyZadaniaDomowe"
+        query = urlencode({"key": student.key, "dataOd": date_from, "dataDo": date_to})
+        data = await self._request(f"{endpoint}?{query}")
+        if not isinstance(data, list):
+            raise VulcanFetchError(f"{endpoint} response is not a list")
+        items: dict[int, dict[str, Any]] = {}
+        for item in data:
+            if not isinstance(item, dict) or type(item.get("typ")) is not int:
+                raise VulcanFetchError(f"{endpoint} item has invalid type")
+            if (item["typ"] == 4) != homework:
+                continue
+            if (
+                type(item.get("id")) is not int
+                or not isinstance(item.get("data"), str)
+                or not isinstance(item.get("przedmiotNazwa"), str)
+            ):
+                raise VulcanFetchError(f"{endpoint} item has invalid fields")
+            try:
+                datetime.fromisoformat(item["data"])
+            except ValueError:
+                raise VulcanFetchError(f"{endpoint} item has invalid date") from None
+            if item["id"] in items and items[item["id"]] != item:
+                raise VulcanFetchError(f"{endpoint} has conflicting IDs")
+            items[item["id"]] = item
+        return list(items.values())
 
     # ── Detail endpoints ────────────────────────────────────────────
 
@@ -475,6 +691,26 @@ class VulcanClient:
         if not data:
             return []
 
+        # Inbox labels need not match Context's pupil/school display names.
+        # Resolve the mailbox's stable identity before notification rendering.
+        mailbox_keys: dict[str, set[str]] = {}
+        try:
+            mailboxes = await self._request_url(f"{self._messages_base}/api/Skrzynki")
+            if not isinstance(mailboxes, list):
+                raise VulcanFetchError("/api/Skrzynki response is not a list")
+            for mailbox in mailboxes:
+                name = mailbox.get("nazwa")
+                key = mailbox.get("globalKey")
+                if isinstance(name, str) and isinstance(key, str) and key:
+                    mailbox_keys.setdefault(name.strip(), set()).add(key)
+        except SessionExpiredError:
+            raise
+        except Exception as exc:
+            logger.warning("Mailbox context unavailable (%s)", type(exc).__name__)
+        resolved_mailboxes = {
+            name: next(iter(keys)) for name, keys in mailbox_keys.items() if len(keys) == 1
+        }
+
         return [
             Message(
                 id=m["id"],
@@ -485,6 +721,8 @@ class VulcanClient:
                 mailbox=m.get("skrzynka", ""),
                 has_attachments=m.get("hasZalaczniki", False),
                 is_read=m.get("przeczytana", False),
+                mailbox_url=self.message_inbox_url,
+                mailbox_key=resolved_mailboxes.get(m.get("skrzynka", "").strip(), ""),
             )
             for m in data
         ]

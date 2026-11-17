@@ -13,16 +13,18 @@ def _settings(tmp_path: Path, *, api_key: str | None = "test-key") -> Settings:
     """Create Settings with a temp prompts file."""
     prompts = tmp_path / "prompts.toml"
     prompts.write_text(
-        '[default]\n'
+        "[default]\n"
         'system = "You summarize school updates."\n'
         'prompt = "Summarize: {sync_output}"\n'
-        '\n'
-        '[weekly]\n'
+        "\n"
+        "[weekly]\n"
         'system = "You write weekly reports."\n'
         'prompt = "Weekly report: {sync_output}"\n'
     )
     return Settings(
+        _env_file=None,
         llm_api_key=api_key,
+        llm_base_url="https://api.cerebras.ai/v1",
         llm_model="gpt-oss-120b",
         prompts_file=prompts,
         db_path=tmp_path / "test.db",
@@ -90,14 +92,18 @@ async def test_strips_ansi_before_sending(
 async def test_returns_none_on_api_error(
     mock_openai_cls: MagicMock,
     tmp_path: Path,
+    caplog,
 ) -> None:
     mock_client = AsyncMock()
     mock_openai_cls.return_value = mock_client
-    mock_client.chat.completions.create.side_effect = RuntimeError("API down")
+    mock_client.chat.completions.create.side_effect = RuntimeError("private prompt and secret key")
 
     s = _settings(tmp_path)
     result = await summarize("output", s)
     assert result is None
+    assert "RuntimeError" in caplog.text
+    assert "private prompt" not in caplog.text
+    assert "secret key" not in caplog.text
 
 
 @patch(_PATCH_TARGET)
@@ -124,3 +130,23 @@ def test_strip_ansi() -> None:
     assert _strip_ansi("\033[1mBold\033[0m") == "Bold"
     assert _strip_ansi("\033[92mGreen\033[0m text") == "Green text"
     assert _strip_ansi("plain text") == "plain text"
+
+
+def test_attendance_ai_input_uses_same_polish_category_description():
+    from vulcan_notify.summarizer import format_changes_for_llm
+
+    text = format_changes_for_llm(
+        {
+            "attendance": [
+                {
+                    "student": "Test Student",
+                    "subject": "Math",
+                    "category": 5,
+                    "lesson_number": 3,
+                    "date": "2026-10-12",
+                }
+            ]
+        }
+    )
+    assert "Spóźnienie usprawiedliwione (5)" in text
+    assert "Category 5" not in text

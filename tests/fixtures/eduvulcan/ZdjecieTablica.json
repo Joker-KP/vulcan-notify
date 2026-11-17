@@ -1,0 +1,9 @@
+{
+  "endpoint": "/api/ZdjecieTablica",
+  "source": "sanitized-live",
+  "responses": [
+    {
+      "status": 1
+    }
+  ]
+}

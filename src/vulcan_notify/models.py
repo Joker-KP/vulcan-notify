@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 
 
@@ -67,6 +68,14 @@ class AttendanceEntry:
     teacher: str  # nauczyciel
     time_from: str  # godzinaOd (ISO 8601)
     time_to: str  # godzinaDo (ISO 8601)
+    source: str = "oddzialy"
+
+    @property
+    def entry_key(self) -> str:
+        """Keep classroom identity compatible; distinguish unnumbered activities."""
+        if self.source == "oddzialy":
+            return ""
+        return json.dumps([self.time_from, self.time_to, self.subject], ensure_ascii=False)
 
 
 @dataclass
@@ -77,6 +86,7 @@ class Exam:
     type: int  # rodzaj (1=test?, 2=quiz?)
     description: str | None = None  # opis (from detail endpoint)
     teacher: str | None = None  # nauczyciel
+    details: dict[str, object] | None = None
 
 
 @dataclass
@@ -84,8 +94,45 @@ class Homework:
     id: int
     date: str  # data (ISO 8601)
     subject: str  # przedmiot
-    content: str | None = None  # tresc (from detail endpoint)
+    content: str | None = None  # opis (from detail endpoint)
     teacher: str | None = None  # nauczyciel
+    links: list[object] | None = None  # linki; populated item shapes are unverified
+    response_required: bool | None = None  # odpowiedzWymagana
+    response_deadline: str | None = None  # terminOdpowiedzi
+    details: dict[str, object] | None = None  # original detail response, including response/files
+
+
+@dataclass
+class Remark:
+    """A praise or behavior note from /api/Uwagi; retain upstream numeric enums."""
+
+    id: int
+    date: str
+    category: str
+    type: int  # typ; meanings are not confirmed by the recorded API contract
+    author: str
+    content: str
+    kind: int  # rodzaj
+    points: float | None = None
+    url: str | None = None
+
+
+@dataclass
+class CompletedLesson:
+    """Completed lesson from RealizacjaZajec13 (status=1), scoped to a student."""
+
+    id: int
+    date: str
+    lesson_number: int
+    subject: str
+    teacher: str
+    topic: str
+    thematic_block: str = ""
+    online: str = ""
+    collections: list[object] = field(default_factory=list)
+    has_collections: bool = False
+    resources: object | None = None
+    url: str | None = None
 
 
 @dataclass
@@ -99,6 +146,8 @@ class Message:
     has_attachments: bool  # hasZalaczniki
     is_read: bool  # przeczytana
     content: str | None = None  # tresc (HTML, from detail endpoint)
+    mailbox_url: str | None = None  # public inbox URL for the authenticated tenant
+    mailbox_key: str = ""  # globalKey from /api/Skrzynki; notification context only
 
 
 @dataclass

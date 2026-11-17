@@ -1,0 +1,164 @@
+# Standalone deployment using Docker Hub; no source checkout/build on the host.
+# Copy beside .env and data/. Local development uses ../../docker-compose.yml.
+name: vulcan-notify
+
+x-common: &common
+  image: "${VULCAN_IMAGE:-macjoker/vulcan-notify:0.20.0}"
+  restart: unless-stopped
+  env_file: .env
+  volumes:
+    - ./data:/app/data
+  environment: &common-environment
+    DB_PATH: /app/data/vulcan_notify.db
+    SESSION_FILE: /app/data/session.json
+    # A legacy QUIET_HOURS_TZ value sets the shared zone only when TZ is unset.
+    # Storage timestamps use explicit UTC, independent of the runtime clock.
+    TZ: "${TZ:-${QUIET_HOURS_TZ:-Europe/Warsaw}}"
+    API_PORT: "8585"
+    # AppleScript Calendar integration is macOS-only.
+    CALENDAR_MAP: "{}"
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  vulcan-api:
+    <<: *common
+    command: ["uv", "run", "python", "-m", "vulcan_notify.api"]
+    ports:
+      - "${VULCAN_API_BIND:-127.0.0.1}:8585:8585"
+    healthcheck:
+      # Deliberately /api/alive, not /api/health. Liveness and freshness are
+      # separate concerns. Monitor freshness via /api/health (503 when stale).
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8585/api/alive', timeout=5)\""]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  vulcan-sync:
+    <<: *common
+    environment:
+      <<: *common-environment
+      DISPLAY: ":99"
+      VULCAN_BROWSER_PROFILE_DIR: /app/data/chromium-profile
+      VULCAN_BROWSER_LOCK_FILE: /app/data/chromium-profile.lock
+      VULCAN_BROWSER_HEADLESS: "${VULCAN_BROWSER_HEADLESS:-false}"
+      VULCAN_BROWSER_SLOW_MO_MS: "${VULCAN_BROWSER_SLOW_MO_MS:-0}"
+    entrypoint: ["./entrypoint-xvfb.sh"]
+    command: ["./sync-loop.sh"]
+
+  # Manual authentication / diagnostic browser.
+  #
+  # Start only explicitly:
+  #
+  # docker compose --profile auth up vulcan-auth
+  #
+  vulcan-auth:
+    <<: *common
+
+    profiles:
+      - auth
+
+    restart: "no"
+
+    env_file:
+      - .env
+
+    environment:
+      <<: *common-environment
+      DISPLAY: ":99"
+
+      VULCAN_BROWSER_PROFILE_DIR: /app/data/chromium-profile
+      VULCAN_BROWSER_LOCK_FILE: /app/data/chromium-profile.lock
+      VULCAN_BROWSER_HEADLESS: "false"
+
+    volumes:
+      - ./data:/app/data
+
+    ports:
+      - "127.0.0.1:6080:6080"
+
+    entrypoint:
+      - /bin/bash
+      - -lc
+      - |
+        set -euo pipefail
+
+        export DISPLAY=:99
+
+        echo "[auth-gui] DISPLAY=$$DISPLAY"
+        echo "[auth-gui] Starting Xvfb..."
+
+        rm -f /tmp/.X99-lock || true
+
+        Xvfb :99 \
+          -screen 0 1440x900x24 \
+          -ac \
+          +extension RANDR \
+          >/tmp/xvfb.log 2>&1 &
+
+        # Do not rely only on sleep; wait until the X11 socket exists.
+        for i in $$(seq 1 20); do
+          if [ -S /tmp/.X11-unix/X99 ]; then
+            echo "[auth-gui] X server ready."
+            break
+          fi
+
+          sleep 0.5
+        done
+
+        if [ ! -S /tmp/.X11-unix/X99 ]; then
+          echo "[auth-gui] ERROR: Xvfb did not create X11 socket."
+          cat /tmp/xvfb.log || true
+          exit 1
+        fi
+
+        echo "[auth-gui] Starting Openbox..."
+
+        openbox \
+          >/tmp/openbox.log 2>&1 &
+
+        sleep 1
+
+        echo "[auth-gui] Starting x11vnc..."
+
+        x11vnc \
+          -display :99 \
+          -forever \
+          -shared \
+          -nopw \
+          -listen 127.0.0.1 \
+          -rfbport 5900 \
+          >/tmp/x11vnc.log 2>&1 &
+
+        sleep 1
+
+        echo "[auth-gui] Starting noVNC..."
+
+        websockify \
+          --web=/usr/share/novnc \
+          6080 \
+          127.0.0.1:5900 \
+          >/tmp/novnc.log 2>&1 &
+
+        sleep 1
+
+        echo
+        echo "====================================================="
+        echo " eduVULCAN persistent authentication browser"
+        echo
+        echo " DISPLAY=$$DISPLAY"
+        echo " Profile: $$VULCAN_BROWSER_PROFILE_DIR"
+        echo
+        echo " SSH tunnel:"
+        echo "   ssh -L 6080:127.0.0.1:6080 USER@VPS"
+        echo
+        echo " Browser:"
+        echo "   http://127.0.0.1:6080/vnc.html"
+        echo "====================================================="
+        echo
+
+        exec uv run vulcan-notify auth

@@ -4,7 +4,7 @@ These cover the silent-failure chain that used to run all the way from a Vulcan
 500 to a green dashboard tile. Each test asserts on a link in that chain.
 """
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -27,6 +27,7 @@ PERIOD = ClassificationPeriod(id=1, number=2, date_from="2026-02-01", date_to="2
 
 def _client(**overrides: object) -> AsyncMock:
     client = AsyncMock()
+    client.student_portal_url = MagicMock(return_value=None)
     client.get_students = AsyncMock(return_value=[STUDENT])
     client.get_periods = AsyncMock(return_value=[PERIOD])
     client.get_grades_and_summaries = AsyncMock(return_value=([], []))
@@ -34,6 +35,8 @@ def _client(**overrides: object) -> AsyncMock:
     client.get_exams = AsyncMock(return_value=[])
     client.get_homework = AsyncMock(return_value=[])
     client.get_schedule = AsyncMock(return_value=[])
+    client.get_remarks = AsyncMock(return_value=[])
+    client.get_completed_lessons = AsyncMock(return_value=[])
     client.get_dashboard = AsyncMock(return_value=DashboardData(unread_messages=0))
     client.get_messages = AsyncMock(return_value=[])
     client.get_message_detail = AsyncMock(return_value=None)
@@ -45,9 +48,7 @@ def _client(**overrides: object) -> AsyncMock:
 
 async def test_failed_section_is_recorded_and_not_marked_fresh(db: Database) -> None:
     """A failing section records 'failed' and leaves no freshness stamp behind."""
-    client = _client(
-        get_grades_and_summaries=AsyncMock(side_effect=VulcanFetchError("HTTP 500"))
-    )
+    client = _client(get_grades_and_summaries=AsyncMock(side_effect=VulcanFetchError("HTTP 500")))
     run_id = await db.create_sync_run()
 
     result = await sync_student(client, db, STUDENT, run_id=run_id)
@@ -163,3 +164,26 @@ async def test_prune_respects_retention(db: Database, keep_days: int) -> None:
 
     deleted = await db.prune_sync_runs(keep_days=keep_days)
     assert deleted == 1
+
+
+@pytest.mark.parametrize(
+    "method",
+    [
+        "get_periods",
+        "get_attendance",
+        "get_exams",
+        "get_homework",
+        "get_schedule",
+        "get_remarks",
+        "get_completed_lessons",
+        "get_messages",
+    ],
+)
+async def test_session_expiry_reaches_cli_recovery(db: Database, method: str) -> None:
+    from vulcan_notify.client import SessionExpiredError
+
+    client = _client(**{method: AsyncMock(side_effect=SessionExpiredError("expired"))})
+    with pytest.raises(SessionExpiredError):
+        await sync_all(client, db)
+    run = await db.get_last_sync_run()
+    assert run["status"] == "failed"

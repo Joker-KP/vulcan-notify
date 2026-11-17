@@ -1,0 +1,1286 @@
+# AGENTS.md
+
+This file provides repository-level guidance for coding agents (especially OpenAI Codex) working on `vulcan-notify`.
+
+It complements `CLAUDE.md`. Read both files before making non-trivial changes. If the two files differ, prefer the instructions that describe the current local implementation and verify the code before assuming either document is fully up to date.
+
+---
+
+## 1. Project purpose
+
+`vulcan-notify` is a self-hosted integration layer for the eduVULCAN school e-journal.
+
+Its purpose is broader than forwarding unread messages. The system should:
+
+1. authenticate to eduVULCAN reliably,
+2. collect data from the available eduVULCAN areas/APIs,
+3. normalize and persist the data locally,
+4. compare each synchronization run with the previous stored state,
+5. detect meaningful changes,
+6. distribute those changes through one or more output channels,
+7. expose current state to external systems such as Homey/Home Assistant, calendars, email clients, dashboards, or other automation software.
+
+The core architectural idea is:
+
+```text
+eduVULCAN
+   |
+   v
+Authentication / session management
+   |
+   v
+API / web data acquisition
+   |
+   v
+Normalization
+   |
+   v
+SQLite current + historical state
+   |
+   v
+Change detection
+   |
+   +--> terminal / logs
+   +--> email (SMTP digest, optional AI summary)
+   +--> MQTT
+   +--> HTTP API
+   +--> iCalendar / calendar integration
+   +--> future notification/integration channels
+```
+
+The project should remain a small, understandable, self-hosted application rather than evolve into an unnecessarily complex distributed system.
+
+---
+
+## 2. Product scope
+
+Do not treat the current implementation as being limited to messages.
+
+The intended scope is to synchronize as much useful school information as is practical from eduVULCAN, including current and future support for data such as:
+
+- students / profiles,
+- grades and grade changes,
+- attendance,
+- exams / tests / quizzes,
+- homework / assignments,
+- messages, including message bodies,
+- lesson schedule,
+- substitutions,
+- cancellations,
+- additional lessons,
+- remarks / behavior notes,
+- praise / positive remarks,
+- other useful data exposed by eduVULCAN that can be represented cleanly in the local model.
+
+The list above describes product direction. Current implementation status is:
+
+| Data category | Status | Current coverage |
+| --- | --- | --- |
+| Students | Implemented | API discovery and per-student synchronization. |
+| Grades | Implemented | All returned classification periods; new grades and value changes. |
+| Classification periods and subject summaries | Implemented persistence | Period metadata, proposed/final grades and weighted-average settings; no separate change events. |
+| Attendance | Implemented | Configurable lookback across classroom, other activities and childcare; notifications for new non-present records only. |
+| Exams/tests/quizzes and homework | Implemented | Exams and homework use the module calendar with configurable 365-day lookback/lookahead, refreshed detail JSON and details in new-item events. Soft deletes are window-scoped. No update/delete events. |
+| Messages | Implemented with bounded coverage | Unified inbox, latest 50 messages per sync; new-message content and bounded historical content backfill. No full inbox pagination. |
+| Lesson schedule and substitutions/cancellations/additions | Implemented with bounded coverage | Previous 7 days through next 14 days; change semantics are described in section 5. |
+| Remarks and praise | Implemented from recorded API contract | `/api/Uwagi`; per-student IDs, full content, independent category baseline, new-ID events, silent updates and soft deletes. Live behavior not verified during implementation. |
+| Completed lessons | Implemented from recorded API contract | `/api/RealizacjaZajec13`, `status=1`; configurable 90-day lookback plus today, per-student IDs, independent baseline, new/update MQTT events, window-scoped soft deletes, TUI and HTTP API. No email events; optional stored-topic AI context and standalone summaries. Live behavior not verified during implementation. |
+
+Output-channel status is documented in section 6. Implemented coverage does not imply live eduVULCAN behavior has been verified in the current task.
+
+Before modifying or adding a data source, determine whether it is:
+
+1. already fully implemented,
+2. partially implemented,
+3. documented but not implemented,
+4. a planned extension.
+
+Do not claim support for a feature until the code and tests support it.
+
+---
+
+## 3. Existing upstream architecture
+
+The repository originated from the `kintecus/vulcan-notify` project and retains its general architecture.
+
+Important modules include, or may include depending on the current branch:
+
+- `src/vulcan_notify/__main__.py`
+  - CLI entry point and subcommand dispatch.
+
+- `src/vulcan_notify/config.py`
+  - application settings through `pydantic-settings`; auth, API and startup scripts also read environment variables directly (see section 14).
+
+- `src/vulcan_notify/auth.py`
+  - Playwright-based authentication and eduVULCAN session persistence.
+
+- `src/vulcan_notify/client.py`
+  - async HTTP client for reverse-engineered eduVULCAN web APIs.
+
+- `src/vulcan_notify/models.py`
+  - typed/domain models for synchronized data.
+
+- `src/vulcan_notify/sync.py`
+  - orchestration of complete synchronization runs.
+
+- `src/vulcan_notify/differ.py`
+  - comparison of freshly fetched data with stored state and creation of change events.
+
+- `src/vulcan_notify/db.py`
+  - SQLite persistence.
+
+- `src/vulcan_notify/display.py`
+  - terminal/log representation of synchronization results.
+
+- `src/vulcan_notify/mqtt.py`
+  - MQTT publication and a persistent retry outbox, with delivery limitations described in section 6.
+
+- `src/vulcan_notify/email.py`
+  - Per-sync SMTP digest, optional AI summary and a persistent per-recipient outbox.
+
+- `src/vulcan_notify/api.py`
+  - HTTP API, currently expected on port `8585`.
+
+- `src/vulcan_notify/ics.py`
+  - iCalendar generation for the lesson schedule served by `api.py`.
+
+- `src/vulcan_notify/calendar.py`
+  - exams/homework integration with macOS Calendar via AppleScript; unavailable in the Linux Docker image.
+
+- `src/vulcan_notify/summarizer.py`
+  - optional AI-based summaries where enabled.
+
+- `tests/`
+  - automated test suite.
+
+- `docs/`
+  - architecture, deployment and reverse-engineered eduVULCAN API documentation.
+
+Before introducing a new module or abstraction, inspect the current implementation and extend the existing architecture where practical.
+
+---
+
+## 4. Current synchronization model
+
+The preferred conceptual pipeline is:
+
+```text
+Auth
+  -> Fetch
+  -> Normalize
+  -> Diff
+  -> Persist
+  -> Publish
+```
+
+A normal synchronization run should:
+
+1. obtain a valid eduVULCAN session,
+2. discover the available students/profiles,
+3. fetch all configured data categories for each applicable student,
+4. convert responses into stable internal models,
+5. compare the new data with the SQLite baseline,
+6. persist the updated state,
+7. emit only meaningful changes,
+8. deliver those changes through enabled output channels,
+9. record enough information to diagnose the synchronization run.
+
+The database is the system of record for previously observed state.
+
+Change detection must not depend only on what happened during the current process lifetime.
+
+---
+
+## 5. Baseline and change detection
+
+First synchronization must not generate a flood of historical notifications.
+
+### Current baseline behavior
+
+Grades, attendance, exams, homework and schedule each use a successful-persistence baseline at `last_sync:{student.key}:{section}`. Failed initial sections remain uninitialized and store their recovered history silently; already successful sections continue detecting changes. Successful empty fetches initialize baselines. The student-level `last_sync:{student.key}` remains an attempted-sync marker. `SyncResult.is_first_sync` is true only when neither that marker nor any of these section baselines exists.
+
+`baseline_sections:{student.key}` records one-time initialization. Upgrades inherit confirmed `last_success` timestamps when section history exists. Legacy installations without section history inherit the prior student baseline; their past section failures cannot be reconstructed. Initialization and each successful section marker persist independently of process lifetime.
+
+`sync_messages()` uses a separate account-level marker, `sync_state["last_sync:messages"]`, for the unified inbox and suppresses new-message notifications on its first sync.
+
+`remarks` uses `last_sync:{student.key}:remarks`, initialized only after a successful fetch and persistence (including an empty list). It suppresses historical events when upgrading an existing installation. New categories must explicitly provide baseline behavior for existing installations; do not assume the student marker is sufficient.
+
+`completed_lessons` independently uses `last_sync:{student.key}:completed_lessons`
+after successful fetch and persistence, including empty lists. Upgrades baseline
+silently; failed sections do not initialize the marker. New IDs and content changes
+emit events, while soft deletion and restoration stay silent. Missing records are
+soft-deleted only within the successfully fetched UTC interval. Rolled-out history
+remains stored. Category events remain excluded from email; stored topics can
+optionally provide AI context with `LLM_INCLUDE_LESSONS=true`.
+Explicit `summarize --type mix [--days N]` separately summarizes stored messages
+and lesson topics with their existing AI profiles (default 7 days for both), then
+emails at most two nonempty sections using dedicated subtemplates and the shared
+layout. Markdown results are converted to sanitized HTML; section footers link
+to the inbox and each active student's completed lessons using the saved session.
+Missing/invalid session files omit links without blocking summaries.
+Requires enabled SMTP email and an LLM key, independently of automatic
+digest AI/context switches. Final bodies persist in the existing email outbox;
+retries reuse them without AI. This does not add lesson sync email events.
+
+### Current change semantics
+
+Homework additionally uses `last_sync:{student.key}:homework_calendar` after its
+first successful calendar fetch and persistence, including empty lists. This
+silently imports expanded history on upgrades from dashboard-only sync. Failures
+do not initialize it. Subsequent unseen IDs notify even with past school dates;
+missing tasks are soft-deleted only inside the successful UTC window. Default
+coverage is `SYNC_HOMEWORK_DAYS=365` back and `SYNC_HOMEWORK_FUTURE_DAYS=365` ahead,
+including today. Full original detail JSON persists in `homework.details`, retaining
+attachments, response text/comments and uninterpreted status codes. Details of
+all returned tasks refresh on every sync; known-ID edits persist silently. Successful reads replace
+cleared values; failures retain prior details. HTTP/MQTT expose these
+fields, and notifications include available attachments and response text/comments.
+The calendar and detail endpoints were checked live for the October 9, 2026 task;
+populated attachment/link shapes and status meanings remain unverified.
+
+Exams additionally use `last_sync:{student.key}:exams_calendar` for a silent
+expanded-source baseline. `SYNC_EXAM_DAYS=365` / `SYNC_EXAM_FUTURE_DAYS=365`
+define full local-day bounds. Calendar types other than homework (`typ=4`) retain
+numeric exam codes without assuming additional enum meanings. Exam details refresh
+before diffing and persist as full JSON; teacher-only/empty-description data is
+retained. Missing exams soft-delete only within a successful window, including [].
+
+Full attendance reads all three collections from `/api/Frekwencja`. An automatic
+table migration preserves original rows and `first_seen`, adding `source` and
+`entry_key` to the primary key. Classroom rows keep empty `entry_key`; observed
+other-activity/childcare rows lack IDs/numbers and use JSON times/subject tuples.
+`last_sync:{student.key}:attendance_full` silently imports additional collections
+on upgrades while classroom alerts continue. The live audit found 101 classroom
+and 2 other-activity records. Live sync on a temporary DB copy preserved the
+101 historical rows, stored the additional entries and refreshed homework details
+on repeat without duplicate events. Populated exam data remains mock-tested only.
+
+| Category | Comparison identity | Events and limitations |
+| --- | --- | --- |
+| Grades | `column_id` within the student | `new` for an unknown column; `updated` only when `value` changes. Metadata changes do not emit events. |
+| Attendance | Classroom `(date, lesson_number)`; other activities add source and times/subject within the student | `new` only for an unknown record with `category != 1`. Changes to an existing record's category do not emit events. |
+| Exams and homework | Upstream numeric `id`, checked against the student's stored IDs | New-item events only. Missing items are soft-deleted after baseline; updates and soft deletes do not emit `Change` events. |
+| Remarks/praise | `(student_key, id)` | New-ID events only; content/metadata updates are persisted silently, missing items are soft-deleted, restoration does not re-notify. |
+| Completed lessons | `(student_key, id)` | New-ID and source-field update events; independent baseline, window-scoped soft deletes and silent restoration. No email events; optional stored-topic AI context. |
+| Messages | Numeric `Message.id` in the unified inbox | New messages are returned separately in `FullSyncResult.new_messages`, not as `Change` objects. `api_global_key` has a DB uniqueness constraint and is used to fetch message detail. |
+| Schedule | `(date, time_from, subject)` within the student | New/updated substitutions when the fetched lesson is substituted; new extra lessons without substitution emit additions. Stored lessons missing within the diff window emit cancellations and are deleted from the DB. Ordinary lesson changes and complete removal of substitution fields do not emit substitution events. |
+
+The schedule comparison includes the full requested local window (previous 7 through next 14 days), extending to any returned boundary dates. Missing first/last lesson days are compared even when no remaining fetched lesson has that date.
+
+Schedule API duplicates sharing `(date, time_from, subject)` normalize to one
+complete entry before both diff and persistence. Substituted entries take
+precedence, then extra and annotated entries, with a stable content tie-breaker.
+Only the current fetch is considered, so removed substitutions still clear.
+This preserves the existing single-entry key; it does not store parallel variants.
+
+Prefer stable upstream identifiers as keys whenever available. Keep comparison scope explicit and preserve student/account boundaries.
+
+When an upstream item can disappear because it was cancelled or deleted, consider soft-delete semantics rather than destructive deletion.
+
+Change detection must remain deterministic and testable.
+
+---
+
+## 6. Notification and integration model
+
+Data acquisition and notification delivery are separate concerns.
+
+A new eduVULCAN data source should normally follow this flow:
+
+```text
+fetch
+ -> model
+ -> database
+ -> diff/change event
+ -> one or more output adapters
+```
+
+Do not embed email, MQTT, calendar, HTTP, or Home Automation behavior directly inside scraping/API parsing code.
+
+The system may distribute information through multiple channels.
+
+Current output status:
+
+| Channel | Status | Scope |
+| --- | --- | --- |
+| Terminal / logs | Implemented | Synchronization results and diagnostics. |
+| MQTT | Implemented, optional | Detected student changes and new messages; persistent retry outbox. |
+| HTTP API | Implemented | Reads local SQLite state in the separate `vulcan-api` service; liveness at `/api/alive`, freshness at `/api/health` (`?soft=1` forces HTTP 200). |
+| iCalendar feed | Implemented | Lesson schedule at `/calendar/{student}.ics`; currently excludes exams and homework. |
+| macOS Calendar | Implemented, optional, macOS only | Exams/homework via AppleScript, enabled by `CALENDAR_MAP`. |
+| Email | Implemented, optional | Per-sync digest of student changes, with optional AI summary; separate email per new message; persistent retries. |
+| ntfy | Deployment-only | Used by `deploy/vulcan-deploy.sh`; no adapter for synchronized school changes. |
+
+### Terminal / logs
+
+Useful for development, diagnostics, cron/container logs and manual synchronization.
+
+### Email
+
+`email.py` prepares an HTML digest with a derived text alternative of student changes in the current `FullSyncResult` when `EMAIL_ENABLED=true`, including partial results before session recovery. New messages are excluded from the digest and each creates a separate email with `EMAIL_MESSAGE_SUBJECT_PREFIX` (default `[Nowa wiadomość]`) plus the original subject. New praise/notes each create a separate email with `EMAIL_REMARK_SUBJECT_PREFIX` (default `[Uwagi]`), student name and category. Full note content is always included; `EMAIL_INCLUDE_MESSAGE_BODIES` controls inbox messages only. These notes are excluded from the digest and AI input, use student/ID/recipient deduplication and link to the authenticated student base URL `/App/{URL-encoded student key}/pochwalyUwagi`. Baselines and unchanged runs create no email. Both notifications and the digest are committed to `email_outbox` before optional AI preparation or SMTP delivery. `EMAIL_AI_SUMMARY=true` also requires `LLM_API_KEY`; AI failure keeps the grouped digest. Successful AI output appears above the groups, retaining their details and links. Message bodies require `EMAIL_INCLUDE_MESSAGE_BODIES=true`. Individual messages do not use AI and are excluded from digest AI input.
+
+Digest groups are Oceny, Frekwencja, Zastępstwa, Anulowane zajęcia, Dodatkowe zajęcia, Sprawdziany and Zadania domowe, in that order, separately per student. Empty groups are omitted. `email_templates/` contains one HTML template per group and a shared `layout.html` wrapper; `email_digest.py` renders category-specific items and derives the text alternative. Each group ends with a student-specific module link using `SyncResult.portal_url` from the authenticated client. The subject lists included, present groups once across all students, then their total count for two or more changes. One change has no count suffix. `EMAIL_DIGEST_GROUPS` is a JSON object of per-group switches (omitted keys remain enabled); filtering happens before rendering, counting and AI preparation. If no included changes remain, no digest or AI request is created. Synchronization, persisted data, individual notifications, other channels and existing queued retries are unaffected. Individual inbox and praise/note emails use separate `message.html` and `remark.html` content templates, the same shared layout and a common button footer loaded by `email_rendering.py`. See `docs/email.md` for template variables and module paths.
+
+Individual message bodies show the subject as their section heading and the student name/class/school as the card heading, resolved through `/api/Skrzynki` globalKey and the Context student mailbox key (unknown or ambiguous identities use a generic heading and retain the mailbox in metadata). Metadata uses Polish labels; the sender value is bold in HTML. Dates display as `YYYY-MM-DD HH:MM (dzień tygodnia)` in the shared `TZ` (default `Europe/Warsaw`); weekday names are Polish and derived after timezone conversion. Source offsets and daylight-saving rules are respected. Naive source timestamps mean UTC. Invalid configured zones fail startup validation; defensive rendering falls back to UTC if settings are later modified. Unparseable date strings are preserved.
+
+With message bodies enabled, HTML preserves original paragraphs, breaks, lists, tables and allowed inline formatting through the local `nh3` sanitizer in `text.py`. Paragraph top/bottom margins default to zero, with explicit author styles retained; plain text uses single paragraph boundaries and preserves explicit blank lines. Active content and remote images are removed; links are restricted to HTTP/HTTPS/mailto. A separate HTML parser creates readable plain text with block boundaries and decoded entities. Keep the original stored content unchanged; rendering belongs in the email adapter. Existing `strip_html()` behavior for MQTT, display and TUI remains separate.
+
+Digest delivery is tracked per sync-run/recipient; individual messages use upstream message identity/recipient to deduplicate across runs. Notifications have a text link and HTML inbox button, using `Message.mailbox_url` from the client's authenticated tenant. The link opens the unified received-message inbox. Both MIME alternatives persist in the outbox, and migration adds nullable `html_body` without altering old queued content. Retries reuse the stored bodies and Message-ID without repeating AI. Successful records clear private envelope/body fields and retain deduplication metadata. SMTP errors retain queued messages without blocking other outputs. Syncs drain the queue, and explicit `email-retry` works without upstream authentication. Quiet-hour MQTT heartbeat does not drain email. Previously queued combined digests retain their original content.
+
+Entity persistence and email enqueue have separate commits; a crash in between can lose an unqueued notification. Ambiguous SMTP acceptance can cause duplicate delivery. Do not claim exactly-once or guaranteed inbox delivery. Use a single sync/delivery owner. See `docs/email.md` for settings and behavior.
+
+Attendance notifications use shared Polish descriptions with codes in parentheses
+from `text.attendance_category_label()`, including `Spóźnienie usprawiedliwione (5)`.
+Email, change titles, TUI and AI input reuse the formatter. MQTT adds readable
+`category_label` and numeric `category_code`; its machine `category` assignment
+is corrected to `3=excused`, `4=late`, with other values compatible. The October 12,
+2026 live legend/client-enum check verified 1–7, including school-related absence
+(6) and exemption (7); sanitized category evidence lives in
+`tests/fixtures/attendance_categories.json`. Unknown codes remain explicit without guessed meanings; SQLite retains
+numeric categories and existing change semantics. Queued emails keep old bodies.
+
+Homework models are enriched before diffing: descriptions, teachers, raw link JSON,
+response requirements and response deadlines reach email and MQTT notifications.
+Email descriptions use the existing local HTML sanitizer and retain clickable
+links; MQTT `message` also includes readable details. SQLite adds nullable
+`links`, `response_required`, `response_deadline` and `detail_fetched_at` columns
+automatically, preserving history/calendar UIDs. Existing tasks backfill silently;
+empty descriptions count as successfully fetched and detail failures retry without
+re-notifying. Populated upstream link item shapes remain unverified live.
+
+`EMAIL_SCHEDULE_COOLDOWN_HOURS=6` applies a shared fixed email-only window to
+`substitution` and `cancellation`, across all students, independently per recipient.
+The first email is eligible immediately; SMTP acceptance starts the window.
+Further events accumulate as snapshots in `email_schedule_events` and join the
+first sync digest at/after expiry, even without new changes. No separate timer
+exists; overnight pauses defer to the next sync. Additional lessons and all other
+categories/outputs retain their existing behavior. `0` disables the timed wait.
+`email_schedule_state` reserves a prepared email until SMTP acceptance, preventing
+another immediate email during delivery failure; acceptance through `email-retry`
+also starts the window. Retry never flushes buffered events. Ingestion receipts
+suppress duplicate processing of a sync result; event payloads clear atomically
+with outbox enqueue and reservation, while sent status and the deadline commit
+together. Baselines remain silent. Category switches apply before accumulation
+and at flush, where disabled buffered events are discarded. Repeated edits remain
+separate detected events. Initialization adds both tables without manual migration;
+old outbox rows retain their original behavior and the existing persistence/enqueue
+gap and SMTP ambiguity remain. See `docs/email.md` for configuration transitions.
+
+### MQTT
+
+MQTT is implemented for integration with home automation when `MQTT_ENABLED=true`. `publish_changes()` first enqueues events into SQLite and then drains the persistent outbox. Enqueued events that fail publication remain available for retry on a later run.
+
+Current delivery limitations:
+
+- Entity persistence in `sync.py` and outbox enqueue in `mqtt.py` use separate commits. A failure between these stages can lose notifications for changes already persisted.
+- Event publication does not explicitly set QoS 1. Retained heartbeat and LWT use QoS 1, but this does not establish acknowledged delivery of change events.
+- End-to-end at-least-once delivery is not guaranteed. Duplicate delivery remains possible, so consumers must tolerate it.
+
+Preserve retries for enqueued events. Atomic entity/outbox persistence and acknowledged event publication are improvement targets, not existing guarantees.
+
+Keep topic naming stable unless there is a clear migration reason.
+
+### HTTP API
+
+The HTTP API exposes locally persisted state to other systems.
+
+`/api/students` lists active profiles by stable key. Student data endpoints accept `student_key` or `keyed=1`, with `name` and `student_key` metadata in each student payload. Unique names retain the existing response keys; ambiguous name requests return HTTP 409 instead of overwriting data. Calendar feeds accept `?student_key=...`; name-based feeds require one active profile and include retired profiles only with the same nonempty mailbox identity.
+
+It should read primarily from SQLite rather than trigger unnecessary live eduVULCAN requests.
+
+Current deployment expects the service on port `8585`.
+
+### iCalendar / calendar
+
+`ics.py` generates a lesson schedule feed with substitution information, refresh hints and a warning event when that student's schedule is stale. It does not generate exam or homework feeds. Event stamps use row `last_seen`, which advances on each successful upsert; it is not an actual modification timestamp.
+
+`calendar.py` separately synchronizes exams and homework to macOS Calendar using `osascript`. It stores macOS event UIDs in SQLite for subsequent updates and deletion. This integration requires macOS and should remain disabled in Linux Docker deployments (`CALENDAR_MAP` empty).
+
+Transient Calendar update/deletion failures retain UIDs for retry, including forced re-sync. Only successful deletion or explicitly confirmed event absence clears a UID. `CALENDAR_TIMEOUT_SECONDS` defaults to 30; timed-out/cancelled AppleScript processes are killed and reaped.
+
+Prefer stable event identifiers so that changed items update existing calendar events instead of generating duplicates.
+
+### Future integrations
+
+New integrations should be implemented as output adapters over the common change/state model rather than by duplicating synchronization logic.
+
+---
+
+## 7. Authentication: current local implementation
+
+Authentication is an area where this repository intentionally differs from the original upstream implementation.
+
+Do not revert these changes merely to make the code resemble upstream.
+
+The current design uses a persistent Chromium profile:
+
+```text
+/app/data/chromium-profile
+```
+
+The authentication flow should preserve the following principles.
+
+### Persistent browser state
+
+Use Playwright persistent Chromium context where the current implementation does so, based on:
+
+```text
+/app/data/chromium-profile
+```
+
+The persistent browser profile is valuable state and should survive container recreation through the persistent `/app/data` volume.
+
+Do not routinely delete or recreate it.
+
+### `session.json`
+
+`session.json` remains useful as explicit application session state / cookie persistence.
+
+Session writes use a flushed temporary file in the same directory and atomic replacement, with mode 0600. Invalid JSON or session structure follows normal credential-backed recovery; without credentials, normal sync requests explicit manual authentication. Failed reads/writes preserve the previous file and never print its content.
+
+The current authentication implementation can bootstrap/import cookies from the stored session into the persistent browser context and save refreshed state after successful authentication.
+
+Browser finalization validates the exported cookies against `/api/Context` before
+replacing `session.json`; the response must be a JSON object with an `uczniowie`
+list (including an empty list). Reaching the student page alone is insufficient.
+Failed/unavailable checks preserve the previous file. HTTP cookie headers honor
+Playwright host-only/domain, path, expiry and Secure metadata, keep applicable
+same-name cookies in descending path-length order, and are rebuilt per endpoint.
+Validation and API requests do not follow HTTP redirects with a manual Cookie
+header; redirects request the existing bounded browser recovery instead.
+
+Do not unnecessarily overwrite or invalidate a working session.
+
+Browser authentication filters expired cookies and host-only `RPE_…` cookies
+at `eduvulcan.pl` path `/` out of JSON imports. It removes that accumulated
+portal cookie family from Chromium before starting a new flow and after the
+student/messages handoffs, before exporting and validating replacement cookies.
+Cleanup never runs during a handoff; SSO chunks and unexpired verification
+cookies remain intact. The old file stays unchanged until API validation and
+atomic replacement succeed. This targeted cleanup is locally tested; its live
+effect on the reported cookie-growth failure remains unverified.
+
+### Session reuse first
+
+Normal `sync` uses `_ensure_session()` in `__main__.py`:
+
+1. Load `SESSION_FILE` and validate it through an HTTP request to `/api/Context`, without starting Chromium.
+2. If the session is missing or expired and credentials are available, call `auto_login()`.
+3. Inside `auto_login()`, open the persistent Chromium profile, import stored session cookies, and try to restore portal/student access without entering credentials.
+4. If browser-session reuse fails, perform credential login and save refreshed session state.
+5. Without credentials, normal sync exits with instructions to run `vulcan-notify auth`; it does not automatically launch interactive authentication or attempt browser-profile recovery.
+
+Credentials come from `VULCAN_LOGIN`/`VULCAN_PASSWORD` settings, with a macOS Keychain fallback where available. The explicit `auth` command also tries browser-session reuse before asking the user to log in.
+
+Do not force a fresh login on every sync.
+
+### Interactive authentication
+
+Interactive authentication must remain possible inside the Docker-based deployment.
+
+The `vulcan-auth` Compose service exposes Xvfb + Openbox + x11vnc + noVNC/websockify through the explicit `auth` profile (see section 8).
+
+This exists because eduVULCAN login may require browser interaction, cookie-consent handling, anti-bot processing or other behavior that is unreliable in a purely headless first-login flow.
+
+Do not remove this capability without replacing it with an equally reliable authentication path.
+
+### Unattended normal operation
+
+After a valid authenticated state exists, normal synchronization uses HTTP without starting a browser. Browser recovery defaults to headed Chromium (`VULCAN_BROWSER_HEADLESS=false`) under Xvfb. Unattended operation does not imply headless Chromium. `VULCAN_BROWSER_HEADLESS=true` opts into headless recovery; explicit interactive `auth` always forces headed mode.
+
+The expected long-term operating mode is:
+
+```text
+interactive authentication only when needed
+                 |
+                 v
+persistent authenticated browser/session state
+                 |
+                 v
+unattended periodic synchronization via HTTP
+```
+
+### Portal/profile selection
+
+The authentication implementation may navigate through eduVULCAN's access/profile page (for example `/dostep-do-dziennika/`) before entering the student portal.
+
+Do not assume there is exactly one student/profile.
+
+Automatic authentication opens the first available journal profile, following upstream behavior. Picker overlays are dismissed before selection, and both the current `/dziennik?` links and previous profile markup are supported. `VULCAN_STUDENT` selection rules have been removed; that variable no longer selects a profile.
+
+The entry profile is not a synchronization filter. `sync_all()` synchronizes all students returned by `client.get_students()` after authentication.
+
+### Authentication failures
+
+`test_session()` has a 30-second total and 10-second connection timeout per attempt.
+Connectivity, server and malformed-response failures retry once after two seconds,
+then raise `SessionValidationError`. The CLI exits nonzero without browser recovery,
+session replacement or an authentication-failure email when validity remains unknown;
+the poll loop retries on its next cycle. HTTP 401/403 or an HTTP 200 HTML response
+return false and follow normal authentication recovery. HTTP 301/302/303/307/308
+redirects also request recovery without forwarding the cookies.
+The observed HTTP 409 from upstream `/api/Context` also requests session recovery
+without an HTTP retry. This is a recovery policy for a Context conflict, not a
+claim that every HTTP 409 proves session expiry. The client's student discovery
+uses the same policy so a conflict between validation and synchronization reaches
+the existing single mid-sync recovery/retry. A repeated conflict after that retry
+exits nonzero; other module conflicts remain fetch errors.
+Validation failures log the HTTP status, safe response-kind/redirect-count/cookie-size
+metadata, or unexpected JSON type, while transport
+and parsing failures log only the exception class. Response bodies, cookies and
+raw transport exception messages are never included in these diagnostics.
+
+Credential submission waits up to 30 seconds for the final portal/student redirect
+and handles student access in another tab; it does not require a POST to a specific
+URL or resubmit credentials after an ambiguous click timeout. Session saving still
+requires reaching the student application and confirming its HTTP API access.
+
+When a saved session exists, automatic authentication retries a failed journal
+profile handoff or rejected exported Context once: close Chromium, reopen the
+same persistent profile under the same lock, reset navigation tracking and skip
+JSON cookie import. The second attempt still tries browser reuse before credentials.
+Repeated handoff failures propagate to normal manual-recovery instructions.
+Credential/CAPTCHA rejection, unavailable validation, browser startup and file-write
+failures do not trigger this additional retry. No profile/session file is deleted.
+
+Mid-sync `SessionExpiredError` propagates to the CLI for one credential-backed recovery attempt. Partial results carry already persisted changes to the CLI for output delivery before retry, so a fresh diff does not silently discard them. A degraded sync exits nonzero after publishing successful changes; the loop counts it as a failure. HTML server failures are retried as fetch failures, rather than interpreted as expired sessions.
+
+Automatic recovery failures print instructions for manual authentication without launching a GUI. Interactive recovery remains explicit: stop `vulcan-sync`, run `docker compose --profile auth up vulcan-auth`, then restart `vulcan-sync`. The API can continue serving stored state during this process. Do not automatically launch interactive authentication from normal sync.
+
+With `EMAIL_ENABLED=true`, the CLI also queues a styled authentication failure email with noVNC/SSH recovery instructions when recovery is exhausted, credentials are missing, a recovered session expires again, or explicit interactive auth fails. `email:auth_failure` in `sync_state` and the existing per-recipient outbox suppress repeat alerts across process restarts; completed non-expired syncs and successful interactive auth re-arm the alert. SMTP failures remain queued, including when upstream login fails. Alerts contain no raw errors/secrets and use no AI. See `docs/email.md`.
+
+### Authentication logging
+
+Log authentication state at a high level only.
+
+Safe examples:
+
+- session reused,
+- session expired,
+- login required,
+- profile found,
+- portal reached,
+- cookies refreshed.
+
+Never log:
+
+- passwords,
+- complete cookies,
+- session tokens,
+- local-storage secrets,
+- raw `session.json`,
+- authentication headers.
+
+---
+
+## 8. Docker deployment: current local implementation
+
+Docker is the primary deployment model.
+
+The default documented deployment pulls `macjoker/vulcan-notify` using
+`deploy/docker/compose.yml`, optionally managed by `deploy/ansible/deploy.yml`.
+The root `docker-compose.yml` remains the local source-build configuration and
+must not be switched to registry images. `docs/deployment.md` covers the default;
+`docs/deployment-proxmox.md` retains the existing homelab alternative.
+The image workflow in `.github/workflows/docker-hub.yml` is manual-only, with
+publishing disabled by default. Do not run publishing/deployment without an
+explicit request. See `docs/publishing.md` and `docs/deployment-ansible.md`.
+The new deployment binds the API to loopback by default, configurable with
+`VULCAN_API_BIND`; local Compose retains its existing port mapping. All services
+retain `/app/data` persistence and explicit interactive authentication.
+
+Keep the application fully containerized unless there is a strong technical reason not to.
+
+The current Docker image has been extended beyond upstream to support the interactive authentication environment.
+
+The current Dockerfile includes:
+
+- Python 3.12 base,
+- `uv`,
+- project dependencies,
+- Playwright Chromium,
+- Chromium runtime libraries,
+- Xvfb,
+- `xauth`,
+- Openbox,
+- x11vnc,
+- noVNC / websockify,
+- persistent `/app/data`,
+- persistent Chromium profile directory under `/app/data/chromium-profile`,
+- the project entrypoint.
+
+The startup paths are:
+
+- Compose `vulcan-api`: directly runs `uv run python -m vulcan_notify.api`, publishing port 8585. Its healthcheck uses `/api/alive`; data freshness is a separate concern.
+- Compose `vulcan-sync`: uses `entrypoint-xvfb.sh` to start Xvfb and wait for its socket, then executes the supplied `./sync-loop.sh` command.
+- `sync-loop.sh`: runs a sequential sync/sleep loop with quiet hours and MQTT heartbeat/outbox draining during long quiet pauses. It does not launch the API.
+- The image alone: has no `ENTRYPOINT`; `CMD ["./entrypoint-xvfb.sh", "./sync-loop.sh"]` supplies Xvfb for headed browser recovery. Override the command to run the API directly.
+- Compose `vulcan-auth`: an explicit service in profile `auth`, with its own GUI startup script and `uv run vulcan-notify auth` command. Compose shell variables in that script must use `$$` to defer expansion until container startup.
+
+All three services share `./data:/app/data`. Both browser services use `/app/data/chromium-profile` and `/app/data/chromium-profile.lock`; do not change one without the other. `entrypoint.sh` has been removed. The wrapper must forward its command instead of recreating the previous combined API/sync process.
+
+Do not move runtime dependencies to the host merely to simplify the Dockerfile.
+
+### Persistent state
+
+Persistent application state belongs under `/app/data`.
+
+Examples include:
+
+- SQLite database,
+- `session.json`,
+- Chromium persistent profile,
+- other explicitly persistent runtime state.
+
+A container rebuild/recreation must not destroy these items when the volume is configured correctly.
+
+### Xvfb
+
+The current Compose service uses `DISPLAY=:99`. Its wrapper starts:
+
+```text
+Xvfb :99 -screen 0 1440x900x24 -ac +extension RANDR
+```
+
+The `vulcan-sync` service makes Xvfb available for headed Chromium recovery; it does not start Openbox or noVNC. The separate `vulcan-auth` service starts those graphical components on its own display `:99` and shares the same `./data:/app/data` volume.
+
+Start interactive authentication explicitly:
+
+```bash
+docker compose --profile auth up vulcan-auth
+```
+
+noVNC is published at `127.0.0.1:6080`; open `http://127.0.0.1:6080/vnc.html` locally or through an SSH tunnel. Both browser services reuse `/app/data/session.json` and `/app/data/chromium-profile`.
+
+When changing Docker startup behavior, preserve both:
+
+- unattended operation,
+- recoverable interactive authentication.
+
+### Docker changes
+
+After changing Docker-related files:
+
+1. validate Dockerfile syntax,
+2. validate Compose configuration,
+3. check paths and volumes,
+4. check executable permissions,
+5. verify `/app/data` persistence assumptions,
+6. ensure Chromium/Playwright dependencies remain present,
+7. ensure the interactive authentication path still has all required graphical components.
+
+---
+
+## 9. eduVULCAN API interaction
+
+Treat eduVULCAN as an undocumented external dependency.
+
+The repository uses a reverse-engineered web API.
+
+Do not assume:
+
+- endpoint stability,
+- response-field stability,
+- HTML structure stability,
+- that all accounts expose the same modules,
+- that all students expose the same data.
+
+Prefer direct JSON/API access after authentication rather than browser scraping whenever a stable endpoint has already been identified.
+
+Use Playwright primarily for authentication/session establishment unless browser interaction is genuinely required for a specific feature.
+
+Keep API knowledge centralized in:
+
+- `client.py`,
+- relevant models,
+- `docs/eduvulcan-api.md`.
+
+When discovering a new endpoint:
+
+1. document the endpoint,
+2. capture the request requirements,
+3. define the response structure,
+4. create/update typed models,
+5. add client support,
+6. add persistence,
+7. add diff logic,
+8. add tests,
+9. add output integration only after the data layer works.
+
+Do not scatter raw URLs and ad-hoc JSON parsing across unrelated modules.
+
+---
+
+## 10. Adding a new synchronized data category
+
+Use the same architecture for new categories such as remarks/praise or other eduVULCAN modules.
+
+A complete implementation usually requires all of the following:
+
+1. **API discovery/client**
+   - endpoint and request parameters,
+   - authentication requirements,
+   - pagination/date ranges if applicable.
+
+2. **Model**
+   - stable typed representation,
+   - upstream identifier,
+   - timestamps/dates normalized consistently.
+
+3. **Database**
+   - table/schema migration,
+   - stable primary/unique key,
+   - timestamps such as first/last seen if useful.
+
+4. **Diff**
+   - new / updated / deleted semantics,
+   - first-sync baseline behavior.
+
+5. **Sync orchestration**
+   - include the category in the appropriate per-student or account-level run.
+
+6. **Change representation**
+   - use the common `Change`/event model where present.
+
+7. **Outputs**
+
+   - terminal,
+   - MQTT,
+   - HTTP API,
+   - calendar only where semantically appropriate.
+
+   Integrate with applicable existing outputs; implementing an email adapter is a separate extension, not a prerequisite for every new data category.
+
+8. **Tests**
+   - parsing/client,
+   - database,
+   - differ,
+   - sync,
+   - serialization/output payload.
+
+9. **Documentation**
+   - update API/architecture/configuration docs.
+
+Do not implement only a scraper that prints raw results and call the feature complete.
+
+---
+
+## 11. Student and account boundaries
+
+One eduVULCAN parent account may expose multiple students.
+
+All student-specific persisted data must retain an explicit student identity.
+
+Never merge data between students based only on subject names, teachers, dates, or other non-unique human-readable fields.
+
+Some data, especially mailboxes/messages, may be account-level or mailbox-level rather than student-level.
+
+Model those scopes explicitly instead of forcing every entity into a student-only abstraction.
+
+---
+
+## 12. Database principles
+
+SQLite is the local source of truth for synchronized state.
+
+Prefer:
+
+- simple normalized tables,
+- explicit unique keys,
+- deterministic upserts,
+- migrations that preserve existing data,
+- queries that work without contacting eduVULCAN.
+
+Avoid adding a separate database server.
+
+Do not delete user history or rebuild the database as a normal way of fixing schema/code problems.
+
+When changing schema:
+
+1. inspect existing migration/initialization behavior,
+2. preserve backward compatibility where practical,
+3. add tests for existing databases,
+4. document any required manual migration.
+
+Idempotency is important.
+
+Running the same synchronization twice against unchanged upstream data should not create duplicated rows or duplicate notifications.
+
+---
+
+## 13. Scheduling and concurrency
+
+The service is designed for periodic synchronization.
+
+The Docker `sync-loop.sh` controls scheduling: run sync, wait `POLL_INTERVAL` seconds (default `1800`), then repeat. This is a delay after completion, not a fixed start-to-start interval. `Settings.poll_interval` also defaults to `1800`; the shell reads the process environment independently of `Settings`.
+
+`sync` runs a seven-day `summarize --type mix` action after the first successful
+sync starting on Friday at/after 15:00 in `TZ`, with enabled email and an LLM key.
+`WEEKLY_SUMMARY_ENABLED=true` by default; false disables the automatic action.
+The local Friday date in `sync_state["summary:mix:weekly"]` commits atomically with
+the per-recipient email outbox entries before SMTP. Restarts and SMTP failures do
+not repeat AI; empty source windows complete without email. Total AI failure
+allows a later qualifying sync to retry. Failed/degraded syncs skip summaries;
+there is no catch-up outside Friday. Summary output failures do not fail sync.
+
+Quiet hours default to `QUIET_HOURS_START=0`, `QUIET_HOURS_END=5` in the shared `TZ=Europe/Warsaw`. `QUIET_HOURS_TZ` is a legacy fallback when `TZ` is unset. Equal start/end disables the pause; windows crossing midnight are supported. Keep scheduler and `freshness.py` semantics aligned. Container/Python clocks, logs, Chromium and rendered dates use `TZ`. SQLite and Python persistence explicitly use UTC; legacy naive timestamps continue to mean UTC. Changing the runtime zone requires no history migration.
+
+Successful fetches stamp `last_success:<student>:<section>`; messages use account-level `last_success::messages`. Freshness excludes scheduled quiet hours and defaults to `STALE_AFTER_SECONDS=3600`. A section failure is recorded without advancing its timestamp. Missing timestamps remain stale until a successful sync; do not backfill them from attempted-sync markers. `sync_sections` stores outcomes and `sync_runs` distinguishes completed, degraded, failed and interrupted runs. `SYNC_HISTORY_KEEP_DAYS=90` prunes run/section history, preserving entity data and baseline markers.
+
+Treat these values as configuration, not hard-coded product behavior.
+
+Avoid overlapping synchronization jobs.
+
+If concurrency is introduced, protect:
+
+- SQLite writes,
+- authentication/session state,
+- message delivery/outbox draining,
+- sync-run bookkeeping.
+
+Prefer a single clear synchronization owner unless concurrency provides a measurable benefit.
+
+---
+
+## 14. Configuration
+
+Configuration comes from three current sources:
+
+1. `config.py`: `pydantic-settings` loads application settings from environment variables and `.env`.
+2. `auth.py` and the API entry point: selected variables are read directly from the process environment using `os.getenv()` / `os.environ`.
+3. `sync-loop.sh`, `entrypoint-xvfb.sh` and Compose: scheduling, display and deployment settings.
+
+Direct environment readers do not load `.env` themselves. Compose uses `env_file: .env` to populate the container environment; do not assume the same behavior for a standalone CLI invocation.
+
+### Important variables and effective defaults
+
+| Variable | Reader | Default / deployment behavior |
+| --- | --- | --- |
+| `SESSION_FILE` | `Settings` | `session.json`; Compose sets `/app/data/session.json`. |
+| `DB_PATH` | `Settings` | `vulcan_notify.db`; Compose sets `/app/data/vulcan_notify.db`. |
+| `VULCAN_LOGIN`, `VULCAN_PASSWORD` | `Settings` | Unset; optional credential login with macOS Keychain fallback. |
+| `SYNC_ATTENDANCE_DAYS` | `Settings` | `90`. |
+| `SYNC_HOMEWORK_DAYS` | `Settings` | `365`; full calendar lookback days plus today. |
+| `SYNC_HOMEWORK_FUTURE_DAYS` | `Settings` | `365`; full calendar lookahead days. |
+| `SYNC_COMPLETED_LESSONS_DAYS` | `Settings` | `90`; completed lessons lookback plus today, no email notifications. |
+| `SYNC_MESSAGE_BACKFILL_BATCH` | `Settings` | `10`. |
+| `MQTT_ENABLED` | `Settings` | `false`. |
+| `MQTT_TOPIC_PREFIX`, `MQTT_STATUS_SUFFIX` | `Settings` | `school`, `status`. |
+| `CALENDAR_MAP` | `Settings` | Empty map disables macOS Calendar integration. |
+| `CALENDAR_TIMEOUT_SECONDS` | `Settings` | `30`; deadline per AppleScript operation, with child cleanup. |
+| `LLM_API_KEY` | `Settings` | Unset; AI summaries are optional. |
+| `WEEKLY_SUMMARY_ENABLED` | `Settings` | `true`; first successful Friday sync starting at/after 15:00 in `TZ` emails a seven-day mix, requiring enabled email and an LLM key. |
+| `LLM_INCLUDE_LESSONS` | `Settings` | `false`; optional stored lesson-topic context for email/CLI change summaries. Topics alone never trigger email. |
+| `LLM_LESSONS_DAYS` | `Settings` | `7`; positive local calendar days including today, by lesson date. Standalone `summarize --type lessons` accepts `--days`. |
+| `EMAIL_ENABLED`, `EMAIL_AI_SUMMARY`, `EMAIL_INCLUDE_MESSAGE_BODIES` | `Settings` | All `false`; email, AI summary and message content require explicit opt-in. |
+| `SMTP_HOST`, `EMAIL_FROM`, `EMAIL_TO` | `Settings` | Empty; required for enabled email. Sender accepts a bare address or `Name <address>`; SMTP uses only the address. Recipients use a JSON array of bare addresses. |
+| `SMTP_PORT`, `SMTP_SECURITY` | `Settings` | `587`, `starttls`; implicit TLS (`ssl`) and plain relay (`none`) supported. |
+| `SMTP_USERNAME`, `SMTP_PASSWORD` | `Settings` | Unset; optional credentials, configured together. |
+| `EMAIL_SUBJECT_PREFIX` | `Settings` | `[eduVulcan]`; followed by included, present groups and the total change count when greater than one. |
+| `EMAIL_DIGEST_GROUPS` | `Settings` | `{}`; JSON object of individual digest group switches, omitted keys enabled. |
+| `EMAIL_SCHEDULE_COOLDOWN_HOURS` | `Settings` | `6`; fixed email-only substitution/cancellation window after SMTP acceptance, independently per recipient. `0` disables the timed wait. |
+| `EMAIL_MESSAGE_SUBJECT_PREFIX` | `Settings` | `[Nowa wiadomość]`; followed by each original message subject. |
+| `EMAIL_REMARK_SUBJECT_PREFIX` | `Settings` | `[Uwagi]`; followed by student name and category for each new praise/note. |
+| `SMTP_TIMEOUT_SECONDS`, `EMAIL_AI_TIMEOUT_SECONDS` | `Settings` | Both `30`; socket-operation and AI-preparation timeouts. |
+| `POLL_INTERVAL` | `sync-loop.sh`; also declared in `Settings` | `1800` seconds in both readers. |
+| `QUIET_HOURS_START`, `QUIET_HOURS_END` | `sync-loop.sh` and `Settings` | `0`, `5`; equal values disable quiet hours. |
+| `TZ` | Docker, Python `Settings`, shell scripts | `Europe/Warsaw`; shared runtime/log/schedule/display timezone, with explicit UTC storage. |
+| `QUIET_HOURS_TZ` | Compose, shell scripts and `Settings` | Deprecated fallback alias for `TZ`; no independent quiet-hours zone. |
+| `STALE_AFTER_SECONDS` | `Settings` | `3600`; excludes scheduled quiet hours. |
+| `SYNC_HISTORY_KEEP_DAYS` | `Settings` | `90`; retention for run and section history. |
+| `API_PORT` | API entry point | `8585`; Compose publishes a fixed `8585:8585` mapping. |
+| `DISPLAY` | `entrypoint-xvfb.sh` / Compose | `:99`. |
+| `VULCAN_BROWSER_HEADLESS` | `auth.py`, direct environment | `false`; interactive `auth` forces headed mode. |
+| `VULCAN_BROWSER_PROFILE_DIR` | `auth.py`, direct environment | `/app/data/chromium-profile`. |
+| `VULCAN_BROWSER_LOCK_FILE` | `auth.py`, direct environment | `/app/data/chromium-profile.lock`. |
+| `VULCAN_BROWSER_SLOW_MO_MS` | `auth.py`, direct environment | `0`. |
+| `VULCAN_LOGIN_DELAY_SECONDS` | `auth.py`, direct environment | `2`. |
+| `VULCAN_CAPTCHA_DETECT_TIMEOUT_SECONDS` | `auth.py`, direct environment | `5`. |
+| `VULCAN_CAPTCHA_COMPLETE_TIMEOUT_SECONDS` | `auth.py`, direct environment | `60`. |
+
+The variables read directly by `auth.py` above are not currently declared as `Settings` fields. When changing configuration, check `.env.example` against `Settings` and verify `.env` parsing with sanitized values; `Settings` ignores extra `.env` keys so auth/startup settings do not prevent CLI startup. Direct auth readers still require exported variables outside Compose. SMTP/email configuration is documented in `docs/email.md`; invalid enabled configuration fails validation without echoing input values.
+
+Do not hard-code user-specific values.
+
+Possible configuration areas include:
+
+- database path,
+- session path,
+- eduVULCAN credentials,
+- selected student/profile,
+- synchronization windows,
+- message filtering,
+- MQTT broker and credentials,
+- SMTP email transport and digest settings,
+- calendar mappings,
+- HTTP/API configuration,
+- logging,
+- optional AI summarization.
+
+When adding configuration:
+
+1. add application settings to the settings model; for auth/API/startup environment settings, explicitly document the reader and verify compatibility with `.env` loading,
+2. add a safe example to `.env.example`,
+3. document the effective default and any Compose overrides,
+4. avoid surprising behavior when unset,
+5. never commit a real secret.
+
+---
+
+## 15. Security and privacy
+
+This project processes private school and family information.
+
+Treat the following as sensitive:
+
+- eduVULCAN credentials,
+- cookies and session data,
+- student identity data,
+- grades,
+- attendance,
+- behavior notes,
+- messages and message bodies,
+- email addresses,
+- MQTT credentials,
+- API keys.
+
+Never expose secrets in logs, test fixtures, commits, screenshots, generated documentation or error messages.
+
+Use sanitized fixtures for tests.
+
+Do not send synchronized school data to external AI/cloud services unless that behavior is explicitly configured and expected.
+
+Optional AI summarization must remain optional.
+
+---
+
+## 16. Development principles
+
+This is a small project.
+
+Prefer simple, explicit code over framework-heavy design.
+
+Do not introduce without clear need:
+
+- microservices,
+- Redis,
+- external message queues,
+- database servers,
+- dependency-injection frameworks,
+- generic plugin frameworks,
+- unnecessary repository layers.
+
+A new abstraction should solve a concrete repeated problem.
+
+Do not perform unrelated refactoring while fixing a focused issue.
+
+Preserve working interfaces unless a change is necessary.
+
+---
+
+## 17. Commands and tooling
+
+The project uses `uv`.
+
+Typical development commands are:
+
+```bash
+uv sync --all-extras
+uv run vulcan-notify test
+uv run vulcan-notify sync
+uv run pytest
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy src/
+```
+
+For a focused test:
+
+```bash
+uv run pytest tests/test_sync.py -x -q
+```
+
+Inspect the current `pyproject.toml` before assuming all commands/options above are still configured exactly as upstream.
+
+For Docker changes, also use:
+
+```bash
+docker compose config
+```
+
+and build/run validation where practical.
+
+---
+
+## 18. Testing strategy
+
+Tests should focus on logic that can be reproduced locally.
+
+Prefer tests for:
+
+- API response parsing,
+- typed model conversion,
+- cookie/session helper behavior,
+- database upserts,
+- migrations,
+- first-sync baseline,
+- change detection,
+- duplicate suppression,
+- soft deletes,
+- output payload generation,
+- MQTT outbox behavior,
+- HTTP responses,
+- iCalendar generation.
+
+Mock eduVULCAN HTTP responses rather than making the normal automated suite depend on the live service.
+
+Existing tests use patterns such as:
+
+- `pytest-asyncio`,
+- temporary SQLite DB fixtures,
+- `AsyncMock` for async client methods,
+- `MagicMock` for aiohttp behavior.
+
+Live eduVULCAN tests are integration tests and must be treated separately.
+
+Never claim live authentication or API behavior was validated unless it actually was.
+
+---
+
+## 19. Authentication-specific testing
+
+Changes in `auth.py` deserve extra caution.
+
+Where practical, test separately:
+
+1. session-file parsing,
+2. cookie conversion/import,
+3. profile-path handling,
+4. selection logic,
+5. session reuse decisions,
+6. fallback decisions.
+
+A test that mocks Playwright can validate decision logic but does not prove eduVULCAN login itself works.
+
+For authentication changes, explicitly state which of these were verified:
+
+- unit logic,
+- container startup,
+- browser startup,
+- persistent profile reuse,
+- manual login through noVNC,
+- live session reuse,
+- live headless sync.
+
+---
+
+## 20. Logging
+
+Logs should help diagnose unattended operation.
+
+Useful events include:
+
+- sync start/end,
+- student/profile selected,
+- session reused/expired,
+- data categories fetched,
+- item counts,
+- detected change counts,
+- notification delivery status,
+- MQTT outbox pending count,
+- recoverable retry/failure decisions.
+
+Avoid per-item debug spam at normal log levels.
+
+Never log raw secrets or complete sensitive payloads by default.
+
+---
+
+## 21. Failure handling
+
+A failure in one optional output channel should not unnecessarily destroy successfully fetched data.
+
+Prefer this separation:
+
+```text
+fetch/diff/persist succeeds
+          |
+          +--> email may fail
+          +--> MQTT may fail
+          +--> calendar may fail
+```
+
+Use durable retry mechanisms where already designed, especially MQTT outbox behavior.
+
+Do not hide failures with broad `except Exception: pass`.
+
+Log enough context to identify:
+
+- which stage failed,
+- which student/account scope was affected,
+- whether persisted data is still valid,
+- whether retry is safe.
+
+---
+
+## 22. Git discipline
+
+Before editing:
+
+```bash
+git status
+git diff
+```
+
+Do not overwrite unrelated uncommitted work.
+
+Do not run destructive Git operations unless explicitly requested.
+
+Do not commit or push unless explicitly requested.
+
+After implementation:
+
+1. inspect the complete diff,
+2. ensure unrelated files were not changed,
+3. run applicable tests/checks,
+4. summarize the result.
+
+---
+
+## 23. Relationship with `CLAUDE.md`
+
+`CLAUDE.md` contains useful architecture and repository knowledge from earlier development with Claude Code.
+
+Do not delete it merely because `AGENTS.md` exists.
+
+When starting a substantial task:
+
+1. read `AGENTS.md`,
+2. read `CLAUDE.md`,
+3. inspect the current code,
+4. use documentation such as `docs/architecture.md` and `docs/eduvulcan-api.md`,
+5. resolve contradictions based on the actual current implementation.
+
+Long-term, shared technical facts should preferably remain consistent across both agent instruction files.
+
+Do not blindly copy obsolete upstream-specific assumptions into the local project.
+
+In particular, the local authentication and Docker setup have already diverged from upstream.
+
+---
+
+## 24. Documentation discipline
+
+When behavior changes, update the relevant documentation in the same task where practical.
+
+Important documentation includes:
+
+- `README.md`,
+- `AGENTS.md`,
+- `CLAUDE.md`,
+- `docs/architecture.md`,
+- `docs/eduvulcan-api.md`,
+- `docs/deployment.md`,
+- `.env.example`.
+
+Do not let documentation state that a feature is supported when it is still only planned.
+
+Distinguish clearly between:
+
+- implemented,
+- experimentally implemented,
+- planned,
+- unsupported.
+
+---
+
+## 25. Recommended agent workflow
+
+For non-trivial tasks, follow this sequence.
+
+### Investigation
+
+1. Read `AGENTS.md` and `CLAUDE.md`.
+2. Inspect the relevant modules and tests.
+3. Trace the existing execution path.
+4. Inspect database/config implications.
+5. Check whether documentation already describes the feature.
+
+### Plan
+
+Before editing, provide a short plan containing:
+
+- root cause or requested capability,
+- files that need modification,
+- persistence/schema impact,
+- compatibility risks,
+- validation approach.
+
+### Implementation
+
+Make the smallest coherent change that satisfies the task.
+
+Avoid unrelated cleanup.
+
+### Validation
+
+Run the relevant subset of:
+
+```bash
+uv run pytest
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy src/
+docker compose config
+```
+
+Add focused tests for new behavior.
+
+### Review
+
+Review the diff as if it had been written by someone else.
+
+Look specifically for:
+
+- duplicate notifications,
+- incorrect first-sync behavior,
+- broken idempotency,
+- cross-student data leakage,
+- auth/session regression,
+- lost persistent data,
+- fragile eduVULCAN selectors,
+- leaked secrets,
+- output-channel coupling,
+- schema compatibility problems.
+
+### Report
+
+At the end, summarize:
+
+- files changed,
+- behavior changed,
+- tests/checks run,
+- live behavior verified,
+- anything not verified,
+- any migration/config action required.
+
+---
+
+## 26. Current local priorities
+
+When choosing between an upstream-preserving implementation and one that better fits the current local deployment, preserve the local requirements.
+
+Important local priorities are:
+
+1. fully Dockerized operation,
+2. reliable unattended synchronization,
+3. recoverable interactive eduVULCAN login via Xvfb/noVNC,
+4. persistent Chromium/session state,
+5. multi-student correctness,
+6. broad synchronization coverage rather than message-only behavior,
+7. SQLite-based state and change detection,
+8. flexible fan-out to email, MQTT, calendars, HTTP and future integrations,
+9. simple maintenance and observability,
+10. no unnecessary host dependencies.
+
+The desired system is a robust local synchronization/integration service for the complete useful eduVULCAN data surface, not a one-purpose mail-forwarding script.

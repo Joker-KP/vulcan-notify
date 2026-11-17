@@ -1,45 +1,216 @@
-"""Playwright-based auth for eduVulcan - saves session cookies after browser login."""
+"""Authentication support for eduVULCAN."""
 
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
 import logging
+import os
 import platform
-import ssl  # noqa: TC003
+import re
+import ssl
 import subprocess
-from pathlib import Path  # noqa: TC003
-from typing import Any
+import tempfile
+import time
+from contextlib import contextmanager
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse, urlunparse
 
 import aiohttp
-from playwright.async_api import async_playwright
+from playwright.async_api import (
+    BrowserContext,
+    Locator,
+    Page,
+    Playwright,
+    async_playwright,
+)
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+from vulcan_notify.config import settings
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator, Mapping
 
 logger = logging.getLogger(__name__)
 
+
+class InvalidSessionError(ValueError):
+    """Saved session cannot be safely reused; never includes private file data."""
+
+
+class SessionValidationError(RuntimeError):
+    """API validation failed; the saved session's validity is unknown."""
+
+
+class _JournalHandoffError(RuntimeError):
+    """Portal login completed, but entry into the student journal failed."""
+
+
+def _write_session(session_path: Path, session_data: dict[str, Any]) -> None:
+    """Replace session state atomically, keeping the previous file on failure."""
+    session_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=session_path.parent,
+            prefix=f".{session_path.name}.",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            json.dump(session_data, handle, indent=2, default=str)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, session_path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 KEYCHAIN_SERVICE = "vulcan-notify"
+
+EDUVULCAN_HOME_URL = "https://eduvulcan.pl/"
+EDUVULCAN_LOGIN_URL = "https://eduvulcan.pl/logowanie"
+JOURNAL_ACCESS_URL = "https://eduvulcan.pl/dostep-do-dziennika/"
+
+STUDENT_HOST = "uczen.eduvulcan.pl"
+MESSAGES_HOST = "wiadomosci.eduvulcan.pl"
+
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+
+def _env_bool(
+    name: str,
+    default: bool,
+) -> bool:
+    value = os.getenv(name)
+
+    if value is None:
+        return default
+
+    return value.strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _browser_headless() -> bool:
+    return _env_bool(
+        "VULCAN_BROWSER_HEADLESS",
+        False,
+    )
+
+
+def _browser_profile_dir() -> Path:
+    return Path(
+        os.getenv(
+            "VULCAN_BROWSER_PROFILE_DIR",
+            "/app/data/chromium-profile",
+        )
+    )
+
+
+def _browser_slow_mo() -> float:
+    raw = os.getenv(
+        "VULCAN_BROWSER_SLOW_MO_MS",
+        "0",
+    )
+
+    try:
+        return max(
+            0.0,
+            float(raw),
+        )
+
+    except ValueError:
+        return 0.0
+
+
+def _get_login_delay_seconds() -> float:
+    raw = os.getenv(
+        "VULCAN_LOGIN_DELAY_SECONDS",
+        "2",
+    )
+
+    try:
+        value = float(raw)
+
+    except ValueError:
+        logger.warning(
+            "Invalid VULCAN_LOGIN_DELAY_SECONDS=%r; using 2 seconds",
+            raw,
+        )
+
+        return 2.0
+
+    return max(
+        0.0,
+        min(value, 120.0),
+    )
+
+
+def _get_captcha_detect_timeout_seconds() -> float:
+    raw = os.getenv(
+        "VULCAN_CAPTCHA_DETECT_TIMEOUT_SECONDS",
+        "5",
+    )
+
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 5.0
+
+
+def _get_captcha_complete_timeout_seconds() -> float:
+    raw = os.getenv(
+        "VULCAN_CAPTCHA_COMPLETE_TIMEOUT_SECONDS",
+        "60",
+    )
+
+    try:
+        return max(1.0, float(raw))
+    except ValueError:
+        return 60.0
+
+
+# ---------------------------------------------------------------------------
+# Credentials
+# ---------------------------------------------------------------------------
 
 
 def get_keychain_credentials() -> tuple[str, str] | None:
-    """Read login and password from macOS Keychain (service: vulcan-notify).
+    """Read login/password from macOS Keychain."""
 
-    Returns (login, password) or None if not available.
-    """
     if platform.system() != "Darwin":
         return None
 
     try:
-        # Get account name (login)
         result = subprocess.run(
-            ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE],
+            [
+                "security",
+                "find-generic-password",
+                "-s",
+                KEYCHAIN_SERVICE,
+            ],
             capture_output=True,
             text=True,
+            check=False,
         )
+
         if result.returncode != 0:
             return None
 
         account = ""
+
         for line in result.stdout.splitlines():
-            # Format: "acct"<blob>="the.email@example.com"
             if '"acct"' in line and "=" in line:
                 account = line.split("=", 1)[1].strip().strip('"')
                 break
@@ -47,318 +218,1342 @@ def get_keychain_credentials() -> tuple[str, str] | None:
         if not account:
             return None
 
-        # Get password
         result = subprocess.run(
-            ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
+            [
+                "security",
+                "find-generic-password",
+                "-s",
+                KEYCHAIN_SERVICE,
+                "-w",
+            ],
             capture_output=True,
             text=True,
+            check=False,
         )
+
         if result.returncode != 0:
             return None
 
         password = result.stdout.strip()
+
         if not password:
             return None
 
-        return (account, password)
+        return account, password
+
     except FileNotFoundError:
         return None
 
-EDUVULCAN_LOGIN_URL = "https://eduvulcan.pl"
+
+# ---------------------------------------------------------------------------
+# URL helpers
+# ---------------------------------------------------------------------------
 
 
-async def login_and_save_session(session_path: Path) -> dict[str, Any]:
-    """Open browser for manual login, save session cookies after redirect to dashboard.
+def _safe_url(url: str) -> str:
+    try:
+        parsed = urlparse(url)
 
-    Returns the session data dict (contains cookies and base_url).
-    """
-    login_complete = asyncio.Event()
-    dashboard_url = ""
+        path = parsed.path
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=False, args=["--no-sandbox", "--disable-gpu"]
+        parts = path.split("/")
+
+        if parsed.hostname == STUDENT_HOST and len(parts) >= 4 and parts[2].lower() == "app":
+            parts[3] = "<redacted>"
+            path = "/".join(parts)
+
+        return urlunparse(
+            (
+                parsed.scheme,
+                parsed.netloc,
+                path,
+                "",
+                "",
+                "",
+            )
         )
-        context = await browser.new_context()
-        page = await context.new_page()
 
-        def handle_navigation(frame):  # type: ignore[no-untyped-def]
-            nonlocal dashboard_url
-            url = frame.url
-            if "uczen.eduvulcan.pl" in url and "/App/" in url:
-                dashboard_url = url
-                login_complete.set()
+    except Exception:
+        return "<invalid-url>"
 
-        page.on("framenavigated", handle_navigation)
 
-        await page.goto(EDUVULCAN_LOGIN_URL)
-        print("[auth] Browser opened. Please log in to eduVulcan...")
+def _is_student_dashboard_url(
+    url: str,
+) -> bool:
+    try:
+        parsed = urlparse(url)
+
+        return parsed.hostname == STUDENT_HOST and "/app" in parsed.path.lower()
+
+    except Exception:
+        return False
+
+
+def _tenant_from_dashboard_url(
+    url: str,
+) -> str:
+    try:
+        parsed = urlparse(url)
+
+        if parsed.hostname != STUDENT_HOST:
+            return ""
+
+        parts = [p for p in parsed.path.split("/") if p]
+
+        return parts[0] if parts else ""
+
+    except Exception:
+        return ""
+
+
+@contextmanager
+def _browser_profile_lock(timeout: float = 30.0) -> Iterator[None]:
+    lock_path = Path(
+        os.getenv(
+            "VULCAN_BROWSER_LOCK_FILE",
+            "/app/data/chromium-profile.lock",
+        )
+    )
+
+    lock_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    with lock_path.open("a+") as handle:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError as exc:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        "Chromium profile is currently being used by another vulcan-notify process"
+                    ) from exc
+                time.sleep(0.25)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _cleanup_chromium_singleton_locks() -> None:
+    profile_dir = _browser_profile_dir()
+
+    for name in (
+        "SingletonLock",
+        "SingletonSocket",
+        "SingletonCookie",
+    ):
+        path = profile_dir / name
 
         try:
-            await asyncio.wait_for(login_complete.wait(), timeout=300)
-        except TimeoutError as exc:
-            await browser.close()
-            raise TimeoutError("Login timed out after 5 minutes") from exc
+            if path.exists() or path.is_symlink():
+                logger.warning(
+                    "Browser: removing stale Chromium lock %s",
+                    path,
+                )
 
-        # Let the dashboard finish loading
-        await asyncio.sleep(2)
+                path.unlink()
 
-        # Extract tenant from dashboard URL before navigating away
-        parts = dashboard_url.split("uczen.eduvulcan.pl/")
-        tenant = parts[1].split("/")[0] if len(parts) > 1 else ""
-
-        # Visit messages subdomain to establish its session cookies
-        if tenant:
-            print("[auth] Establishing messages session...")
-            await page.goto(
-                f"https://wiadomosci.eduvulcan.pl/{tenant}/App",
-                wait_until="networkidle",
+        except Exception:
+            logger.warning(
+                "Browser: could not remove stale lock %s",
+                path,
+                exc_info=True,
             )
-            await asyncio.sleep(2)
-
-        cookies = await context.cookies()
-        await browser.close()
-
-    session_data = {
-        "cookies": cookies,
-        "tenant": tenant,
-        "base_url": f"https://uczen.eduvulcan.pl/{tenant}",
-        "dashboard_url": dashboard_url,
-    }
-
-    session_path.write_text(json.dumps(session_data, indent=2, default=str))
-    print(f"[auth] Session saved to {session_path}")
-    print(f"[auth] Tenant: {tenant}")
-    print(f"[auth] Base URL: {session_data['base_url']}")
-
-    return session_data
 
 
-async def auto_login(session_path: Path, login: str, password: str) -> dict[str, Any]:
-    """Headless auto-login using stored credentials.
+# ---------------------------------------------------------------------------
+# Diagnostics
+# ---------------------------------------------------------------------------
 
-    Steps:
-    1. Navigate to eduvulcan.pl/logowanie
-    2. Fill login, click Dalej
-    3. Fill password, click Zaloguj
-    4. Wait for redirect to eduvulcan.pl
-    5. Open the profile picker at /dostep-do-dziennika/ and click the first
-       student's /dziennik?<sso-token> link, which redirects to uczen.eduvulcan.pl
-    6. Capture cookies and save session
 
-    Note: before the 26.8 redesign the post-login landing page itself carried the
-    student links. It is now a marketing homepage, so the picker must be opened
-    explicitly.
-    """
-    dashboard_url = ""
-    login_complete = asyncio.Event()
+async def _save_screenshot(
+    page: Page,
+    directory: Path,
+    name: str,
+) -> None:
+    directory.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True, args=["--no-sandbox", "--disable-gpu"]
+    target = directory / f"{name}.png"
+
+    try:
+        await page.screenshot(
+            path=str(target),
+            full_page=True,
         )
-        context = await browser.new_context()
-        page = await context.new_page()
 
-        def handle_navigation(frame):  # type: ignore[no-untyped-def]
-            nonlocal dashboard_url
-            url = frame.url
-            if "uczen.eduvulcan.pl" in url and "/App/" in url:
-                dashboard_url = url
-                login_complete.set()
+        logger.info(
+            "Diagnostic screenshot saved: %s",
+            target,
+        )
 
-        page.on("framenavigated", handle_navigation)
+    except Exception:
+        logger.exception("Unable to save screenshot")
 
-        logger.info("Auto-login: navigating to login page")
-        await page.goto("https://eduvulcan.pl/logowanie")
 
-        # Dismiss cookie consent overlay if present
-        cookie_wrapper = page.locator("#respect-privacy-wrapper")
-        if await cookie_wrapper.count():
-            # Try clicking accept/close button inside the cookie iframe
-            cookie_frame = page.frame_locator("#respect-privacy-frame")
-            for btn_text in ["Akceptuję", "Zgadzam", "OK", "Zamknij"]:
-                btn = cookie_frame.locator(f'button:has-text("{btn_text}")').first
-                try:
-                    await btn.click(timeout=3000)
-                    await asyncio.sleep(0.5)
-                    break
-                except Exception:
-                    continue
-            else:
-                # If no button found, remove the overlay via JS
-                await page.evaluate("""
-                    () => {
-                        const el = document.getElementById('respect-privacy-wrapper');
-                        if (el) el.remove();
-                    }
-                """)
+async def _save_html(
+    page: Page,
+    directory: Path,
+    name: str,
+) -> None:
+    directory.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
-        # Step 1: fill login
-        await page.fill('input[type="text"], input[name="login"], input[type="email"]', login)
-        await page.click('button:has-text("Dalej")')
+    target = directory / f"{name}.html"
 
-        # Step 2: fill password
-        await page.wait_for_selector('input[type="password"]', timeout=10000)
-        await page.fill('input[type="password"]', password)
-        await page.click('button:has-text("Zaloguj")')
+    try:
+        target.write_text(
+            await page.content(),
+            encoding="utf-8",
+        )
 
-        # Wait for the post-login redirect back onto eduvulcan.pl
-        await page.wait_for_url("**/eduvulcan.pl/**", timeout=30000)
+        logger.info(
+            "Diagnostic HTML saved: %s",
+            target,
+        )
 
-        # Step 3: open the profile picker and click the first student
-        logger.info("Auto-login: opening profile picker")
+    except Exception:
+        logger.exception("Unable to save HTML")
+
+
+async def _log_page_text(
+    page: Page,
+    prefix: str,
+    limit: int = 2000,
+) -> None:
+    try:
+        text = await page.locator("body").inner_text()
+
+        text = " | ".join(x.strip() for x in text.splitlines() if x.strip())
+
+        logger.info(
+            "%s: %s",
+            prefix,
+            text[:limit],
+        )
+
+    except Exception:
+        logger.exception("Unable to read page text")
+
+
+# ---------------------------------------------------------------------------
+# Persistent Chromium
+# ---------------------------------------------------------------------------
+
+
+async def _launch_browser_context(
+    playwright: Playwright,
+    *,
+    force_headless: bool | None = None,
+) -> BrowserContext:
+    """Launch Chromium using a persistent dedicated browser profile."""
+
+    profile_dir = _browser_profile_dir()
+
+    profile_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    headless = _browser_headless() if force_headless is None else force_headless
+
+    logger.info(
+        "Browser: persistent profile=%s headless=%s",
+        profile_dir,
+        headless,
+    )
+
+    return await playwright.chromium.launch_persistent_context(
+        user_data_dir=str(profile_dir),
+        headless=headless,
+        slow_mo=_browser_slow_mo(),
+        viewport={
+            "width": 1440,
+            "height": 900,
+        },
+        locale="pl-PL",
+        timezone_id=settings.tz,
+        args=[
+            "--no-sandbox",
+            "--disable-gpu",
+        ],
+    )
+
+
+async def _seed_context_from_session(
+    context: BrowserContext,
+    session_path: Path,
+) -> None:
+    """Import cookies from existing session.json into Chromium.
+
+    This is particularly useful for the first migration from the old
+    non-persistent browser flow to the persistent Chromium profile.
+    """
+
+    if not session_path.exists():
+        return
+
+    try:
+        data = json.loads(session_path.read_text(encoding="utf-8"))
+
+        # RPE cookies from earlier portal handoffs must not be resurrected.
+        # Retain SSO chunks and all unexpired verification cookies.
+        now = time.time()
+        cookies = [
+            cookie
+            for cookie in data.get("cookies", [])
+            if not _is_portal_handoff_cookie(cookie) and not _cookie_expired(cookie, now)
+        ]
+
+        if not cookies:
+            return
+
+        await context.add_cookies(cookies)
+
+        logger.info(
+            "Browser: imported %d cookie(s) from existing session",
+            len(cookies),
+        )
+
+    except Exception as exc:
+        logger.warning(
+            "Browser: could not import cookies from session.json (%s)",
+            type(exc).__name__,
+        )
+
+
+def _is_portal_handoff_cookie(cookie: Mapping[str, Any]) -> bool:
+    """Scope cleanup to the accumulated host-only parent portal cookie family."""
+    return (
+        cookie.get("domain") == "eduvulcan.pl"
+        and cookie.get("path", "/") == "/"
+        and cookie.get("name", "").startswith("RPE_")
+    )
+
+
+def _cookie_expired(cookie: dict[str, Any], now: float) -> bool:
+    expires = cookie.get("expires", -1)
+    return isinstance(expires, (int, float)) and expires != -1 and expires <= now
+
+
+async def _cleanup_portal_handoff_cookies(context: BrowserContext) -> None:
+    """Remove leftovers only at flow boundaries, never during an active handoff."""
+    cookies = await context.cookies()
+    count = sum(_is_portal_handoff_cookie(cookie) for cookie in cookies)
+    if count:
+        await context.clear_cookies(name=re.compile(r"^RPE_"), domain="eduvulcan.pl", path="/")
+        logger.info("Browser: removed %d leftover portal handoff cookie(s)", count)
+
+
+def _get_page(
+    context: BrowserContext,
+) -> Page:
+    """Return persistent context's primary page."""
+
+    if context.pages:
+        return context.pages[0]
+
+    raise RuntimeError("Persistent browser context did not create a page")
+
+
+# ---------------------------------------------------------------------------
+# Navigation tracking
+# ---------------------------------------------------------------------------
+
+
+def _attach_navigation_tracking(
+    context: BrowserContext,
+    login_complete: asyncio.Event,
+    dashboard_holder: dict[str, str],
+) -> None:
+    """Detect student application in current or newly opened tabs."""
+
+    def handle_navigation(frame: Any) -> None:
+        url = frame.url
+
+        if not _is_student_dashboard_url(url):
+            return
+
+        if not dashboard_holder.get("url"):
+            logger.info(
+                "Student dashboard detected: %s",
+                _safe_url(url),
+            )
+
+        dashboard_holder["url"] = url
+
+        login_complete.set()
+
+    def attach_page(page: Page) -> None:
+        page.on(
+            "framenavigated",
+            handle_navigation,
+        )
+
+        if _is_student_dashboard_url(page.url):
+            dashboard_holder["url"] = page.url
+
+            login_complete.set()
+
+    for page in context.pages:
+        attach_page(page)
+
+    context.on(
+        "page",
+        attach_page,
+    )
+
+
+async def _find_student_page(
+    context: BrowserContext,
+) -> Page | None:
+    for page in context.pages:
+        if _is_student_dashboard_url(page.url):
+            return page
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Privacy/cookies
+# ---------------------------------------------------------------------------
+
+
+async def _accept_cookie_banner(
+    page: Page,
+) -> None:
+    """Accept the cookie/privacy dialog if it is actually visible.
+
+    We intentionally prefer a real UI action instead of deleting the
+    overlay so that eduVULCAN can persist its normal consent state in
+    the Chromium profile.
+    """
+
+    try:
+        wrapper = page.locator("#respect-privacy-wrapper")
+
+        if not await wrapper.count():
+            return
+
+        if not await wrapper.is_visible():
+            return
+
+    except Exception:
+        return
+
+    logger.info("Browser: privacy dialog detected")
+
+    try:
+        frame = page.frame_locator("#respect-privacy-frame")
+
+        for text in (
+            "Akceptuję",
+            "Akceptuj",
+            "Zgadzam",
+            "Zgadzam się",
+            "OK",
+            "Zamknij",
+        ):
+            button = frame.locator(f'button:has-text("{text}")').first
+
+            try:
+                await button.click(
+                    timeout=3000,
+                )
+
+                logger.info("Browser: privacy dialog accepted")
+
+                await asyncio.sleep(0.5)
+
+                return
+
+            except Exception:
+                continue
+
+    except Exception:
+        pass
+
+    logger.warning("Browser: privacy dialog was visible but no known accept button was found")
+
+
+# ---------------------------------------------------------------------------
+# CAPTCHA
+# ---------------------------------------------------------------------------
+
+
+async def _wait_for_captcha(
+    page: Page,
+    diagnostics_dir: Path,
+) -> str | None:
+    """Handle optional eduVULCAN anti-bot challenge.
+
+    Returns:
+        challenge id when CAPTCHA was present and completed,
+        None when no CAPTCHA was presented.
+    """
+
+    detect_timeout = _get_captcha_detect_timeout_seconds()
+
+    complete_timeout = _get_captcha_complete_timeout_seconds()
+
+    captcha = page.locator("#captcha")
+
+    logger.info(
+        "Auto-login: checking for anti-bot challenge (detect timeout %.1fs)",
+        detect_timeout,
+    )
+
+    # ---------------------------------------------------------------
+    # 1. Is a CAPTCHA present at all?
+    # ---------------------------------------------------------------
+
+    try:
+        await captcha.wait_for(
+            state="attached",
+            timeout=int(detect_timeout * 1000),
+        )
+
+    except Exception:
+        logger.info("Auto-login: no anti-bot challenge detected; continuing")
+
+        return None
+
+    # It may exist in DOM but not actually be active.
+    try:
+        if not await captcha.is_visible():
+            logger.info("Auto-login: anti-bot element present but not visible; continuing")
+
+            return None
+
+    except Exception:
+        logger.info("Auto-login: anti-bot element not active; continuing")
+
+        return None
+
+    # ---------------------------------------------------------------
+    # 2. CAPTCHA exists: now wait for it to complete.
+    # ---------------------------------------------------------------
+
+    logger.info(
+        "Auto-login: anti-bot challenge detected; waiting up to %.1fs for completion",
+        complete_timeout,
+    )
+
+    try:
+        await page.locator("#captcha-success-wrapper.active").wait_for(
+            state="visible",
+            timeout=int(complete_timeout * 1000),
+        )
+
+        await page.wait_for_function(
+            """
+            () => {
+                const e =
+                    document.querySelector(
+                        '#captcha-response'
+                    );
+
+                return (
+                    e &&
+                    e.value &&
+                    e.value.trim().length > 0
+                );
+            }
+            """,
+            timeout=10000,
+        )
+
+    except Exception as exc:
+        logger.error("Auto-login: anti-bot challenge was detected but did not complete")
+
+        await _save_screenshot(
+            page,
+            diagnostics_dir,
+            "antibot-error",
+        )
+
+        await _save_html(
+            page,
+            diagnostics_dir,
+            "antibot-error",
+        )
+
+        raise RuntimeError("eduVULCAN anti-bot challenge was present but did not complete") from exc
+
+    # ---------------------------------------------------------------
+    # 3. Read challenge metadata for diagnostics.
+    # ---------------------------------------------------------------
+
+    try:
+        response = await page.locator("#captcha-response").input_value()
+
+    except Exception:
+        response = ""
+
+    try:
+        challenge = await page.locator("#captcha .captcha-wrapper").get_attribute("data-challenge")
+
+    except Exception:
+        challenge = None
+
+    logger.info(
+        "Auto-login: anti-bot completed; response-length=%d",
+        len(response),
+    )
+
+    return challenge
+
+
+# ---------------------------------------------------------------------------
+# Student profile
+# ---------------------------------------------------------------------------
+
+
+async def _open_student_profile(page: Page) -> bool:
+    """Dismiss picker overlays and enter the first available journal profile."""
+    for selector in (".vdpo-tutorial-tooltip__close", ".vdpo-journal-shortcut__close"):
+        overlay = page.locator(selector).first
+        if await overlay.count():
+            try:
+                await overlay.click(timeout=2000)
+            except Exception:
+                logger.debug("Browser: could not dismiss profile-picker overlay")
+
+    profiles = page.locator('a[href*="/dziennik?"]')
+    if not await profiles.count():
+        # Retain compatibility with the previous picker markup.
+        profiles = page.locator("a.panel-access__profile")
+    if not await profiles.count():
+        logger.warning(
+            "Browser: no journal profiles available; check account activation "
+            "at https://eduvulcan.pl/konto/dostepy"
+        )
+        return False
+
+    logger.info("Browser: opening first available journal profile")
+    try:
+        await profiles.first.click(timeout=30000)
+        return True
+    except Exception:
+        # Redirect chains can interrupt the click while reaching the application.
+        logger.warning("Browser: journal handoff interrupted; current URL=%s", _safe_url(page.url))
+        return urlparse(page.url).hostname == STUDENT_HOST
+
+
+# ---------------------------------------------------------------------------
+# Reuse persistent parent portal session
+# ---------------------------------------------------------------------------
+
+
+async def _try_reuse_browser_session(
+    page: Page,
+    login_complete: asyncio.Event,
+) -> bool:
+    """Try to recreate the student API session without entering credentials.
+
+    This is the main purpose of the persistent Chromium profile:
+    if eduvulcan.pl still knows this browser, simply re-enter the
+    selected journal and regenerate session.json.
+    """
+
+    logger.info("Auto-login: trying persistent eduVULCAN browser session")
+
+    try:
         await page.goto(
-            "https://eduvulcan.pl/dostep-do-dziennika/", wait_until="networkidle"
+            JOURNAL_ACCESS_URL,
+            wait_until="domcontentloaded",
+            timeout=30000,
         )
-        await asyncio.sleep(1)
 
-        # The onboarding tour and journal-shortcut bar render above the profile
-        # tiles and swallow the click, so dismiss them first.
-        for overlay in [".vdpo-tutorial-tooltip__close", ".vdpo-journal-shortcut__close"]:
-            loc = page.locator(overlay).first
-            if await loc.count():
-                try:
-                    await loc.click(timeout=2000)
-                except Exception:
-                    logger.debug("Auto-login: could not dismiss %s", overlay)
+    except Exception:
+        logger.info("Auto-login: persistent portal navigation failed")
 
-        student = page.locator('a[href*="/dziennik?"]').first
-        if not await student.count():
-            await browser.close()
-            raise RuntimeError(
-                "Auto-login: no student profiles on /dostep-do-dziennika/. "
-                "The accounts are usually suspended pending a Regulamin change - "
-                "check https://eduvulcan.pl/konto/dostepy for an 'Aktywuj' prompt."
+        return False
+
+    await asyncio.sleep(1)
+
+    if login_complete.is_set():
+        logger.info("Auto-login: persistent browser session reached student application directly")
+
+        return True
+
+    parsed = urlparse(page.url)
+
+    if parsed.hostname == "eduvulcan.pl" and "/logowanie" in parsed.path.lower():
+        logger.info("Auto-login: persistent portal session requires login")
+
+        return False
+
+    if not await _open_student_profile(page):
+        return False
+
+    if not login_complete.is_set():
+        try:
+            await asyncio.wait_for(
+                login_complete.wait(),
+                timeout=30,
             )
 
-        await student.click()
+        except TimeoutError:
+            return False
 
-        try:
-            await asyncio.wait_for(login_complete.wait(), timeout=30)
-        except TimeoutError as exc:
-            await browser.close()
-            raise TimeoutError(
-                "Auto-login: timed out waiting for redirect to uczen.eduvulcan.pl"
-            ) from exc
+    logger.info("Auto-login: persistent browser session successfully restored student access")
+
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Messages application
+# ---------------------------------------------------------------------------
+
+
+async def _visit_messages_application(
+    context: BrowserContext,
+    fallback_page: Page,
+    tenant: str,
+) -> None:
+    if not tenant:
+        return
+
+    page = await _find_student_page(context)
+
+    if page is None:
+        page = fallback_page
+
+    logger.info("Auth: establishing messages session")
+
+    try:
+        await page.goto(
+            f"https://{MESSAGES_HOST}/{tenant}/App",
+            wait_until="domcontentloaded",
+            timeout=30000,
+        )
 
         await asyncio.sleep(2)
 
-        # Extract tenant
-        parts = dashboard_url.split("uczen.eduvulcan.pl/")
-        tenant = parts[1].split("/")[0] if len(parts) > 1 else ""
+        logger.info("Auth: messages session established")
 
-        # Visit messages subdomain
-        if tenant:
-            logger.info("Auto-login: establishing messages session")
-            await page.goto(
-                f"https://wiadomosci.eduvulcan.pl/{tenant}/App",
-                wait_until="networkidle",
-            )
-            await asyncio.sleep(2)
+    except Exception:
+        logger.warning(
+            "Auth: messages application navigation did not fully complete",
+            exc_info=True,
+        )
 
-        cookies = await context.cookies()
-        await browser.close()
 
-    session_data = {
+# ---------------------------------------------------------------------------
+# Session finalization
+# ---------------------------------------------------------------------------
+
+
+async def _save_current_session(
+    context: BrowserContext,
+    page: Page,
+    session_path: Path,
+    dashboard_url: str,
+) -> dict[str, Any]:
+    tenant = _tenant_from_dashboard_url(dashboard_url)
+
+    if not tenant:
+        raise RuntimeError("Could not determine eduVULCAN tenant")
+
+    await _visit_messages_application(
+        context,
+        page,
+        tenant,
+    )
+
+    await _cleanup_portal_handoff_cookies(context)
+    cookies = await context.cookies()
+
+    session_data: dict[str, Any] = {
         "cookies": cookies,
         "tenant": tenant,
-        "base_url": f"https://uczen.eduvulcan.pl/{tenant}",
+        "base_url": (f"https://{STUDENT_HOST}/{tenant}"),
         "dashboard_url": dashboard_url,
     }
 
-    session_path.write_text(json.dumps(session_data, indent=2, default=str))
-    logger.info("Auto-login: session saved to %s (tenant: %s)", session_path, tenant)
+    # A dashboard redirect alone does not establish that exported cookies work
+    # with the HTTP worker. Keep the previous file until its API access is proven.
+    if not await test_session(session_data):
+        raise InvalidSessionError(
+            "Student API access was not confirmed after browser authentication"
+        )
+
+    _write_session(session_path, session_data)
+
+    logger.info(
+        "Auth: session saved to %s (tenant=%s, cookies=%d)",
+        session_path,
+        tenant,
+        len(cookies),
+    )
 
     return session_data
 
 
-def load_session(session_path: Path) -> dict[str, Any]:
-    """Load a previously saved session."""
+# ---------------------------------------------------------------------------
+# Interactive login
+# ---------------------------------------------------------------------------
+
+
+async def login_and_save_session(
+    session_path: Path,
+) -> dict[str, Any]:
+    """Interactive headed login using the persistent Chromium profile."""
+
+    login_complete = asyncio.Event()
+
+    dashboard_holder = {
+        "url": "",
+    }
+
+    with _browser_profile_lock():
+        _cleanup_chromium_singleton_locks()
+
+        async with async_playwright() as playwright:
+            context = await _launch_browser_context(
+                playwright,
+                force_headless=False,
+            )
+
+            try:
+                _attach_navigation_tracking(
+                    context,
+                    login_complete,
+                    dashboard_holder,
+                )
+
+                await _seed_context_from_session(
+                    context,
+                    session_path,
+                )
+
+                await _cleanup_portal_handoff_cookies(context)
+                page = _get_page(context)
+
+                # First try to use the currently valid session.json /
+                # persistent browser profile without asking for login.
+                if await _try_reuse_browser_session(
+                    page,
+                    login_complete,
+                ):
+                    dashboard_url = dashboard_holder["url"]
+
+                    return await _save_current_session(
+                        context,
+                        page,
+                        session_path,
+                        dashboard_url,
+                    )
+
+                await page.goto(
+                    EDUVULCAN_LOGIN_URL,
+                    wait_until="domcontentloaded",
+                )
+
+                await _accept_cookie_banner(page)
+
+                print("[auth] Browser opened.")
+
+                print("[auth] Log in normally, then open the student's Dziennik.")
+
+                try:
+                    await asyncio.wait_for(
+                        login_complete.wait(),
+                        timeout=300,
+                    )
+
+                except TimeoutError as exc:
+                    raise TimeoutError("Login timed out after 5 minutes") from exc
+
+                dashboard_url = dashboard_holder["url"]
+
+                await asyncio.sleep(1)
+
+                return await _save_current_session(
+                    context,
+                    page,
+                    session_path,
+                    dashboard_url,
+                )
+
+            finally:
+                await context.close()
+
+
+# ---------------------------------------------------------------------------
+# Automatic login
+# ---------------------------------------------------------------------------
+
+
+async def _submit_login_form(page: Page, button: Locator, login_complete: asyncio.Event) -> None:
+    """Submit once and recognize the final redirect, independent of the POST URL."""
+
+    def reached_portal(url: str) -> bool:
+        parsed = urlparse(url)
+        return _is_student_dashboard_url(url) or (
+            parsed.hostname == "eduvulcan.pl" and "/logowanie" not in parsed.path.lower()
+        )
+
+    try:
+        await button.click(timeout=10000)
+    except PlaywrightTimeoutError:
+        # The click may have submitted successfully before a navigation timed out.
+        # Inspect the outcome without sending the credentials a second time.
+        logger.info("Auto-login: submit timed out; checking login redirect")
+
+    if login_complete.is_set():
+        return
+
+    try:
+        await page.wait_for_url(reached_portal, wait_until="domcontentloaded", timeout=30000)
+    except PlaywrightTimeoutError:
+        # The student journal can open in a separate tab tracked by the context.
+        if not login_complete.is_set():
+            raise RuntimeError(
+                "eduVULCAN login did not reach the portal or student journal"
+            ) from None
+
+
+async def auto_login(
+    session_path: Path,
+    login: str,
+    password: str,
+) -> dict[str, Any]:
+    """Restore access, retrying a failed journal handoff once without JSON import."""
+    with _browser_profile_lock():
+        _cleanup_chromium_singleton_locks()
+        async with async_playwright() as playwright:
+            for attempt in range(2):
+                try:
+                    return await _auto_login_attempt(
+                        playwright, session_path, login, password, seed_session=attempt == 0
+                    )
+                except (_JournalHandoffError, InvalidSessionError):
+                    if attempt or not session_path.exists():
+                        raise
+                    logger.warning(
+                        "Auto-login: journal access failed; reopening persistent profile "
+                        "once without importing the saved session"
+                    )
+    raise AssertionError("Automatic authentication attempts exhausted")
+
+
+async def _auto_login_attempt(
+    playwright: Playwright,
+    session_path: Path,
+    login: str,
+    password: str,
+    *,
+    seed_session: bool,
+) -> dict[str, Any]:
+    """Run one browser attempt; closing it flushes the profile before any retry."""
+    diagnostics_dir = session_path.parent
+    login_complete = asyncio.Event()
+    dashboard_holder = {"url": ""}
+
+    context = await _launch_browser_context(playwright)
+
+    try:
+        _attach_navigation_tracking(
+            context,
+            login_complete,
+            dashboard_holder,
+        )
+
+        # Even if test_session() says the student API session has
+        # expired, some portal cookies in session.json may still be
+        # useful for refreshing access.
+        if seed_session:
+            await _seed_context_from_session(context, session_path)
+
+        await _cleanup_portal_handoff_cookies(context)
+
+        page = _get_page(context)
+
+        # -----------------------------------------------------------
+        # 1. Try persistent profile first.
+        # -----------------------------------------------------------
+
+        if await _try_reuse_browser_session(
+            page,
+            login_complete,
+        ):
+            dashboard_url = dashboard_holder["url"]
+
+            return await _save_current_session(
+                context,
+                page,
+                session_path,
+                dashboard_url,
+            )
+
+        # -----------------------------------------------------------
+        # 2. Full credentials login.
+        # -----------------------------------------------------------
+
+        logger.info("Auto-login: persistent portal session unavailable; performing full login")
+
+        await page.goto(
+            EDUVULCAN_LOGIN_URL,
+            wait_until="domcontentloaded",
+            timeout=30000,
+        )
+
+        await _accept_cookie_banner(page)
+
+        # Username.
+        login_field = page.locator("#UserName")
+
+        if not await login_field.count():
+            login_field = page.locator(
+                'input[type="text"], input[name="UserName"], input[type="email"]'
+            ).first
+
+        await login_field.wait_for(
+            state="visible",
+            timeout=10000,
+        )
+
+        await login_field.fill(login)
+
+        next_button = page.locator("#btNext")
+
+        if not await next_button.count():
+            next_button = page.locator('button:has-text("Dalej")').first
+
+        await next_button.click(
+            timeout=10000,
+        )
+
+        # Password.
+        password_field = page.locator("#Password")
+
+        if not await password_field.count():
+            password_field = page.locator('input[type="password"]').first
+
+        await password_field.wait_for(
+            state="visible",
+            timeout=15000,
+        )
+
+        await password_field.fill(password)
+
+        await _wait_for_captcha(
+            page,
+            diagnostics_dir,
+        )
+
+        delay = _get_login_delay_seconds()
+
+        if delay > 0:
+            logger.info(
+                "Auto-login: waiting %.1f seconds before submitting login",
+                delay,
+            )
+
+            await asyncio.sleep(delay)
+
+        login_button = page.locator("#btLogOn")
+
+        if not await login_button.count():
+            login_button = page.locator('button:has-text("Zaloguj")').first
+
+        await login_button.wait_for(
+            state="visible",
+            timeout=10000,
+        )
+
+        logger.info("Auto-login: submitting login form")
+
+        try:
+            await _submit_login_form(page, login_button, login_complete)
+        except RuntimeError:
+            logger.error("Auto-login: login redirect failed; URL=%s", _safe_url(page.url))
+            await _save_screenshot(
+                page,
+                diagnostics_dir,
+                "login-redirect-error",
+            )
+            raise
+
+        logger.info(
+            "Auto-login: credentials accepted; URL=%s",
+            _safe_url(page.url),
+        )
+
+        # -----------------------------------------------------------
+        # 3. Enter first available student journal.
+        # -----------------------------------------------------------
+
+        if not login_complete.is_set():
+            await page.goto(
+                JOURNAL_ACCESS_URL,
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+
+            await asyncio.sleep(1)
+
+        if not login_complete.is_set() and not await _open_student_profile(page):
+            await _save_screenshot(
+                page,
+                diagnostics_dir,
+                "journal-profile-error",
+            )
+
+            raise _JournalHandoffError(
+                "Could not open a journal profile; run vulcan-notify auth for interactive recovery"
+            )
+
+        if not login_complete.is_set():
+            try:
+                await asyncio.wait_for(
+                    login_complete.wait(),
+                    timeout=30,
+                )
+
+            except TimeoutError as exc:
+                await _save_screenshot(
+                    page,
+                    diagnostics_dir,
+                    "student-redirect-error",
+                )
+
+                raise _JournalHandoffError("Timed out waiting for uczen.eduvulcan.pl") from exc
+
+        dashboard_url = dashboard_holder["url"]
+
+        return await _save_current_session(
+            context,
+            page,
+            session_path,
+            dashboard_url,
+        )
+
+    finally:
+        # launch_persistent_context() returns a BrowserContext.
+        # Closing it also closes Chromium and flushes profile state.
+        await context.close()
+
+
+# ---------------------------------------------------------------------------
+# Session file
+# ---------------------------------------------------------------------------
+
+
+def load_session(
+    session_path: Path,
+) -> dict[str, Any]:
     if not session_path.exists():
         raise FileNotFoundError(
             f"No session file at {session_path}. Run 'vulcan-notify auth' first."
         )
-    data: dict[str, Any] = json.loads(session_path.read_text())
+
+    try:
+        data = json.loads(session_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise InvalidSessionError("Saved session is invalid; authentication required") from None
+    if not isinstance(data, dict) or not isinstance(data.get("base_url"), str):
+        raise InvalidSessionError("Saved session has invalid structure; authentication required")
+    try:
+        url = urlparse(data["base_url"])
+    except ValueError:
+        raise InvalidSessionError(
+            "Saved session has invalid structure; authentication required"
+        ) from None
+    cookies = data.get("cookies")
+    if (
+        url.scheme != "https"
+        or not url.hostname
+        or url.username
+        or url.password
+        or not isinstance(cookies, list)
+        or any(
+            not isinstance(cookie, dict)
+            or any(not isinstance(cookie.get(key), str) for key in ("name", "value", "domain"))
+            for cookie in cookies
+        )
+    ):
+        raise InvalidSessionError("Saved session has invalid structure; authentication required")
     return data
 
 
-def cookies_for_url(session_data: dict[str, Any], url: str) -> dict[str, str]:
-    """Build a Cookie header dict for a given URL from saved session cookies."""
-    from urllib.parse import urlparse
-
+def _matching_cookies(session_data: dict[str, Any], url: str) -> list[dict[str, Any]]:
+    """Select exported Playwright cookies using browser domain/path/expiry rules."""
     parsed = urlparse(url)
-    host = parsed.hostname or ""
+    host = (parsed.hostname or "").lower()
+    path = parsed.path or "/"
+    now = time.time()
+    matching = []
+    for cookie in session_data.get("cookies", []):
+        raw_domain = cookie.get("domain", "").lower()
+        domain = raw_domain.lstrip(".")
+        if not domain or not (
+            host == domain or (raw_domain.startswith(".") and host.endswith("." + domain))
+        ):
+            continue
+        cookie_path = cookie.get("path") or "/"
+        if not cookie_path.startswith("/"):
+            cookie_path = "/"
+        if path != cookie_path and not (
+            path.startswith(cookie_path)
+            and (cookie_path.endswith("/") or path[len(cookie_path) :].startswith("/"))
+        ):
+            continue
+        # Playwright uses -1 for session cookies. Older session exports may omit it.
+        if _cookie_expired(cookie, now):
+            continue
+        if cookie.get("secure", False) and parsed.scheme != "https":
+            continue
+        matching.append(cookie)
 
-    matching = {}
-    for cookie in session_data["cookies"]:
-        domain = cookie.get("domain", "")
-        # Match exact domain or parent domain (with leading dot)
-        if host == domain or host.endswith(domain.lstrip(".")):
-            matching[cookie["name"]] = cookie["value"]
+    # Browsers send longer paths first. Preserve export order for equal paths.
+    return sorted(matching, key=lambda cookie: len(cookie.get("path") or "/"), reverse=True)
 
+
+def cookies_for_url(session_data: dict[str, Any], url: str) -> dict[str, str]:
+    """Compatibility mapping; prefer the most specific path for duplicate names."""
+    matching: dict[str, str] = {}
+    for cookie in _matching_cookies(session_data, url):
+        matching.setdefault(cookie["name"], cookie["value"])
     return matching
 
 
-def _make_ssl_context() -> ssl.SSLContext:
-    """Create an SSL context using certifi's CA bundle."""
-    import ssl
+def cookie_header_for_url(session_data: dict[str, Any], url: str) -> str:
+    """Build a scoped Cookie header without losing same-name browser cookies."""
+    return "; ".join(
+        f"{cookie['name']}={cookie['value']}" for cookie in _matching_cookies(session_data, url)
+    )
 
+
+# ---------------------------------------------------------------------------
+# Session validation
+# ---------------------------------------------------------------------------
+
+
+def _make_ssl_context() -> ssl.SSLContext:
     import certifi
 
     return ssl.create_default_context(cafile=certifi.where())
 
 
-async def test_session(session_data: dict[str, Any]) -> bool:
-    """Test if the session is still valid by hitting the Context API."""
+async def test_session(
+    session_data: dict[str, Any],
+) -> bool:
+    """Test the API session; transient failures do not prove session expiry.
+
+    Retry once for connectivity/server failures, then raise SessionValidationError.
+    Return False for authentication failure, redirects, HTML login or a Context conflict (409)
+    that needs a fresh browser session context.
+    """
+
     base_url = session_data["base_url"]
-    ssl_ctx = _make_ssl_context()
+
     url = f"{base_url}/api/Context"
-    cookie_header = "; ".join(f"{k}={v}" for k, v in cookies_for_url(session_data, url).items())
+
+    cookie_header = cookie_header_for_url(session_data, url)
 
     headers = {
         "Cookie": cookie_header,
         "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/131.0.0.0 Safari/537.36"
+            "Mozilla/5.0 "
+            "(Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) "
+            "Chrome/131.0.0.0 "
+            "Safari/537.36"
         ),
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept": ("application/json, text/plain, */*"),
+        "Accept-Language": ("pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7"),
     }
 
-    timeout = aiohttp.ClientTimeout(total=30, connect=10)
+    ssl_context = _make_ssl_context()
+    last_reason = "unknown response"
 
-    try:
-        async with (
-            aiohttp.ClientSession(timeout=timeout) as session,
-            session.get(url, ssl=ssl_ctx, headers=headers) as resp,
-        ):
-            text = await resp.text()
-            content_type = resp.headers.get("content-type", "")
-            status = resp.status
-    except (TimeoutError, aiohttp.ClientError) as exc:
-        # A DNS blip or reset here used to escape as an uncaught traceback and kill
-        # the whole cycle. Treat it as "can't confirm the session" and let the caller
-        # re-auth; a genuinely dead network will fail again louder downstream.
-        logger.warning("Session test failed to reach %s: %s", url, exc)
-        return False
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=30, connect=10)
+    ) as session:
+        for attempt in range(2):
+            try:
+                async with session.get(
+                    url, ssl=ssl_context, headers=headers, allow_redirects=False
+                ) as response:
+                    if response.status in (301, 302, 303, 307, 308):
+                        # A manual Cookie header is scoped to this URL, not a
+                        # login redirect's host/path. Let the browser restore access.
+                        logger.warning(
+                            "Session validation: HTTP %d redirect; session recovery required",
+                            response.status,
+                        )
+                        return False
+                    if response.status == 409:
+                        # A Context conflict is eligible for bounded browser
+                        # recovery; it is not proof of a transient server outage.
+                        logger.warning(
+                            "Session validation: HTTP 409 from Context; session recovery required"
+                        )
+                        return False
+                    if response.status in (401, 403):
+                        return False
+                    if response.status != 200:
+                        content_type = response.headers.get("content-type", "").lower()
+                        if "text/html" in content_type:
+                            kind = "html"
+                        elif "json" in content_type:
+                            kind = "json"
+                        else:
+                            kind = "other"
+                        raise SessionValidationError(
+                            f"Session validation returned HTTP {response.status} "
+                            f"(response={kind}, redirects={len(response.history)}, "
+                            f"cookie_bytes={len(cookie_header.encode('utf-8'))})"
+                        )
 
-    logger.debug("Session test: status=%d content-type=%s len=%d", status, content_type, len(text))
+                    text = await response.text()
+                    content_type = response.headers.get("content-type", "")
+                    if "text/html" in content_type.lower():
+                        return False
 
-    if status != 200:
-        logger.warning("Session invalid: status %d", status)
-        return False
+                    data = json.loads(text)
+                    if not isinstance(data, dict):
+                        raise SessionValidationError(
+                            f"Session validation returned JSON {type(data).__name__}; "
+                            "expected student context object"
+                        )
+                    if not isinstance(data.get("uczniowie"), list):
+                        raise SessionValidationError(
+                            "Session validation returned an object without a student list"
+                        )
+                    return True
+            except (
+                aiohttp.ClientError,
+                TimeoutError,
+                json.JSONDecodeError,
+                SessionValidationError,
+            ) as exc:
+                # Our validation errors contain only fixed descriptions, numeric
+                # HTTP status or JSON type names. Other exceptions may embed URLs,
+                # cookies or response content, so log only their class name.
+                last_reason = (
+                    str(exc) if isinstance(exc, SessionValidationError) else type(exc).__name__
+                )
+                logger.warning(
+                    "Session validation unavailable (attempt %d/2, %s)",
+                    attempt + 1,
+                    last_reason,
+                )
+                if attempt == 0:
+                    await asyncio.sleep(2)
 
-    # If we got HTML back, the session is expired (redirect to login)
-    if "text/html" in content_type:
-        logger.info("Session expired (got HTML instead of JSON)")
-        return False
-
-    try:
-        json.loads(text)
-        logger.debug("Session valid")
-        return True
-    except json.JSONDecodeError:
-        logger.warning("Unexpected response: %s", text[:300])
-        return False
+    raise SessionValidationError(
+        f"Could not validate the saved session ({last_reason}); try again later"
+    )

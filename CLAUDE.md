@@ -4,7 +4,83 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-CLI tool that syncs data from the eduVulcan school e-journal (grades, attendance, exams, homework, messages) to a local SQLite database and detects changes between syncs. Uses cookie-based auth via Playwright browser login.
+CLI tool that syncs data from the eduVulcan school e-journal (grades, attendance, exams, homework, praise/notes, messages) to a local SQLite database and detects changes between syncs. Uses HTTP cookie validation and persistent Chromium recovery before credential login. Manual headed authentication is available through the explicit `vulcan-auth` Compose profile. Read `AGENTS.md` for current local Docker/auth behavior.
+
+Completed lessons (`/api/RealizacjaZajec13`, `status=1`) are also synchronized using
+`CompletedLesson` and the additive `completed_lessons` table keyed by student/ID.
+`SYNC_COMPLETED_LESSONS_DAYS` defaults to 90 plus today. The independent successful
+baseline `last_sync:<student>:completed_lessons` suppresses initial/import history.
+New/content-update events use MQTT `completed_lessons/new` and `/updated`;
+missing records are soft-deleted only within the fetched interval and restoration
+is silent. TUI key 7 opens the list/detail view; `/api/completed-lessons` supports
+common student filters, limits and freshness. Completed lesson changes do not
+trigger emails or form digest groups. `LLM_INCLUDE_LESSONS=true` optionally
+adds stored topics as AI context for email/CLI change summaries, with
+`LLM_LESSONS_DAYS=7` local calendar days including today. Standalone
+`summarize --type lessons [--days N]` uses `[lessons]` prompts.
+`summarize --type mix [--days N]` (default 7) separately uses `[messages]` and
+`[lessons]` to email at most two nonempty summaries through dedicated
+`summary_messages.html` / `summary_lessons.html` subtemplates and `layout.html`.
+Prompts request Markdown; mixed emails render sanitized HTML, with inbox and
+active student lesson-list links from the saved session (omitted if unavailable).
+Requires enabled SMTP email and an LLM key, independently of digest AI/context
+switches. Final bodies persist in the existing outbox; retries do not rerun AI.
+`sync` automatically runs a seven-day mix after the first successful Friday sync
+starting at/after 15:00 in `TZ`, when email and an LLM key are configured.
+`WEEKLY_SUMMARY_ENABLED` defaults to true; false disables only the automatic action.
+The Friday date in `summary:mix:weekly` and emails commit together before SMTP.
+Empty source windows complete silently; total AI failures retry on a later
+qualifying sync, and SMTP retries reuse stored bodies. Degraded/failed syncs skip
+the action; there is no catch-up outside Friday. Optional summary failures do not
+fail the sync.
+Default prompts group by student/subject and omit routine activities.
+Collections/resources retain JSON
+without assumptions about unverified populated upstream shapes. Live behavior
+was not verified during implementation.
+
+Homework sync enriches the model before diffing, so email and MQTT include the
+description, teacher, links, response requirement and response deadline. Email
+uses the existing HTML sanitizer and preserves clickable links. Raw link JSON,
+`response_required`, `response_deadline` and `detail_fetched_at` persist through
+an automatic additive migration. Existing tasks backfill silently; an empty
+description counts as a successful fetch, while failures retry without duplicate
+notifications. Populated link item shapes have not been verified live.
+
+Homework synchronization now reads the calendar list `SprawdzianyZadaniaDomowe`
+(`typ=4`), using `SYNC_HOMEWORK_DAYS=365` back and
+`SYNC_HOMEWORK_FUTURE_DAYS=365` ahead, including today. Dashboard display still
+uses the upcoming-only list. The independent successful
+`last_sync:<student>:homework_calendar` marker silently imports expanded history
+once on upgrades; later unknown IDs notify. Window-scoped soft deletes preserve
+rolled-out history and skip failures. Full original detail JSON is refreshed on
+every sync and stored in
+`homework.details`, exposed through MQTT/HTTP; attachments and response text/comments
+also appear in notifications when available. A live calendar/detail check verified
+the October 9, 2026 task omitted by the dashboard.
+
+Exams now also read the module calendar with `SYNC_EXAM_DAYS=365` and
+`SYNC_EXAM_FUTURE_DAYS=365`, using `last_sync:<student>:exams_calendar` to
+baseline expanded history silently. All non-homework calendar type codes are
+preserved as exams. Detail enrichment occurs before diffing; original JSON
+persists in `exams.details` and HTTP/MQTT. Every returned exam/homework detail
+refreshes on each sync; successful empty/null values replace old ones and failed
+reads retain prior data. Known-ID edits remain silent. Soft deletes for both
+calendar categories are scoped to successful windows, including empty lists.
+
+Attendance reads classroom, other activities and childcare collections. The
+migration preserves history and expands identity with `source` / `entry_key`;
+classroom keys remain compatible while unnumbered activities use times/subject.
+`last_sync:<student>:attendance_full` silently imports additional collections on
+upgrades; new classroom alerts continue. Messages still use the first 50 entries.
+
+Attendance presentation uses `text.attendance_category_label()` across email,
+change titles, TUI and AI input: Polish description plus `(code)`, including
+`Spóźnienie usprawiedliwione (5)`. MQTT adds `category_label` and `category_code`
+with corrected machine `category` assignments `3=excused`, `4=late`; other values
+remain compatible. The October 12, 2026 live legend/client-enum check verified
+1–7: 3 is excused absence, 4 lateness, 6 school-related absence and 7 exemption.
+Sanitized public legend evidence is in `tests/fixtures/attendance_categories.json`. Unknown IDs get an explicit fallback;
+numeric persistence, baselines and notification identities stay unchanged.
 
 ## Sibling repos (cross-repo work is common)
 
@@ -47,21 +123,66 @@ uv run mypy src/
 
 The tool follows a linear pipeline: **Auth -> Client -> Sync -> Diff -> Display**.
 
-- `auth.py` - Playwright-based browser login. Saves session cookies to `session.json` after user logs into eduvulcan.pl. Also provides `cookies_for_url()` and `_make_ssl_context()` used by the client.
+- `auth.py` - Persistent Playwright Chromium under `/app/data/chromium-profile`, guarded by a shared profile lock. Imports `session.json` cookies, tries browser reuse before credentials and verifies exported HTTP API access before saving refreshed state. Interactive auth always forces headed mode; automatic selection opens the first journal profile. `cookie_header_for_url()` honors host-only/domain, path, expiry and Secure metadata and preserves same-name cookies in path order; `cookies_for_url()` retains a compatibility mapping. API/validation requests refuse redirects with manual cookie headers and use the existing bounded recovery. Also provides `_make_ssl_context()` used by the client.
+
+  With a saved session, a failed journal handoff or rejected exported Context
+  retries once by closing/reopening the same profile without JSON import and
+  with fresh navigation tracking. Unrelated login/validation/IO failures do not
+  retry. Imports skip expired cookies and host-only parent-portal `RPE_…` cookies
+  at `/`; Chromium removes that family before a new flow and after completed
+  student/messages handoffs. SSO chunks and unexpired verification cookies stay.
+  Failed authentication preserves the old JSON; replacement still requires
+  HTTP validation. Unit-tested policy; live resolution remains unverified.
 
 - `client.py` - `VulcanClient` wraps aiohttp for the uczen.eduvulcan.pl JSON API. Handles cookie auth, SSL (certifi), and session expiry detection (HTML response = expired). Returns typed dataclasses from `models.py`.
 
 - `models.py` - Dataclasses for all API response types: `Student`, `Grade`, `AttendanceEntry`, `Exam`, `Homework`, `ClassificationPeriod`, `DashboardData`.
 
-- `sync.py` - `sync_all()` orchestrates per-student sync: fetch data via client, diff against stored state, upsert into database. Returns `SyncResult` per student. First sync stores baseline without reporting changes.
+- `sync.py` - `sync_all()` orchestrates per-student sync: fetch data via client, diff against stored state, upsert into database. Returns `SyncResult` per student. First sync stores baseline without reporting changes. Praise/notes also use their own successful-fetch baseline (`last_sync:<student>:remarks`) for upgrades, with new-ID events and silent updates/soft deletes.
 
-- `differ.py` - Compares fetched API data against stored database rows. `diff_grades()` detects new/updated grades by column_id. `diff_attendance()` detects new records by (date, lesson_number). Returns `Change` dataclasses.
+  Grades, attendance, exams, homework and schedule now also have independent successful-section baselines. Failed initial sections baseline silently on recovery. Legacy initialization preserves prior confirmed successes (or the student marker when no section history exists). Schedule comparison covers the full requested local window, including missing boundary days.
+
+  Schedule duplicates sharing `(date, time_from, subject)` normalize before both
+  diff and persistence: prefer substituted, then extra and annotated entries,
+  resolving other ties by stable content. Selection considers only the current
+  fetch, allowing substitution removal. The existing single-entry key remains;
+  parallel variants are not stored separately. No schema migration is needed.
+
+- `api.py` - `/api/students` discovers stable profile keys. Student endpoints support `student_key` and `keyed=1`; unique-name response keys remain compatible, while ambiguous names return HTTP 409. Calendar feeds accept explicit profile keys; historical profile merging requires a matching nonempty mailbox identity.
+
+- Session writes are atomic and mode 0600. Invalid session files use the existing recovery policy without exposing file contents. Calendar transient failures preserve stored UIDs for retry; `CALENDAR_TIMEOUT_SECONDS` bounds AppleScript and kills/reaps timed-out or cancelled processes.
+
+- Session validation requires a JSON Context object with an `uczniowie` list and retries transient HTTP/connectivity/malformed-response failures once (30-second total/10-second connect timeout per attempt, two-second delay). Exhausted checks raise `SessionValidationError`; CLI exits nonzero, preserves the session and skips browser recovery/auth alerts until a later cycle. Non-200 diagnostics include only HTTP status, response kind, redirect count and cookie byte count, never contents. Credential login follows the final portal/student redirect rather than requiring a particular POST response; a submit timeout does not resubmit credentials. Student access and successful HTTP validation are required before saving a session.
+
+- Observed upstream `/api/Context` HTTP 409 requests browser/session recovery immediately, both in validation and student discovery. It is treated as a recoverable Context conflict without asserting that all 409s mean expired authentication. The existing mid-sync retry remains bounded; 409s from other modules remain fetch failures, while 429/5xx/timeouts retain transient-failure behavior.
+
+- Exhausted/missing authentication and explicit interactive auth failures notify through the existing email outbox when `EMAIL_ENABLED=true`. `auth_failure.html` shares the email layout and includes noVNC/SSH recovery instructions. The persisted `email:auth_failure` outage marker suppresses duplicate alerts across restarts and resets after completed non-expired syncs or successful interactive auth. No raw authentication errors, secrets or AI are included.
+
+- `differ.py` - Compares fetched API data against stored database rows. `diff_grades()` detects new/updated grades by column_id. `diff_attendance()` retains classroom (date, lesson_number) identity and adds source plus times/subject for unnumbered activities. Returns `Change` dataclasses.
 
 - `display.py` - Formats `SyncResult` for terminal output with ANSI colors (auto-disabled when piped). Groups by student, then by data type.
 
-- `db.py` - `Database` class wrapping aiosqlite. Normalized tables: students, grades, attendance, exams, homework, messages, sync_state. All writes use INSERT OR REPLACE for idempotent upserts.
+- `email.py` - Optional per-sync SMTP digest of student changes plus a separate email per new message or praise/note, with persistent per-recipient retries. `EMAIL_REMARK_SUBJECT_PREFIX` defaults to `[Uwagi]`; full note content and a student-specific Pochwały i uwagi link are included, excluded from digest/AI input. Message notifications include a text link and HTML inbox button derived from the session tenant, stored in the outbox for retries. The digest uses separate HTML templates for seven groups, with per-student module links and included group names/count in the subject (count omitted for one change). `EMAIL_DIGEST_GROUPS` controls digest inclusion before counting/AI. Separate `message.html` and `remark.html` templates share `layout.html` and a button footer with the digest style. AI adds a summary above the groups; message bodies are excluded by default. See `docs/email.md` for configuration and delivery limits.
+
+- `db.py` - `Database` class wrapping aiosqlite. Normalized tables: students, grades, attendance, exams, homework, remarks, messages, sync_state. The additive `remarks` table is keyed by `(student_key, id)` and retains original numeric type/kind, full content and soft-deleted history. Entity writes use ON CONFLICT DO UPDATE for idempotent upserts. Per-section outcomes and confirmed-fetch timestamps drive freshness checks.
 
 - `config.py` - `pydantic-settings` `Settings` singleton loaded from `.env`.
+
+Schedule emails use `EMAIL_SCHEDULE_COOLDOWN_HOURS=6`: the first substitution or
+cancellation is eligible immediately, then SMTP acceptance starts a fixed shared
+window for both types/all students, independently per recipient. Further events
+accumulate in `email_schedule_events`; the first sync after expiry includes them
+in the digest, even without new changes. Night pauses defer to the next sync;
+there is no timer. Other categories (including additional lessons) and outputs
+retain their existing behavior. `0` disables the timed wait. `email_schedule_state`
+reserves a prepared outbox delivery until acceptance, including via `email-retry`,
+which retries bodies without flushing buffers. Buffer ingestion, enqueue,
+consumption and reservation commit together before AI; sent status and the new
+deadline also commit together. Cleared payloads retain deduplication receipts.
+Baselines stay silent; category switches also apply at flush, discarding disabled
+buffered groups. Repeated edits remain separate events. Tables are added
+automatically; existing outbox rows and delivery limitations remain unchanged.
+See `docs/email.md` for details.
 
 ## Key dependencies
 
@@ -81,3 +202,16 @@ The tool follows a linear pipeline: **Auth -> Client -> Sync -> Diff -> Display*
 ## API reference
 
 See `docs/eduvulcan-api.md` for the reverse-engineered eduVulcan web API documentation.
+
+## Docker startup
+
+Default deployment documentation uses the Docker Hub image
+`macjoker/vulcan-notify` via `deploy/docker/compose.yml`, optionally through
+`deploy/ansible/deploy.yml`. Root `docker-compose.yml` remains the local source
+build. See `docs/deployment.md`, `docs/deployment-ansible.md` and
+`docs/publishing.md`; the old homelab setup is in `docs/deployment-proxmox.md`.
+The image publishing workflow is manual-only and defaults to no push. Do not
+run it or deploy hosts without an explicit request. The new API bind defaults
+to loopback; choose a trusted LAN address for remote consumers.
+
+`vulcan-api` serves port 8585 independently. `vulcan-sync` runs `sync-loop.sh` through `entrypoint-xvfb.sh`; the wrapper forwards its supplied command. `vulcan-auth` is an explicit GUI service with noVNC at loopback port 6080. All share `./data:/app/data`. The image uses CMD and has no ENTRYPOINT; `entrypoint.sh` was removed. TZ defaults to Europe/Warsaw for all runtime clocks, logs, Chromium, scheduling and displayed dates; QUIET_HOURS_TZ is a legacy fallback. SQLite and Python persistence explicitly use UTC, preserving existing history. Stop the worker during manual auth or a one-off sync.

@@ -2,12 +2,22 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+from dataclasses import replace
+from datetime import datetime, timedelta
+from itertools import permutations
+from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, MagicMock
 
-from vulcan_notify.db import Database
+import pytest
+
+from vulcan_notify import sync as sync_mod
+from vulcan_notify.config import settings
 from vulcan_notify.differ import diff_schedule
 from vulcan_notify.models import Lesson, Student
 from vulcan_notify.sync import sync_student
+
+if TYPE_CHECKING:
+    from vulcan_notify.db import Database
 
 STUDENT = Student(
     key="S1",
@@ -157,12 +167,15 @@ async def test_diff_schedule_ignores_missing_lessons_outside_window(db: Database
 async def test_sync_student_persists_and_reports(db: Database) -> None:
     # First sync: baseline, no reports
     client = AsyncMock()
+    client.student_portal_url = MagicMock(return_value=None)
     client.get_students = AsyncMock(return_value=[STUDENT])
     client.get_periods = AsyncMock(return_value=[])
     client.get_grades = AsyncMock(return_value=[])
     client.get_attendance = AsyncMock(return_value=[])
     client.get_exams = AsyncMock(return_value=[])
     client.get_homework = AsyncMock(return_value=[])
+    client.get_remarks = AsyncMock(return_value=[])
+    client.get_completed_lessons = AsyncMock(return_value=[])
     baseline_lesson = make_lesson()
     client.get_schedule = AsyncMock(return_value=[baseline_lesson])
 
@@ -177,3 +190,150 @@ async def test_sync_student_persists_and_reports(db: Database) -> None:
     assert result2.is_first_sync is False
     assert len(result2.new_substitutions) == 1
     assert result2.new_substitutions[0].change_type == "updated"
+
+
+@pytest.mark.parametrize("baseline_with_duplicates", [False, True])
+@pytest.mark.parametrize("reverse_order", [False, True])
+async def test_sync_duplicate_schedule_is_idempotent(
+    db: Database, monkeypatch, baseline_with_duplicates, reverse_order
+) -> None:
+    """A plain API duplicate must not erase and re-report a substitution."""
+    clock = MagicMock(wraps=datetime)
+    clock.now.return_value = datetime(2026, 4, 15, 12, tzinfo=settings.timezone)
+    monkeypatch.setattr(sync_mod, "datetime", clock)
+    client = AsyncMock()
+    client.student_portal_url = MagicMock(return_value=None)
+    for method in (
+        "get_periods",
+        "get_attendance",
+        "get_exams",
+        "get_homework",
+        "get_remarks",
+        "get_completed_lessons",
+    ):
+        getattr(client, method).return_value = []
+
+    regular = make_lesson()
+    substituted = replace(regular, sub_teacher="Substitute T", sub_type=7, annotation=1)
+    duplicates = [substituted, substituted, regular]
+    if reverse_order:
+        duplicates.reverse()
+    client.get_schedule.return_value = duplicates if baseline_with_duplicates else [regular]
+    assert (await sync_student(client, db, STUDENT)).new_substitutions == []
+
+    client.get_schedule.return_value = duplicates
+    changes = (await sync_student(client, db, STUDENT)).new_substitutions
+    assert len(changes) == (0 if baseline_with_duplicates else 1)
+    if changes:
+        assert changes[0].change_type == "updated"
+        assert changes[0].raw == substituted
+    rows = await db.get_lessons_for_student(STUDENT.key)
+    assert len(rows) == 1
+    assert rows[0]["sub_teacher"] == "Substitute T"
+    assert rows[0]["sub_type"] == 7
+    assert rows[0]["annotation"] == 1
+
+    # Reopen SQLite and reorder the response: neither can trigger another event.
+    await db.close()
+    await db.connect()
+    client.get_schedule.return_value = list(reversed(duplicates))
+    assert (await sync_student(client, db, STUDENT)).new_substitutions == []
+
+    # A real edit still notifies once, even alongside the plain duplicate.
+    updated = replace(substituted, sub_teacher="Another substitute")
+    client.get_schedule.return_value = [regular, updated, updated]
+    changes = (await sync_student(client, db, STUDENT)).new_substitutions
+    assert len(changes) == 1
+    assert changes[0].change_type == "updated"
+    assert changes[0].raw == updated
+    assert (await sync_student(client, db, STUDENT)).new_substitutions == []
+
+    # Removing the substitution must clear it rather than retain old DB fields.
+    client.get_schedule.return_value = [regular, regular]
+    assert (await sync_student(client, db, STUDENT)).new_substitutions == []
+    rows = await db.get_lessons_for_student(STUDENT.key)
+    assert rows[0]["sub_teacher"] is None
+    assert rows[0]["sub_type"] is None
+    assert rows[0]["annotation"] == 0
+
+    client.get_schedule.return_value = []
+    changes = (await sync_student(client, db, STUDENT)).new_substitutions
+    assert len(changes) == 1
+    assert changes[0].item_type == "cancellation"
+    assert (await sync_student(client, db, STUDENT)).new_substitutions == []
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"sub_teacher": "Substitute T"},
+        {"sub_room": "20"},
+        {"remarks": "Changed lesson"},
+        {"is_extra": True},
+        {"annotation": 1},
+    ],
+)
+def test_normalize_schedule_preserves_changed_entry(changes) -> None:
+    regular = make_lesson()
+    changed = replace(regular, **changes)
+    other = replace(regular, subject="Another subject")
+    for entries in permutations([regular, changed, other]):
+        normalized = sync_mod._normalize_schedule(list(entries))
+        assert len(normalized) == 2
+        assert changed in normalized
+        assert other in normalized
+
+
+def test_normalize_schedule_conflicting_variants_ignore_response_order() -> None:
+    regular = make_lesson()
+    first = replace(regular, sub_teacher="Teacher A", annotation=1)
+    second = replace(regular, sub_teacher="Teacher B", sub_room="20", annotation=1)
+    expected = sync_mod._normalize_schedule([regular, first, second])
+    assert len(expected) == 1
+    assert expected[0] in (first, second)
+    for entries in permutations([regular, first, second]):
+        assert sync_mod._normalize_schedule(list(entries)) == expected
+
+
+@pytest.mark.parametrize("removed", [(0,), (2,), (0, 1, 2)])
+async def test_sync_cancels_missing_window_boundaries(db, monkeypatch, removed):
+    now = datetime(2026, 10, 3, 12, tzinfo=settings.timezone)
+    clock = MagicMock(wraps=datetime)
+    clock.now.return_value = now
+    monkeypatch.setattr(sync_mod, "datetime", clock)
+    client = AsyncMock()
+    client.student_portal_url = MagicMock(return_value=None)
+    for method in (
+        "get_periods",
+        "get_attendance",
+        "get_exams",
+        "get_homework",
+        "get_remarks",
+        "get_completed_lessons",
+    ):
+        getattr(client, method).return_value = []
+
+    def lesson(days):
+        date = (now + timedelta(days=days)).strftime("%Y-%m-%d")
+        return replace(
+            make_lesson(),
+            date=date,
+            time_from=f"{date}T08:00:00+02:00",
+            time_to=f"{date}T08:45:00+02:00",
+        )
+
+    fetched = [lesson(days) for days in (-7, 0, 14)]
+    client.get_schedule.return_value = fetched
+    await sync_student(client, db, STUDENT)
+    outside = [lesson(-8), lesson(15)]
+    for item in outside:
+        await db.upsert_lesson(STUDENT.key, item)
+    await db.commit()
+
+    client.get_schedule.return_value = [item for i, item in enumerate(fetched) if i not in removed]
+    result = await sync_student(client, db, STUDENT)
+    assert len(result.new_substitutions) == len(removed)
+    assert all(change.item_type == "cancellation" for change in result.new_substitutions)
+    rows = await db.get_lessons_for_student(STUDENT.key)
+    assert {item.date for item in outside}.issubset({row["date"] for row in rows})
+    assert (await sync_student(client, db, STUDENT)).new_substitutions == []

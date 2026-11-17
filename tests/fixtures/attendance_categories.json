@@ -1,0 +1,55 @@
+{
+  "source": "live-portal-legend-and-client-enum",
+  "observed_date": "2026-10-12",
+  "categories": [
+    {
+      "code": 1,
+      "label": "Obecność",
+      "symbol": "O",
+      "css_class": "obecnosc",
+      "upstream_name": "Obecnosc"
+    },
+    {
+      "code": 2,
+      "label": "Nieobecność",
+      "symbol": "N",
+      "css_class": "nieobecnosc",
+      "upstream_name": "Nieobecnosc"
+    },
+    {
+      "code": 3,
+      "label": "Nieobecność usprawiedliwiona",
+      "symbol": "NU",
+      "css_class": "nieobecnoscUsprawiedliwiona",
+      "upstream_name": "NieobecnoscUsprawiedliwiona"
+    },
+    {
+      "code": 4,
+      "label": "Spóźnienie",
+      "symbol": "S",
+      "css_class": "spoznienie",
+      "upstream_name": "Spoznienie"
+    },
+    {
+      "code": 5,
+      "label": "Spóźnienie usprawiedliwione",
+      "symbol": "SU",
+      "css_class": "spoznienieUsprawiedliwione",
+      "upstream_name": "SpoznienieUsprawiedliwione"
+    },
+    {
+      "code": 6,
+      "label": "Nieobecność z przyczyn szkolnych",
+      "symbol": "NS",
+      "css_class": "nieobecnyZPrzyczynSzkolnych",
+      "upstream_name": "NieobecnyZPrzyczynSzkolnych"
+    },
+    {
+      "code": 7,
+      "label": "Zwolnienie",
+      "symbol": "Z",
+      "css_class": "zwolniony",
+      "upstream_name": "Zwolniony"
+    }
+  ]
+}

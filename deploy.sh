@@ -1,6 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
+export TZ="${TZ:-${QUIET_HOURS_TZ:-Europe/Warsaw}}"
+
 # LXC 103 is not a tailnet node, so it is reached through the PVE host rather
 # than addressed directly. The old tools.dwelf-forel.ts.net default did not
 # resolve; only pve and homepage are tailnet nodes.

@@ -2,6 +2,10 @@
 
 Reverse-engineered from the `uczen.eduvulcan.pl` SPA (March 2026).
 
+The [machine-readable OpenAPI contract and on-demand gathering/checking jobs](eduvulcan/README.md)
+record current structural evidence and verification gaps. This document remains
+the historical explanatory reference; its examples alone do not prove live compatibility.
+
 ## Authentication
 
 The web API uses ASP.NET session cookies. No JWTs involved - the auth flow is WS-Federation (SAML XML tokens) between three domains:
@@ -17,6 +21,12 @@ Key cookies for API access:
 
 The `tenant` is the school district identifier extracted from the dashboard URL (e.g. `exampledistrict`).
 
+Exported cookies are filtered by host-only/domain scope, path boundaries, expiry
+and Secure metadata. Applicable same-name cookies retain browser path order.
+Authentication verifies HTTP `/api/Context` access before replacing the session;
+a successful student-page navigation alone does not prove the HTTP worker can
+use the exported state. API requests refuse redirects with manual cookie headers.
+
 **Important:** the iris library's `register_by_jwt` endpoint expects JWTs, but eduVulcan no longer provides them through the web login flow. This project uses saved browser cookies instead.
 
 ## Base URL
@@ -30,6 +40,23 @@ https://uczen.eduvulcan.pl/{tenant}/api/
 ### GET /api/Context
 
 Returns all students linked to the logged-in parent account.
+
+On 2026-10-11 a deployment reported HTTP 400 during session validation, persisting
+after manual authentication while browser school data loaded normally. The exact
+server rejection reason is unverified. A local regression reproduced a client
+cookie-selection defect: an unrelated tenant/path's same-name cookie overwrote
+the applicable cookie. Cookie scoping and authentication finalization are now
+tested locally; resolution of this live deployment has not yet been verified.
+400 remains a validation error, with safe response-kind, redirect-count and
+cookie-size diagnostics; it is not automatically treated as session expiry.
+
+A deployment log on 2026-10-04 showed this endpoint returning HTTP 409 for a
+saved session. The response body and the server's exact conflict semantics were
+not captured. The application treats this Context conflict as eligible for session
+recovery, first through persistent Chromium, with the existing bounded mid-sync
+retry. This policy applies to student Context only; it does not assert that all
+409 responses mean authentication expiry. Successful live recovery from this
+specific conflict has not yet been verified.
 
 ```json
 {
@@ -126,7 +153,40 @@ Returns attendance records for a date range. Dates are ISO 8601 with timezone of
 }
 ```
 
-`kategoriaFrekwencji` values (observed): 1 = present, 2 = absent. Other values (late, excused) need further observation.
+The response also contains `dziennikiZajecInnych` (other activities) and
+`dziennikiSwietlicy` (childcare). Synchronization reads all three collections.
+Classroom identity remains `(date, lesson_number)`; unnumbered activities also
+use source and the `(time_from, time_to, subject)` tuple. Separate source identities
+prevent overwrites between collections. `last_sync:<student>:attendance_full`
+baselines the additional collections silently on upgrades, preserving classroom
+change detection. The October 11, 2026 live audit returned 101 classroom records
+and 2 other-activity records; the previous parser dropped the latter.
+
+`kategoriaFrekwencji` persists as a numeric upstream ID. A live check on
+October 12, 2026 matched the `/frekwencja` legend (labels, symbols and CSS classes)
+with the numeric enum in the portal's JavaScript. These are the verified mappings:
+
+| Code | Description | Legend symbol |
+| --- | --- | --- |
+| 1 | Obecność | O |
+| 2 | Nieobecność | N |
+| 3 | Nieobecność usprawiedliwiona | NU |
+| 4 | Spóźnienie | S |
+| 5 | Spóźnienie usprawiedliwione | SU |
+| 6 | Nieobecność z przyczyn szkolnych | NS |
+| 7 | Zwolnienie | Z |
+
+The live response included code 6 and its rendered icon used the
+`nieobecnyZPrzyczynSzkolnych` class. The earlier application mapping incorrectly
+swapped 3/4, labeled 6 as exemption and omitted 7. The shared presentation formatter
+now follows the verified enum, with a Polish description followed by `(code)`.
+MQTT also corrects `category` assignment to `3=excused`, `4=late`; its generic
+`category_N` values for other codes remain compatible. Unmapped IDs remain explicit
+without guessed meanings. Original SQLite numbers are unchanged.
+`tests/fixtures/attendance_categories.json` retains only public labels, symbols,
+CSS classes and enum names; no student/profile/attendance/session data.
+The legend's UW/UZ/UO symbols describe excuse-request approval states, separate
+from these seven attendance categories.
 
 ### GET /api/FrekwencjaStatystyki?key={key}&idPrzedmiot={id}
 
@@ -138,7 +198,9 @@ Excuse requests for the given date range.
 
 ## Dashboard summaries (Tablica endpoints)
 
-These are lightweight endpoints used by the dashboard. Good for polling since they return minimal data.
+These lightweight endpoints provide dashboard summaries and can omit historical
+or otherwise hidden records. Use module endpoints as the synchronization source;
+dashboard responses do not establish completeness or cancellation.
 
 ### GET /api/OcenyTablica?key={key}
 
@@ -196,6 +258,20 @@ Upcoming homework.
 
 Homework detail. Returns description, teacher, attachments, and student response status.
 
+Synchronization enriches `Homework` before detecting new-ID changes using `opis`,
+`nauczycielImieNazwisko`, `linki`, `odpowiedzWymagana` and `terminOdpowiedzi`.
+Email and MQTT notifications include these available details. `linki` is retained
+as raw JSON; populated item shapes are not confirmed by the recorded empty array.
+The database automatically adds these fields and a successful-detail timestamp;
+all returned tasks refresh their details on every sync, silently for known IDs. Empty
+descriptions count as fetched; successful responses replace cleared/null fields,
+while failed reads retain stored details and retry on the next sync. The entire
+detail response is
+stored as `details` JSON and exposed through MQTT and the local homework API.
+Notifications also include available attachment labels/links, response text and
+teacher comments. Populated attachment item shapes and numeric status meanings
+remain unverified; no status labels are inferred.
+
 ```json
 {
   "typ": 4,
@@ -221,9 +297,35 @@ Homework detail. Returns description, teacher, attachments, and student response
 }
 ```
 
-### GET /api/SprawdzianyZadaniaDomowe?key={key}
+### GET /api/SprawdzianyZadaniaDomowe?key={key}&dataOd={from}&dataDo={to}
 
 Calendar view combining both exams and homework. Used by the "Sprawdziany i zadania domowe" page.
+
+Homework synchronization uses this endpoint with configurable full local-day
+lookback/lookahead (`SYNC_HOMEWORK_DAYS=365`, `SYNC_HOMEWORK_FUTURE_DAYS=365`),
+serialized as UTC. A live session check confirmed a homework entry dated October
+9, 2026 here while `/api/ZadaniaDomoweTablica` returned an empty list. The observed
+homework list item shape is:
+
+```json
+{"typ": 4, "przedmiotNazwa": "Example subject", "data": "2026-10-09T00:00:00+02:00", "hasAttachment": false, "id": 1}
+```
+
+This example uses a synthetic ID/subject. `typ=4` identifies homework; all other
+numeric type codes are retained as exams without guessing additional enum meanings.
+Exam synchronization uses this same calendar with `SYNC_EXAM_DAYS=365` and
+`SYNC_EXAM_FUTURE_DAYS=365`. Exam descriptions and teachers are fetched before
+creating new change events, including a teacher paired with an empty description.
+Full detail JSON persists in `exams.details` and is exposed through HTTP/MQTT.
+Known exams refresh details silently. `last_sync:<student>:exams_calendar`
+initializes expanded history silently on upgrades; subsequent unseen IDs notify.
+Missing exams are retired only within the successfully fetched date window,
+including successful empty lists; rolled-out history remains stored.
+Invalid/malformed calendar items fail the section instead of being interpreted as an empty list. The initial
+calendar-source read baselines expanded history silently, independently of the
+existing dashboard-source marker; later unknown IDs notify. Missing tasks are
+soft-deleted only within the successfully fetched window. The dashboard overview
+still uses the original upcoming-only endpoint.
 
 ### GET /api/WiadomosciNieodczytane
 
@@ -251,7 +353,26 @@ Homeroom teachers.
 
 ### GET /api/Uwagi?key={key}
 
-Student notes/remarks. Returns `[]` when none.
+Student praise and behavior notes. Request needs the authenticated student session
+and URL-encoded student `key`; no date-range or pagination parameters were observed.
+Returns the available list, or `[]` when none. The recorded schema includes:
+
+```json
+[{"id": 1, "data": "2000-01-03T08:00:00+01:00", "kategoria": "SYNTHETIC",
+  "typ": 1, "autor": "SYNTHETIC", "tresc": "SYNTHETIC",
+  "rodzaj": 1, "liczbaPunktow": null}]
+```
+
+`VulcanClient.get_remarks()` returns `Remark` models. Numeric `typ` and `rodzaj`
+are retained verbatim: their enum meanings have not been confirmed. Both praise
+and notes share this endpoint and the `/App/{encoded student key}/pochwalyUwagi`
+view. Content is returned in the list; no detail request is needed.
+
+Synchronization persists rows by `(student_key, id)`, tracks a separate category
+baseline, emits new-ID events only and soft-deletes missing entries. See
+`docs/email.md` for individual notification behavior. Implementation tests use the
+recorded sanitized contract; live fetching/link navigation was not verified during
+this implementation.
 
 ## Other endpoints
 
@@ -297,6 +418,39 @@ Response: list of lesson dicts with keys:
   - `sala` — replacement room (may be empty string)
   - `dzien`, `nrLekcji`, `godzinaOd`, `godzinaDo`, `grupa`, `zajecia`, `informacjeNieobecnosc` — nullable overrides for reschedules/absences
 - `zmianyUwagi` — list of free-text remarks about the change
+
+The October 24, 2026 live check found four pairs sharing `data`, `godzinaOd`
+and `przedmiot`, each with a substituted entry followed by a plain entry. Their
+`podzial` values were empty string and null (both normalize to no group). Do not
+use response order to overwrite substitution state. Synchronization selects one
+complete entry per persisted schedule key before both diffing and saving, with
+substituted entries taking precedence and stable resolution of other ties.
+
+### GET /api/RealizacjaZajec13?key={key}&dataOd={from}&dataDo={to}&status={status}
+
+Lesson realization, used by the web `/realizacjaZajec` page. Both tabs use this
+endpoint: `status=2` selects **Zaplanowane**, and `status=1` selects **Zrealizowane**.
+This is a separate entity from the lesson schedule returned by `PlanZajec`.
+
+The observed response is an array of records with `id`, `data`, `nrLekcji`,
+`przedmiot`, `nauczyciel`, `blokTematyczny` and `tematOpis` (topic/description).
+Additional fields are `online` (Zajęcia online), `kolekcjePoLekcji` and
+`existsKolekcjePoLekcji` (Kolekcje po lekcji), and `zasoby` (Zasoby). Online links
+and collections were empty and resources null in the sample; populated shapes
+remain unverified. See `docs/eduvulcan/openapi.yaml` for the captured schema.
+
+`VulcanClient.get_completed_lessons()` implements this recorded contract with
+`status=1` only. It encodes the student key and date parameters, validates the
+entire response before persistence and collapses identical duplicate IDs;
+conflicting duplicate IDs fail the section. `CompletedLesson` retains the original
+date, lesson number, subject, teacher, topic, thematic block, online link, collection
+list, collection flag and resources. Unverified populated collections/resources
+are preserved as JSON, without assuming an undocumented nested schema. Each item
+links to the authenticated tenant's `/App/{encoded student key}/realizacjaZajec`.
+Synchronization requests full local days from `SYNC_COMPLETED_LESSONS_DAYS` days
+ago through today (default 90), converted to UTC instants with DST handling.
+This implementation was tested against recorded/synthetic responses; live API
+behavior was not verified during implementation.
 
 ### GET /api/KomunikatStartowy
 
@@ -422,6 +576,13 @@ Messages live on `wiadomosci.eduvulcan.pl/{tenant}/api/`, not on the main `uczen
 
 Returns mailboxes for all students. The `globalKey` matches `globalKeySkrzynka` from the Context endpoint.
 
+The client fetches this list for a non-empty inbox and resolves each message's
+`skrzynka` label against `nazwa`. Only labels with a single distinct `globalKey`
+are mapped. `Message.mailbox_key` carries that key in memory for student-specific
+email headings, avoiding assumptions about name order or school display names.
+Mailbox lookup errors other than session expiry retain message acquisition;
+session expiry requests the usual authentication recovery.
+
 ```json
 [
   {"globalKey": "aaaaaaaa-...", "nazwa": "Parent Name - R - Child Name - (School)", "typUzytkownika": 2},
@@ -492,17 +653,33 @@ Email signatures per mailbox.
 
 ## Polling strategy
 
-For change detection, prefer the `*Tablica` (dashboard) endpoints - they're lightweight and designed for the dashboard to poll. The full endpoints (e.g. `/api/Oceny`, `/api/Frekwencja`) should be used sparingly to get detail when a change is detected.
+Use each module's data source as the synchronization baseline. `*Tablica`
+responses are presentation summaries, not authoritative inventories: a record may
+vanish from the dashboard while remaining available in its module. Fetching a
+module only after the dashboard reports a change can therefore miss data.
 
-Recommended approach:
-1. Fetch `/api/Context` once per session to get student keys
-2. For each student, poll `OcenyTablica`, `FrekwencjaTablica`, `SprawdzianyTablica`, `ZadaniaDomoweTablica`, `OgloszeniaTablica` on interval
-3. When a dashboard endpoint shows new data, optionally fetch the full endpoint for details
-4. Hash responses for deduplication (same approach as the original differ)
+Current synchronization strategy:
+
+1. Discover active profiles with `/api/Context`.
+2. Fetch grades from `/api/Oceny` for every returned classification period.
+3. Fetch `/api/Frekwencja` for the configured lookback and retain all three collections.
+4. Fetch exams and homework from `/api/SprawdzianyZadaniaDomowe` with explicit,
+   configurable date windows; enrich models using their detail endpoints before diffing.
+5. Refresh details of all returned exams and homework on every sync. Preserve
+   previously stored details on failures; persist valid empty/null values on success.
+   Known-ID edits remain silent under the current notification policy.
+6. Fetch schedule, remarks and completed lessons from their module endpoints.
+7. Compare with persisted SQLite state using stable category identities. Only
+   absence within a successfully fetched interval can retire calendar records.
+
+Date windows deliberately bound coverage; synchronization does not promise
+calendar history outside the requested window. Messages still read the latest 50 received messages per
+sync; frequent polling is assumed and full pagination remains unimplemented.
+Dashboard methods remain available for overview callers but do not gate module sync.
 
 ## Open questions
 
-- Exact mapping of `kategoriaFrekwencji` values (only observed 1=present, 2=absent so far)
+- Attendance codes outside the verified legend (1–7): meaning and notification handling require separate review.
 - `rodzaj` values in SprawdzianyTablica (1=test? 2=quiz?)
 - Session cookie expiry duration (observed to survive at least a few minutes; longer-term testing needed)
 - Pagination: does `idLastWiadomosc` work for fetching older messages beyond the first page?

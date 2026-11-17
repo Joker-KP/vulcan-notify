@@ -216,6 +216,28 @@ async def test_upsert_homework(db: Database) -> None:
     assert count == 1
 
 
+async def test_homework_soft_deletion_is_window_scoped_and_accepts_empty_results(db):
+    await db.upsert_student(_student("A"))
+    await db.upsert_student(_student("B"))
+    for task in (
+        Homework(1, "2026-10-08T21:59:59Z", "Before"),
+        Homework(2, "2026-10-08T22:00:00Z", "Start"),
+        Homework(3, "2026-10-09T21:59:59.999Z", "End"),
+        Homework(4, "2026-10-09T22:00:00Z", "After"),
+    ):
+        await db.upsert_homework("A", task)
+    await db.upsert_homework("B", Homework(5, "2026-10-09", "Other student"))
+    bounds = ("2026-10-08T22:00:00Z", "2026-10-09T21:59:59.999Z")
+    assert await db.mark_missing_homework_in_window("A", {3}, *bounds) == 1
+    assert {row["id"] for row in await db.get_homework_for_student("A")} == {1, 3, 4}
+    assert await db.mark_missing_homework_in_window("A", set(), *bounds) == 1
+    assert {row["id"] for row in await db.get_homework_for_student("A")} == {1, 4}
+    assert len(await db.get_homework_for_student("B")) == 1
+    # A restored known ID remains known to the differ and does not re-notify.
+    await db.upsert_homework("A", Homework(2, "2026-10-09", "Restored"))
+    assert await db.get_homework_ids_for_student("A") == {1, 2, 3, 4}
+
+
 async def test_sync_state(db: Database) -> None:
     assert await db.get_state("last_sync") is None
 
@@ -343,6 +365,74 @@ async def test_migration_adds_active_column(tmp_path) -> None:
     await db.close()
 
 
+async def test_homework_detail_migration_preserves_history_and_calendar_uid(tmp_path) -> None:
+    import aiosqlite
+
+    from vulcan_notify.db import SCHEMA
+
+    old_schema = SCHEMA.replace(
+        "    links TEXT,\n    response_required INTEGER,\n"
+        "    response_deadline TEXT,\n    detail_fetched_at TIMESTAMP,\n    details TEXT,\n",
+        "",
+    )
+    path = tmp_path / "old-homework.db"
+    async with aiosqlite.connect(path) as conn:
+        await conn.executescript(old_schema)
+        await conn.execute(
+            "INSERT INTO students (key, name, class_name, school, diary_id) "
+            "VALUES ('OLD', 'Test Student', '3A', 'Test School', 1)"
+        )
+        await conn.execute(
+            "INSERT INTO homework (id, student_key, date, subject, content, teacher, "
+            "deleted_at, calendar_uid) VALUES "
+            "(1, 'OLD', '2026-10-01', 'Math', 'Stored description', 'Test Teacher', "
+            "'2026-10-02', 'calendar-uid')"
+        )
+        await conn.commit()
+    database = Database(path)
+    await database.connect()
+    cursor = await database.db.execute(
+        "SELECT content, teacher, deleted_at, calendar_uid, links, response_required, "
+        "response_deadline, detail_fetched_at FROM homework WHERE id = 1"
+    )
+    assert await cursor.fetchone() == (
+        "Stored description",
+        "Test Teacher",
+        "2026-10-02",
+        "calendar-uid",
+        None,
+        None,
+        None,
+        None,
+    )
+    # Reopening is idempotent. Old records are eligible for silent detail backfill.
+    await database.close()
+    await database.connect()
+    assert await database.get_homework_missing_detail("OLD") == {1}
+    await database.upsert_homework(
+        "OLD",
+        Homework(
+            1,
+            "2026-10-01",
+            "Math",
+            content="",
+            links=[],
+            response_required=False,
+            details={"opis": ""},
+        ),
+        detail_fetched=True,
+    )
+    row = (await database.get_homework_for_student("OLD"))[0]
+    assert row["content"] == ""
+    assert row["teacher"] is None
+    assert row["links"] == []
+    assert row["response_required"] is False
+    assert await database.get_homework_missing_detail("OLD") == set()
+    cursor = await database.db.execute("SELECT calendar_uid FROM homework WHERE id = 1")
+    assert (await cursor.fetchone())[0] == "calendar-uid"
+    await database.close()
+
+
 async def test_migration_drops_legacy_tables(tmp_path) -> None:
     """Verify old schema tables are dropped during migration."""
     import aiosqlite
@@ -369,3 +459,103 @@ async def test_migration_drops_legacy_tables(tmp_path) -> None:
     assert await cursor.fetchone() is not None
 
     await db.close()
+
+
+async def test_attendance_migration_preserves_history_and_distinguishes_activities(tmp_path):
+    import sqlite3
+    from dataclasses import replace
+
+    from vulcan_notify.db import SCHEMA
+
+    old_schema = SCHEMA.replace(
+        "    source TEXT NOT NULL DEFAULT 'oddzialy',\n    entry_key TEXT NOT NULL DEFAULT '',\n",
+        "",
+    ).replace(
+        "PRIMARY KEY (student_key, date, lesson_number, source, entry_key)",
+        "PRIMARY KEY (student_key, date, lesson_number)",
+    )
+    path = tmp_path / "old-attendance.db"
+    with sqlite3.connect(path) as conn:
+        conn.executescript(old_schema)
+        conn.execute(
+            "INSERT INTO attendance (student_key, date, lesson_number, category, "
+            "subject, first_seen) VALUES ('A', '2026-10-09', 0, 2, 'Math', '2026-10-09 "
+            "08:00:00')"
+        )
+    database = Database(path)
+    await database.connect()
+    try:
+        original = (await database.get_attendance_for_student("A"))[0]
+        assert original["source"] == "oddzialy" and original["entry_key"] == ""
+        cursor = await database.db.execute("SELECT first_seen FROM attendance")
+        assert (await cursor.fetchone())[0] == "2026-10-09 08:00:00"
+        extra = AttendanceEntry(
+            0, 2, "2026-10-09", "Math", "Teacher", "08:00", "09:00", "dziennikiZajecInnych"
+        )
+        for entry in (
+            extra,
+            replace(extra, time_from="10:00"),
+            replace(extra, source="dziennikiSwietlicy"),
+        ):
+            await database.upsert_attendance("A", entry)
+            await database.upsert_attendance("A", entry)
+        await database.commit()
+        await database.close()
+        await database.connect()
+        assert len(await database.get_attendance_for_student("A")) == 4
+        assert await database.get_attendance_for_student("B") == []
+    finally:
+        await database.close()
+
+
+async def test_exam_soft_deletion_uses_only_successful_window_including_empty_list(db):
+    await db.upsert_student(_student("A"))
+    await db.upsert_student(_student("B"))
+    for exam in (
+        Exam(1, "2026-09-01", "Math", 1),
+        Exam(2, "2026-10-09", "Math", 2),
+        Exam(3, "2026-12-01", "Math", 1),
+    ):
+        await db.upsert_exam("A", exam)
+    await db.upsert_exam("B", Exam(4, "2026-10-09", "Math", 1))
+    assert await db.mark_missing_exams_in_window("A", set(), "2026-10-01", "2026-10-31") == 1
+    assert {row["id"] for row in await db.get_exams_for_student("A")} == {1, 3}
+    assert len(await db.get_exams_for_student("B")) == 1
+    assert await db.get_exam_ids_for_student("A") == {1, 2, 3}
+
+
+async def test_exam_detail_migration_preserves_history_and_calendar_uid(tmp_path):
+    import sqlite3
+
+    from vulcan_notify.db import SCHEMA
+
+    path = tmp_path / "old-exams.db"
+    old_schema = SCHEMA.replace("    details TEXT,\n    detail_fetched_at TIMESTAMP,\n", "")
+    with sqlite3.connect(path) as conn:
+        conn.executescript(old_schema)
+        conn.execute(
+            "INSERT INTO exams (id, student_key, date, subject, type, description, "
+            "teacher, calendar_uid, deleted_at) VALUES (1, 'A', '2026-10-09', 'Math', 2, "
+            "'Old detail', 'Teacher', 'uid', '2026-10-10')"
+        )
+    database = Database(path)
+    await database.connect()
+    try:
+        cursor = await database.db.execute(
+            "SELECT description, teacher, calendar_uid, deleted_at, details, "
+            "detail_fetched_at FROM exams"
+        )
+        assert await cursor.fetchone() == ("Old detail", "Teacher", "uid", "2026-10-10", None, None)
+        detail = {"opis": "", "nauczycielImieNazwisko": "Teacher"}
+        await database.upsert_exam(
+            "A", Exam(1, "2026-10-09", "Math", 2, "", "Teacher", detail), detail_fetched=True
+        )
+        await database.commit()
+        await database.close()
+        await database.connect()
+        row = (await database.get_exams_for_student("A"))[0]
+        assert row["description"] == "" and row["teacher"] == "Teacher" and row["details"] == detail
+        cursor = await database.db.execute("SELECT calendar_uid FROM exams")
+        assert (await cursor.fetchone())[0] == "uid"
+    finally:
+        await database.close()

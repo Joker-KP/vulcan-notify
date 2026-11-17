@@ -1,0 +1,34 @@
+{
+  "endpoint": "/api/Przedmioty",
+  "source": "sanitized-live",
+  "responses": [
+    [
+      {
+        "nazwa": "SYNTHETIC",
+        "id": 1
+      },
+      {
+        "nazwa": "SYNTHETIC",
+        "id": 1
+      },
+      {
+        "nazwa": "SYNTHETIC",
+        "id": 1
+      }
+    ],
+    [
+      {
+        "nazwa": "SYNTHETIC",
+        "id": 1
+      },
+      {
+        "nazwa": "SYNTHETIC",
+        "id": 1
+      },
+      {
+        "nazwa": "SYNTHETIC",
+        "id": 1
+      }
+    ]
+  ]
+}

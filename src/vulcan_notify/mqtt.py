@@ -4,15 +4,25 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import UTC, datetime
+from dataclasses import asdict
+from datetime import datetime
 from importlib.metadata import PackageNotFoundError, version
 from typing import TYPE_CHECKING
 
 import aiomqtt
 
 from vulcan_notify.config import settings
-from vulcan_notify.models import AttendanceEntry, Exam, Grade, Homework, Lesson, Message
-from vulcan_notify.text import strip_html
+from vulcan_notify.models import (
+    AttendanceEntry,
+    CompletedLesson,
+    Exam,
+    Grade,
+    Homework,
+    Lesson,
+    Message,
+    Remark,
+)
+from vulcan_notify.text import attendance_category_label, strip_html
 
 if TYPE_CHECKING:
     from vulcan_notify.db import Database
@@ -29,11 +39,11 @@ except PackageNotFoundError:
 _OFFLINE_PAYLOAD = b'{"state":"offline"}'
 
 # Attendance category names (category 1 = present is never published)
-_ATTENDANCE_CATEGORIES = {2: "absent", 3: "late", 4: "excused"}
+_ATTENDANCE_CATEGORIES = {2: "absent", 3: "excused", 4: "late"}
 
 
 def _now_iso() -> str:
-    return datetime.now(UTC).isoformat()
+    return datetime.now(settings.timezone).isoformat()
 
 
 _TOPIC_SEGMENTS = {
@@ -44,6 +54,8 @@ _TOPIC_SEGMENTS = {
     "substitution": "substitutions",
     "cancellation": "cancellations",
     "addition": "additions",
+    "remark": "remarks",
+    "completed_lesson": "completed_lessons",
 }
 
 
@@ -95,8 +107,12 @@ def build_payload(change: Change) -> dict[str, object]:
         category_name = _ATTENDANCE_CATEGORIES.get(raw.category, f"category_{raw.category}")
         base.update(
             category=category_name,
+            category_label=attendance_category_label(raw.category),
+            category_code=raw.category,
             date=raw.date,
             lesson_number=raw.lesson_number,
+            source=raw.source,
+            entry_key=raw.entry_key,
             subject=raw.subject,
             teacher=raw.teacher,
         )
@@ -109,6 +125,7 @@ def build_payload(change: Change) -> dict[str, object]:
             date=raw.date,
             description=raw.description,
             teacher=raw.teacher,
+            details=raw.details,
         )
 
     elif isinstance(raw, Homework):
@@ -117,6 +134,10 @@ def build_payload(change: Change) -> dict[str, object]:
             date=raw.date,
             content=raw.content,
             teacher=raw.teacher,
+            links=raw.links,
+            response_required=raw.response_required,
+            response_deadline=raw.response_deadline,
+            details=raw.details,
         )
 
     elif isinstance(raw, Lesson):
@@ -132,6 +153,22 @@ def build_payload(change: Change) -> dict[str, object]:
             sub_type=raw.sub_type,
             absence_info=raw.absence_info,
             remarks=raw.remarks,
+        )
+
+    elif isinstance(raw, CompletedLesson):
+        base.update(asdict(raw))
+
+    elif isinstance(raw, Remark):
+        base.update(
+            id=raw.id,
+            date=raw.date,
+            category=raw.category,
+            author=raw.author,
+            content=raw.content,
+            type=raw.type,
+            kind=raw.kind,
+            points=raw.points,
+            url=raw.url,
         )
 
     return base
@@ -223,7 +260,7 @@ async def drain_outbox(db: Database) -> tuple[int, int]:
         ) as client:
             for item in queue:
                 await client.publish(str(item["topic"]), str(item["payload"]))
-                published_ids.append(int(item["id"]))
+                published_ids.append(item["id"])
                 logger.debug("MQTT publish: %s", item["topic"])
 
             pending_after = len(queue) - len(published_ids)
@@ -234,7 +271,7 @@ async def drain_outbox(db: Database) -> tuple[int, int]:
                 retain=True,
             )
     except Exception as exc:
-        failed_ids = [int(i["id"]) for i in queue if int(i["id"]) not in published_ids]
+        failed_ids = [i["id"] for i in queue if i["id"] not in published_ids]
         if failed_ids:
             await db.mark_mqtt_outbox_failure(failed_ids, f"{type(exc).__name__}: {exc}")
         logger.warning(

@@ -1,0 +1,4960 @@
+openapi: 3.1.0
+info:
+  title: Reverse-engineered eduVULCAN web API
+  version: 1.0.0
+  description: Community-observed contract, not an official provider specification.
+    Live evidence is account-specific. Unobserved response shapes remain explicitly
+    unknown.
+servers:
+- url: https://uczen.eduvulcan.pl/{tenant}
+  variables:
+    tenant:
+      default: exampledistrict
+      description: Resolve locally from saved session; never store the actual tenant
+        in this document.
+security:
+- browserSession: []
+paths:
+  /api/Context:
+    get:
+      operationId: Context
+      summary: Context
+      description: Returns all students linked to the logged-in parent account.
+      x-host: student
+      x-probe:
+        enabled: true
+        scope: account
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.739992+00:00'
+        samples: 2
+      parameters: []
+      responses:
+        '200':
+          description: Successful JSON response. Unknown item schemas are not evidence
+            of full coverage.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  uczniowie:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        aktywny:
+                          type: boolean
+                        config:
+                          type: object
+                          properties:
+                            isDostepMobilny:
+                              type: boolean
+                            isDydaktyka:
+                              type: boolean
+                            isJadlospis:
+                              type: boolean
+                            isLekcjeZaplanowane:
+                              type: boolean
+                            isLekcjeZrealizowane:
+                              type: boolean
+                            isNadzorPedagogiczny:
+                              type: boolean
+                            isOffice365:
+                              type: boolean
+                            isOplaty:
+                              type: boolean
+                            isPlatnosci:
+                              type: boolean
+                            isPodreczniki:
+                              type: boolean
+                            isScalanieKont:
+                              type: boolean
+                            isSynchronizacjaEsb:
+                              type: boolean
+                            isZaplac:
+                              type: boolean
+                            isZglaszanieNieobecnosci:
+                              type: boolean
+                            isZmianaZdjecia:
+                              type: boolean
+                            oneDriveClientId:
+                              type: string
+                            payByNetUrlForPayment:
+                              type: string
+                            projectClient: {}
+                          required:
+                          - isDostepMobilny
+                          - isDydaktyka
+                          - isJadlospis
+                          - isLekcjeZaplanowane
+                          - isLekcjeZrealizowane
+                          - isNadzorPedagogiczny
+                          - isOffice365
+                          - isOplaty
+                          - isPlatnosci
+                          - isPodreczniki
+                          - isScalanieKont
+                          - isSynchronizacjaEsb
+                          - isZaplac
+                          - isZglaszanieNieobecnosci
+                          - isZmianaZdjecia
+                          - oneDriveClientId
+                          - payByNetUrlForPayment
+                          - projectClient
+                          additionalProperties: true
+                        dziennikDataDo:
+                          type: string
+                        dziennikDataOd:
+                          type: string
+                        globalKeySkrzynka:
+                          type: string
+                        idDziennik:
+                          type: number
+                        idJednostkaSkladowa:
+                          type: number
+                        idOddzial:
+                          type: number
+                        is13:
+                          type: boolean
+                        isArtystyczna:
+                          type: boolean
+                        isArtystyczna13:
+                          type: boolean
+                        isDorosli:
+                          type: boolean
+                        isPolicealna:
+                          type: boolean
+                        isPrzedszkolak:
+                          type: boolean
+                        isSpecjalna:
+                          type: boolean
+                        isUczen:
+                          type: boolean
+                        isWychowanek:
+                          type: boolean
+                        jednostka:
+                          type: string
+                        jednostkaGodzinaDo: {}
+                        jednostkaGodzinaOd: {}
+                        key:
+                          type: string
+                        oddzial:
+                          type: string
+                        opiekunUcznia:
+                          type: boolean
+                        pelnoletniUczen:
+                          type: boolean
+                        posiadaPesel:
+                          type: boolean
+                        rodzajDziennika:
+                          type: number
+                        uczen:
+                          type: string
+                        wymagaAutoryzacji:
+                          type: boolean
+                      required:
+                      - idDziennik
+                      - jednostka
+                      - key
+                      - oddzial
+                      - uczen
+                      additionalProperties: true
+                required:
+                - uczniowie
+                additionalProperties: true
+        '401':
+          description: Authentication required.
+        '403':
+          description: 'Forbidden: permission/module restrictions or authentication
+            require investigation.'
+        '429':
+          description: Rate limited; do not infer a contract change.
+        default:
+          description: Upstream failure; response bodies must not be logged.
+      x-observed-schema:
+        type: object
+        properties:
+          uczniowie:
+            type: array
+            items:
+              type: object
+              properties:
+                aktywny:
+                  type: boolean
+                config:
+                  type: object
+                  properties:
+                    isDostepMobilny:
+                      type: boolean
+                    isDydaktyka:
+                      type: boolean
+                    isJadlospis:
+                      type: boolean
+                    isLekcjeZaplanowane:
+                      type: boolean
+                    isLekcjeZrealizowane:
+                      type: boolean
+                    isNadzorPedagogiczny:
+                      type: boolean
+                    isOffice365:
+                      type: boolean
+                    isOplaty:
+                      type: boolean
+                    isPlatnosci:
+                      type: boolean
+                    isPodreczniki:
+                      type: boolean
+                    isScalanieKont:
+                      type: boolean
+                    isSynchronizacjaEsb:
+                      type: boolean
+                    isZaplac:
+                      type: boolean
+                    isZglaszanieNieobecnosci:
+                      type: boolean
+                    isZmianaZdjecia:
+                      type: boolean
+                    oneDriveClientId:
+                      type: string
+                    payByNetUrlForPayment:
+                      type: string
+                    projectClient:
+                      type: 'null'
+                  required:
+                  - isDostepMobilny
+                  - isDydaktyka
+                  - isJadlospis
+                  - isLekcjeZaplanowane
+                  - isLekcjeZrealizowane
+                  - isNadzorPedagogiczny
+                  - isOffice365
+                  - isOplaty
+                  - isPlatnosci
+                  - isPodreczniki
+                  - isScalanieKont
+                  - isSynchronizacjaEsb
+                  - isZaplac
+                  - isZglaszanieNieobecnosci
+                  - isZmianaZdjecia
+                  - oneDriveClientId
+                  - payByNetUrlForPayment
+                  - projectClient
+                  additionalProperties: false
+                dziennikDataDo:
+                  type: string
+                dziennikDataOd:
+                  type: string
+                globalKeySkrzynka:
+                  type: string
+                idDziennik:
+                  type: number
+                idJednostkaSkladowa:
+                  type: number
+                idOddzial:
+                  type: number
+                is13:
+                  type: boolean
+                isArtystyczna:
+                  type: boolean
+                isArtystyczna13:
+                  type: boolean
+                isDorosli:
+                  type: boolean
+                isPolicealna:
+                  type: boolean
+                isPrzedszkolak:
+                  type: boolean
+                isSpecjalna:
+                  type: boolean
+                isUczen:
+                  type: boolean
+                isWychowanek:
+                  type: boolean
+                jednostka:
+                  type: string
+                jednostkaGodzinaDo:
+                  type: 'null'
+                jednostkaGodzinaOd:
+                  type: 'null'
+                key:
+                  type: string
+                oddzial:
+                  type: string
+                opiekunUcznia:
+                  type: boolean
+                pelnoletniUczen:
+                  type: boolean
+                posiadaPesel:
+                  type: boolean
+                rodzajDziennika:
+                  type: number
+                uczen:
+                  type: string
+                wymagaAutoryzacji:
+                  type: boolean
+              required:
+              - aktywny
+              - config
+              - dziennikDataDo
+              - dziennikDataOd
+              - globalKeySkrzynka
+              - idDziennik
+              - idJednostkaSkladowa
+              - idOddzial
+              - is13
+              - isArtystyczna
+              - isArtystyczna13
+              - isDorosli
+              - isPolicealna
+              - isPrzedszkolak
+              - isSpecjalna
+              - isUczen
+              - isWychowanek
+              - jednostka
+              - jednostkaGodzinaDo
+              - jednostkaGodzinaOd
+              - key
+              - oddzial
+              - opiekunUcznia
+              - pelnoletniUczen
+              - posiadaPesel
+              - rodzajDziennika
+              - uczen
+              - wymagaAutoryzacji
+              additionalProperties: false
+        required:
+        - uczniowie
+        additionalProperties: false
+    x-browser-request:
+      methods:
+      - get
+      query-parameters: []
+    x-discovery-hosts:
+    - student
+  /api/OkresyKlasyfikacyjne:
+    get:
+      operationId: OkresyKlasyfikacyjne
+      summary: OkresyKlasyfikacyjne
+      description: Returns classification periods (semesters). Required before fetching
+        grades.
+      x-host: student
+      x-probe:
+        enabled: true
+        scope: student
+        diary: true
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.776832+00:00'
+        samples: 2
+      parameters:
+      - name: key
+        in: query
+        required: true
+        schema:
+          type: string
+        description: Student key from Context; sensitive.
+      - name: idDziennik
+        in: query
+        required: true
+        schema:
+          type: integer
+        description: Diary ID from Context.
+      responses:
+        '200':
+          description: Successful JSON response. Unknown item schemas are not evidence
+            of full coverage.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    dataDo:
+                      type: string
+                    dataOd:
+                      type: string
+                    id:
+                      type: number
+                    numerOkresu:
+                      type: number
+                  required:
+                  - dataDo
+                  - dataOd
+                  - id
+                  - numerOkresu
+                  additionalProperties: true
+        '401':
+          description: Authentication required.
+        '403':
+          description: 'Forbidden: permission/module restrictions or authentication
+            require investigation.'
+        '429':
+          description: Rate limited; do not infer a contract change.
+        default:
+          description: Upstream failure; response bodies must not be logged.
+      x-observed-schema:
+        type: array
+        items:
+          type: object
+          properties:
+            dataDo:
+              type: string
+            dataOd:
+              type: string
+            id:
+              type: number
+            numerOkresu:
+              type: number
+          required:
+          - dataDo
+          - dataOd
+          - id
+          - numerOkresu
+          additionalProperties: false
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - idDziennik
+      - key
+    x-discovery-hosts:
+    - student
+  /api/Oceny:
+    get:
+      operationId: Oceny
+      summary: Oceny
+      description: Returns all grades for a student in a given period. Grouped by
+        subject.
+      x-host: student
+      x-probe:
+        enabled: true
+        scope: student
+        dependency:
+          path: /api/OkresyKlasyfikacyjne
+          field: id
+          parameter: idOkresKlasyfikacyjny
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.989056+00:00'
+        samples: 3
+      parameters:
+      - name: key
+        in: query
+        required: true
+        schema:
+          type: string
+        description: Student key from Context; sensitive.
+      - name: idOkresKlasyfikacyjny
+        in: query
+        required: true
+        schema:
+          type: integer
+        description: Classification period ID from OkresyKlasyfikacyjne.
+      responses:
+        '200':
+          description: Successful JSON response. Unknown item schemas are not evidence
+            of full coverage.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ocenyPrzedmioty:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        egzaminFormaPraktyczna: {}
+                        egzaminFormaUstna: {}
+                        egzaminOcenaLaczna: {}
+                        egzaminOcenaProponowana: {}
+                        kolumnyOcenyCzastkowe:
+                          anyOf:
+                          - type:
+                            - array
+                            - 'null'
+                            items:
+                              type: object
+                              properties:
+                                idKolumny:
+                                  type: number
+                                kategoriaKolumny:
+                                  type: string
+                                nazwaKolumny:
+                                  type: string
+                                oceny:
+                                  type: array
+                                  items:
+                                    type: object
+                                    properties:
+                                      dataOceny:
+                                        type: string
+                                      idOcenaPoprawiona: {}
+                                      nauczyciel:
+                                        type: string
+                                      waga:
+                                        type: number
+                                      wpis:
+                                        type: string
+                                      zmienionaOdOstatniegoLogowania:
+                                        type: boolean
+                                    additionalProperties: true
+                              additionalProperties: true
+                          - type: array
+                            items: {}
+                          - type: 'null'
+                        nauczyciele:
+                          anyOf:
+                          - type:
+                            - array
+                            - 'null'
+                            items:
+                              type: string
+                          - type: array
+                            items: {}
+                          - type: 'null'
+                        ocenaOkresowa:
+                          anyOf:
+                          - type:
+                            - string
+                            - 'null'
+                          - type: 'null'
+                          - type: string
+                        ocenaOkresowaPunkty: {}
+                        podsumowanieOcen:
+                          anyOf:
+                          - type: 'null'
+                          - type: string
+                        pozycja:
+                          type: number
+                        proponowanaOcenaOkresowa:
+                          anyOf:
+                          - type: 'null'
+                          - type: string
+                        proponowanaOcenaOkresowaPunkty: {}
+                        przedmiotNazwa:
+                          type: string
+                        srednia:
+                          anyOf:
+                          - type: 'null'
+                          - type: number
+                        sredniaWszystkieSemestry:
+                          anyOf:
+                          - type: 'null'
+                          - type: number
+                        sumaPunktow:
+                          anyOf:
+                          - type: 'null'
+                          - type: string
+                        sumaPunktowWszystkieSemestry:
+                          anyOf:
+                          - type: 'null'
+                          - type: string
+                        uwzglednijWageOcen:
+                          type: boolean
+                      required: []
+                      additionalProperties: true
+                  ustawienia:
+                    type: object
+                    properties:
+                      isDorosli:
+                        type: boolean
+                      isOcenaOpisowa:
+                        type: boolean
+                      isOstatniOkresKlasyfikacyjny:
+                        type: boolean
+                      isSredniaAndPunkty:
+                        type: boolean
+                    required:
+                    - isDorosli
+                    - isOcenaOpisowa
+                    - isOstatniOkresKlasyfikacyjny
+                    - isSredniaAndPunkty
+                    additionalProperties: true
+                required:
+                - ocenyPrzedmioty
+                additionalProperties: true
+        '401':
+          description: Authentication required.
+        '403':
+          description: 'Forbidden: permission/module restrictions or authentication
+            require investigation.'
+        '429':
+          description: Rate limited; do not infer a contract change.
+        default:
+          description: Upstream failure; response bodies must not be logged.
+      x-observed-schema:
+        type: object
+        properties:
+          ocenyPrzedmioty:
+            type: array
+            items:
+              type: object
+              properties:
+                egzaminFormaPraktyczna:
+                  type: 'null'
+                egzaminFormaUstna:
+                  type: 'null'
+                egzaminOcenaLaczna:
+                  type: 'null'
+                egzaminOcenaProponowana:
+                  type: 'null'
+                kolumnyOcenyCzastkowe:
+                  anyOf:
+                  - type: array
+                    items: {}
+                  - type: 'null'
+                nauczyciele:
+                  anyOf:
+                  - type: array
+                    items: {}
+                  - type: 'null'
+                ocenaOkresowa:
+                  anyOf:
+                  - type: 'null'
+                  - type: string
+                ocenaOkresowaPunkty:
+                  type: 'null'
+                podsumowanieOcen:
+                  anyOf:
+                  - type: 'null'
+                  - type: string
+                pozycja:
+                  type: number
+                proponowanaOcenaOkresowa:
+                  anyOf:
+                  - type: 'null'
+                  - type: string
+                proponowanaOcenaOkresowaPunkty:
+                  type: 'null'
+                przedmiotNazwa:
+                  type: string
+                srednia:
+                  anyOf:
+                  - type: 'null'
+                  - type: number
+                sredniaWszystkieSemestry:
+                  anyOf:
+                  - type: 'null'
+                  - type: number
+                sumaPunktow:
+                  anyOf:
+                  - type: 'null'
+                  - type: string
+                sumaPunktowWszystkieSemestry:
+                  anyOf:
+                  - type: 'null'
+                  - type: string
+                uwzglednijWageOcen:
+                  type: boolean
+              required:
+              - egzaminFormaPraktyczna
+              - egzaminFormaUstna
+              - egzaminOcenaLaczna
+              - egzaminOcenaProponowana
+              - kolumnyOcenyCzastkowe
+              - nauczyciele
+              - ocenaOkresowa
+              - ocenaOkresowaPunkty
+              - podsumowanieOcen
+              - pozycja
+              - proponowanaOcenaOkresowa
+              - proponowanaOcenaOkresowaPunkty
+              - przedmiotNazwa
+              - srednia
+              - sredniaWszystkieSemestry
+              - sumaPunktow
+              - sumaPunktowWszystkieSemestry
+              - uwzglednijWageOcen
+              additionalProperties: false
+          ustawienia:
+            type: object
+            properties:
+              isDorosli:
+                type: boolean
+              isOcenaOpisowa:
+                type: boolean
+              isOstatniOkresKlasyfikacyjny:
+                type: boolean
+              isSredniaAndPunkty:
+                type: boolean
+            required:
+            - isDorosli
+            - isOcenaOpisowa
+            - isOstatniOkresKlasyfikacyjny
+            - isSredniaAndPunkty
+            additionalProperties: false
+        required:
+        - ocenyPrzedmioty
+        - ustawienia
+        additionalProperties: false
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - idOkresKlasyfikacyjny
+      - key
+    x-discovery-hosts:
+    - student
+  /api/Frekwencja:
+    get:
+      operationId: Frekwencja
+      summary: Frekwencja
+      description: Returns attendance records for a date range. Dates are ISO 8601
+        with timezone offset.
+      x-host: student
+      x-probe:
+        enabled: true
+        scope: student
+        dates: true
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.765216+00:00'
+        samples: 3
+      parameters:
+      - name: key
+        in: query
+        required: true
+        schema:
+          type: string
+        description: Student key from Context; sensitive.
+      - name: dataOd
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+        description: Start of local day in Europe/Warsaw, serialized as UTC.
+      - name: dataDo
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+        description: End of probe range, serialized as UTC.
+      responses:
+        '200':
+          description: Successful JSON response. Unknown item schemas are not evidence
+            of full coverage.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  dziennikiSwietlicy:
+                    type: array
+                    items: {}
+                  dziennikiZajecInnych:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        data:
+                          type: string
+                        dataDo:
+                          type: string
+                        dataOd:
+                          type: string
+                        godzinaDo:
+                          type: string
+                        godzinaOd:
+                          type: string
+                        kategoriaFrekwencji:
+                          type: number
+                        nauczyciel:
+                          type: string
+                        opisZajec:
+                          type: string
+                      required:
+                      - data
+                      - dataDo
+                      - dataOd
+                      - godzinaDo
+                      - godzinaOd
+                      - kategoriaFrekwencji
+                      - nauczyciel
+                      - opisZajec
+                      additionalProperties: true
+                  oddzialy:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        data:
+                          type: string
+                        dataDo:
+                          type: string
+                        dataOd:
+                          type: string
+                        godzinaDo:
+                          type: string
+                        godzinaOd:
+                          type: string
+                        idLekcjaOddzial:
+                          type: number
+                        idPoraLekcji:
+                          type: number
+                        kategoriaFrekwencji:
+                          type: number
+                        nauczyciel:
+                          type: string
+                        numerLekcji:
+                          type: number
+                        opisZajec:
+                          type: string
+                      required: []
+                      additionalProperties: true
+                required:
+                - oddzialy
+                additionalProperties: true
+        '401':
+          description: Authentication required.
+        '403':
+          description: 'Forbidden: permission/module restrictions or authentication
+            require investigation.'
+        '429':
+          description: Rate limited; do not infer a contract change.
+        default:
+          description: Upstream failure; response bodies must not be logged.
+      x-observed-schema:
+        type: object
+        properties:
+          dziennikiSwietlicy:
+            type: array
+            items: {}
+          dziennikiZajecInnych:
+            type: array
+            items:
+              type: object
+              properties:
+                data:
+                  type: string
+                dataDo:
+                  type: string
+                dataOd:
+                  type: string
+                godzinaDo:
+                  type: string
+                godzinaOd:
+                  type: string
+                kategoriaFrekwencji:
+                  type: number
+                nauczyciel:
+                  type: string
+                opisZajec:
+                  type: string
+              required:
+              - data
+              - dataDo
+              - dataOd
+              - godzinaDo
+              - godzinaOd
+              - kategoriaFrekwencji
+              - nauczyciel
+              - opisZajec
+              additionalProperties: false
+          oddzialy:
+            type: array
+            items:
+              type: object
+              properties:
+                data:
+                  type: string
+                dataDo:
+                  type: string
+                dataOd:
+                  type: string
+                godzinaDo:
+                  type: string
+                godzinaOd:
+                  type: string
+                idLekcjaOddzial:
+                  type: number
+                idPoraLekcji:
+                  type: number
+                kategoriaFrekwencji:
+                  type: number
+                nauczyciel:
+                  type: string
+                numerLekcji:
+                  type: number
+                opisZajec:
+                  type: string
+              required:
+              - data
+              - dataDo
+              - dataOd
+              - godzinaDo
+              - godzinaOd
+              - idLekcjaOddzial
+              - idPoraLekcji
+              - kategoriaFrekwencji
+              - nauczyciel
+              - numerLekcji
+              - opisZajec
+              additionalProperties: false
+        required:
+        - dziennikiSwietlicy
+        - dziennikiZajecInnych
+        - oddzialy
+        additionalProperties: false
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - dataDo
+      - dataOd
+      - key
+    x-discovery-hosts:
+    - student
+  /api/FrekwencjaStatystyki:
+    get:
+      operationId: FrekwencjaStatystyki
+      summary: FrekwencjaStatystyki
+      description: Attendance statistics. Use `idPrzedmiot=-1` for all subjects.
+      x-host: student
+      x-probe:
+        enabled: true
+        scope: student
+        constants:
+          idPrzedmiot: -1
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.768730+00:00'
+        samples: 2
+      parameters:
+      - name: key
+        in: query
+        required: true
+        schema:
+          type: string
+        description: Student key from Context; sensitive.
+      - name: idPrzedmiot
+        in: query
+        required: true
+        schema:
+          type: integer
+        description: Resolved by the on-demand probe; see x-probe.
+      responses:
+        '200':
+          description: Successful JSON response. Unknown item schemas are not evidence
+            of full coverage.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  podsumowanie:
+                    type: number
+                  statystyki:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        kategoriaFrekwencji:
+                          type: number
+                        miesiace:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              miesiac:
+                                type: number
+                              wartosc:
+                                type: number
+                            required:
+                            - miesiac
+                            - wartosc
+                            additionalProperties: true
+                        okresy:
+                          type: array
+                          items:
+                            type: number
+                        razem:
+                          type: number
+                      required:
+                      - kategoriaFrekwencji
+                      - miesiace
+                      - okresy
+                      - razem
+                      additionalProperties: true
+                required:
+                - podsumowanie
+                - statystyki
+                additionalProperties: true
+        '401':
+          description: Authentication required.
+        '403':
+          description: 'Forbidden: permission/module restrictions or authentication
+            require investigation.'
+        '429':
+          description: Rate limited; do not infer a contract change.
+        default:
+          description: Upstream failure; response bodies must not be logged.
+      x-observed-schema:
+        type: object
+        properties:
+          podsumowanie:
+            type: number
+          statystyki:
+            type: array
+            items:
+              type: object
+              properties:
+                kategoriaFrekwencji:
+                  type: number
+                miesiace:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      miesiac:
+                        type: number
+                      wartosc:
+                        type: number
+                    required:
+                    - miesiac
+                    - wartosc
+                    additionalProperties: false
+                okresy:
+                  type: array
+                  items:
+                    type: number
+                razem:
+                  type: number
+              required:
+              - kategoriaFrekwencji
+              - miesiace
+              - okresy
+              - razem
+              additionalProperties: false
+        required:
+        - podsumowanie
+        - statystyki
+        additionalProperties: false
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - idPrzedmiot
+      - key
+    x-discovery-hosts:
+    - student
+  /api/Usprawiedliwienia:
+    get:
+      operationId: Usprawiedliwienia
+      summary: Usprawiedliwienia
+      description: Excuse requests for the given date range.
+      x-host: student
+      x-probe:
+        enabled: true
+        scope: student
+        dates: true
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.969418+00:00'
+        samples: 3
+      parameters:
+      - name: key
+        in: query
+        required: true
+        schema:
+          type: string
+        description: Student key from Context; sensitive.
+      - name: dataOd
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+        description: Start of local day in Europe/Warsaw, serialized as UTC.
+      - name: dataDo
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+        description: End of probe range, serialized as UTC.
+      responses:
+        '200':
+          description: Successful JSON response. Unknown item schemas are not evidence
+            of full coverage.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  usprawiedliwienia:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        dzien:
+                          type: string
+                        idPoraLekcji: {}
+                        idUsprawiedliwienieDzien:
+                          type: number
+                        idUsprawiedliwienieDzienPoraLekcji:
+                          type: number
+                        koniecLekcji: {}
+                        numerLekcji: {}
+                        poczatekLekcji: {}
+                        status:
+                          type: number
+                      required:
+                      - dzien
+                      - idPoraLekcji
+                      - idUsprawiedliwienieDzien
+                      - idUsprawiedliwienieDzienPoraLekcji
+                      - koniecLekcji
+                      - numerLekcji
+                      - poczatekLekcji
+                      - status
+                      additionalProperties: true
+                  usprawiedliwieniaAktywne:
+                    type: boolean
+                  usprawiedliwieniaBlokada:
+                    type: object
+                    properties:
+                      dataDo: {}
+                      dataOd: {}
+                      obowiazujeDo: {}
+                      oddzialy:
+                        type: object
+                        properties: {}
+                        required: []
+                        additionalProperties: true
+                    required:
+                    - dataDo
+                    - dataOd
+                    - obowiazujeDo
+                    - oddzialy
+                    additionalProperties: true
+                required:
+                - usprawiedliwienia
+                - usprawiedliwieniaAktywne
+                - usprawiedliwieniaBlokada
+                additionalProperties: true
+        '401':
+          description: Authentication required.
+        '403':
+          description: 'Forbidden: permission/module restrictions or authentication
+            require investigation.'
+        '429':
+          description: Rate limited; do not infer a contract change.
+        default:
+          description: Upstream failure; response bodies must not be logged.
+      x-observed-schema:
+        type: object
+        properties:
+          usprawiedliwienia:
+            type: array
+            items:
+              type: object
+              properties:
+                dzien:
+                  type: string
+                idPoraLekcji:
+                  type: 'null'
+                idUsprawiedliwienieDzien:
+                  type: number
+                idUsprawiedliwienieDzienPoraLekcji:
+                  type: number
+                koniecLekcji:
+                  type: 'null'
+                numerLekcji:
+                  type: 'null'
+                poczatekLekcji:
+                  type: 'null'
+                status:
+                  type: number
+              required:
+              - dzien
+              - idPoraLekcji
+              - idUsprawiedliwienieDzien
+              - idUsprawiedliwienieDzienPoraLekcji
+              - koniecLekcji
+              - numerLekcji
+              - poczatekLekcji
+              - status
+              additionalProperties: false
+          usprawiedliwieniaAktywne:
+            type: boolean
+          usprawiedliwieniaBlokada:
+            type: object
+            properties:
+              dataDo:
+                type: 'null'
+              dataOd:
+                type: 'null'
+              obowiazujeDo:
+                type: 'null'
+              oddzialy:
+                type: object
+                properties: {}
+                required: []
+                additionalProperties: false
+            required:
+            - dataDo
+            - dataOd
+            - obowiazujeDo
+            - oddzialy
+            additionalProperties: false
+        required:
+        - usprawiedliwienia
+        - usprawiedliwieniaAktywne
+        - usprawiedliwieniaBlokada
+        additionalProperties: false
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - dataDo
+      - dataOd
+      - key
+    x-discovery-hosts:
+    - student
+  /api/OcenyTablica:
+    get:
+      operationId: OcenyTablica
+      summary: OcenyTablica
+      description: Recent grade changes. Returns `[]` when no recent changes.
+      x-host: student
+      x-probe:
+        enabled: true
+        scope: student
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.772723+00:00'
+        samples: 2
+      parameters:
+      - name: key
+        in: query
+        required: true
+        schema:
+          type: string
+        description: Student key from Context; sensitive.
+      responses:
+        '200':
+          description: Successful JSON response. Unknown item schemas are not evidence
+            of full coverage.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {}
+        '401':
+          description: Authentication required.
+        '403':
+          description: 'Forbidden: permission/module restrictions or authentication
+            require investigation.'
+        '429':
+          description: Rate limited; do not infer a contract change.
+        default:
+          description: Upstream failure; response bodies must not be logged.
+      x-observed-schema:
+        type: array
+        items: {}
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - key
+    x-discovery-hosts:
+    - student
+  /api/FrekwencjaTablica:
+    get:
+      operationId: FrekwencjaTablica
+      summary: FrekwencjaTablica
+      description: Recent attendance changes.
+      x-host: student
+      x-probe:
+        enabled: true
+        scope: student
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.771897+00:00'
+        samples: 2
+      parameters:
+      - name: key
+        in: query
+        required: true
+        schema:
+          type: string
+        description: Student key from Context; sensitive.
+      responses:
+        '200':
+          description: Successful JSON response. Unknown item schemas are not evidence
+            of full coverage.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  dziennikiSwietlicy:
+                    type: array
+                    items: {}
+                  dziennikiZajecInnych:
+                    type: array
+                    items: {}
+                  oddzialy:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        data:
+                          type: string
+                        dataDo:
+                          type: string
+                        dataOd:
+                          type: string
+                        godzinaDo:
+                          type: string
+                        godzinaOd:
+                          type: string
+                        idLekcjaOddzial:
+                          type: number
+                        idPoraLekcji:
+                          type: number
+                        kategoriaFrekwencji:
+                          type: number
+                        nauczyciel:
+                          type: string
+                        numerLekcji:
+                          type: number
+                        opisZajec:
+                          type: string
+                      required:
+                      - data
+                      - dataDo
+                      - dataOd
+                      - godzinaDo
+                      - godzinaOd
+                      - idLekcjaOddzial
+                      - idPoraLekcji
+                      - kategoriaFrekwencji
+                      - nauczyciel
+                      - numerLekcji
+                      - opisZajec
+                      additionalProperties: true
+                required: []
+                additionalProperties: true
+        '401':
+          description: Authentication required.
+        '403':
+          description: 'Forbidden: permission/module restrictions or authentication
+            require investigation.'
+        '429':
+          description: Rate limited; do not infer a contract change.
+        default:
+          description: Upstream failure; response bodies must not be logged.
+      x-observed-schema:
+        type: object
+        properties:
+          dziennikiSwietlicy:
+            type: array
+            items: {}
+          dziennikiZajecInnych:
+            type: array
+            items: {}
+          oddzialy:
+            type: array
+            items:
+              type: object
+              properties:
+                data:
+                  type: string
+                dataDo:
+                  type: string
+                dataOd:
+                  type: string
+                godzinaDo:
+                  type: string
+                godzinaOd:
+                  type: string
+                idLekcjaOddzial:
+                  type: number
+                idPoraLekcji:
+                  type: number
+                kategoriaFrekwencji:
+                  type: number
+                nauczyciel:
+                  type: string
+                numerLekcji:
+                  type: number
+                opisZajec:
+                  type: string
+              required:
+              - data
+              - dataDo
+              - dataOd
+              - godzinaDo
+              - godzinaOd
+              - idLekcjaOddzial
+              - idPoraLekcji
+              - kategoriaFrekwencji
+              - nauczyciel
+              - numerLekcji
+              - opisZajec
+              additionalProperties: false
+        required:
+        - dziennikiSwietlicy
+        - dziennikiZajecInnych
+        - oddzialy
+        additionalProperties: false
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - key
+    x-discovery-hosts:
+    - student
+  /api/SprawdzianyTablica:
+    get:
+      operationId: SprawdzianyTablica
+      summary: SprawdzianyTablica
+      description: Upcoming exams/tests.
+      x-host: student
+      x-probe:
+        enabled: true
+        scope: student
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.967219+00:00'
+        samples: 2
+      parameters:
+      - name: key
+        in: query
+        required: true
+        schema:
+          type: string
+        description: Student key from Context; sensitive.
+      responses:
+        '200':
+          description: Successful JSON response. Unknown item schemas are not evidence
+            of full coverage.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    data:
+                      type: string
+                    id:
+                      type: number
+                    przedmiot:
+                      type: string
+                    rodzaj:
+                      type: number
+                  additionalProperties: true
+                  required:
+                  - id
+        '401':
+          description: Authentication required.
+        '403':
+          description: 'Forbidden: permission/module restrictions or authentication
+            require investigation.'
+        '429':
+          description: Rate limited; do not infer a contract change.
+        default:
+          description: Upstream failure; response bodies must not be logged.
+      x-observed-schema:
+        type: array
+        items: {}
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - key
+    x-discovery-hosts:
+    - student
+  /api/SprawdzianSzczegoly:
+    get:
+      operationId: SprawdzianSzczegoly
+      summary: SprawdzianSzczegoly
+      description: Exam detail. Returns description and teacher.
+      x-host: student
+      x-probe:
+        enabled: true
+        scope: student
+        dependency:
+          path: /api/SprawdzianyTablica
+          field: id
+          parameter: id
+      x-evidence:
+        source: repository-documentation
+        observed-at: null
+      parameters:
+      - name: key
+        in: query
+        required: true
+        schema:
+          type: string
+        description: Student key from Context; sensitive.
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: integer
+        description: Resolved by the on-demand probe; see x-probe.
+      responses:
+        '200':
+          description: Successful JSON response. Unknown item schemas are not evidence
+            of full coverage.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: string
+                  id:
+                    type: number
+                  nauczycielImieNazwisko:
+                    type: string
+                  opis:
+                    type: string
+                  przedmiotNazwa:
+                    type: string
+                  typ:
+                    type: number
+                additionalProperties: true
+        '401':
+          description: Authentication required.
+        '403':
+          description: 'Forbidden: permission/module restrictions or authentication
+            require investigation.'
+        '429':
+          description: Rate limited; do not infer a contract change.
+        default:
+          description: Upstream failure; response bodies must not be logged.
+  /api/ZadaniaDomoweTablica:
+    get:
+      operationId: ZadaniaDomoweTablica
+      summary: ZadaniaDomoweTablica
+      description: Upcoming homework.
+      x-host: student
+      x-probe:
+        enabled: true
+        scope: student
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.973145+00:00'
+        samples: 2
+      parameters:
+      - name: key
+        in: query
+        required: true
+        schema:
+          type: string
+        description: Student key from Context; sensitive.
+      responses:
+        '200':
+          description: Successful JSON response. Unknown item schemas are not evidence
+            of full coverage.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    data:
+                      type: string
+                    id:
+                      type: number
+                    przedmiot:
+                      type: string
+                  additionalProperties: true
+                  required:
+                  - id
+        '401':
+          description: Authentication required.
+        '403':
+          description: 'Forbidden: permission/module restrictions or authentication
+            require investigation.'
+        '429':
+          description: Rate limited; do not infer a contract change.
+        default:
+          description: Upstream failure; response bodies must not be logged.
+      x-observed-schema:
+        type: array
+        items: {}
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - key
+    x-discovery-hosts:
+    - student
+  /api/ZadanieDomoweSzczegoly:
+    get:
+      operationId: ZadanieDomoweSzczegoly
+      summary: ZadanieDomoweSzczegoly
+      description: Homework detail. Returns description, teacher, attachments, and
+        student response status.
+      x-host: student
+      x-probe:
+        enabled: true
+        scope: student
+        dependency:
+          path: /api/ZadaniaDomoweTablica
+          field: id
+          parameter: id
+      x-evidence:
+        source: repository-documentation
+        observed-at: null
+      parameters:
+      - name: key
+        in: query
+        required: true
+        schema:
+          type: string
+        description: Student key from Context; sensitive.
+      - name: id
+        in: query
+        required: true
+        schema:
+          type: integer
+        description: Resolved by the on-demand probe; see x-probe.
+      responses:
+        '200':
+          description: Successful JSON response. Unknown item schemas are not evidence
+            of full coverage.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: string
+                  id:
+                    type: number
+                  linki:
+                    type: array
+                    items: {}
+                  nauczycielImieNazwisko:
+                    type: string
+                  odpowiedz: {}
+                  odpowiedzWymagana:
+                    type: boolean
+                  opis:
+                    type: string
+                  przedmiotNazwa:
+                    type: string
+                  status:
+                    type: number
+                  typ:
+                    type: number
+                  zalaczniki:
+                    type: array
+                    items: {}
+                additionalProperties: true
+        '401':
+          description: Authentication required.
+        '403':
+          description: 'Forbidden: permission/module restrictions or authentication
+            require investigation.'
+        '429':
+          description: Rate limited; do not infer a contract change.
+        default:
+          description: Upstream failure; response bodies must not be logged.
+  /api/SprawdzianyZadaniaDomowe:
+    get:
+      operationId: SprawdzianyZadaniaDomowe
+      summary: SprawdzianyZadaniaDomowe
+      description: Combined exam/homework list used by the web view. Requires the
+        observed student key and date range; the former key-only probe returned 404.
+      x-host: student
+      x-probe:
+        enabled: true
+        scope: student
+        dates: true
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.995189+00:00'
+        samples: 1
+      parameters:
+      - name: key
+        in: query
+        required: true
+        schema:
+          type: string
+        description: Student key from Context; sensitive.
+      - name: dataOd
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+        description: Start of local day in Europe/Warsaw, serialized as UTC.
+      - name: dataDo
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+        description: End of probe range, serialized as UTC.
+      responses:
+        '200':
+          description: Successful JSON response. Unknown item schemas are not evidence
+            of full coverage.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {}
+        '401':
+          description: Authentication required.
+        '403':
+          description: 'Forbidden: permission/module restrictions or authentication
+            require investigation.'
+        '429':
+          description: Rate limited; do not infer a contract change.
+        default:
+          description: Upstream failure; response bodies must not be logged.
+      x-observed-schema:
+        type: array
+        items: {}
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - dataDo
+      - dataOd
+      - key
+    x-discovery-hosts:
+    - student
+  /api/WiadomosciNieodczytane:
+    get:
+      operationId: WiadomosciNieodczytane
+      summary: WiadomosciNieodczytane
+      description: Unread message count (not per-student, account-level).
+      x-host: student
+      x-probe:
+        enabled: true
+        scope: account
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.971367+00:00'
+        samples: 2
+      parameters: []
+      responses:
+        '200':
+          description: Successful JSON response. Unknown item schemas are not evidence
+            of full coverage.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  liczbaWiadomosciNieodczytanych:
+                    type: number
+                required: []
+                additionalProperties: true
+        '401':
+          description: Authentication required.
+        '403':
+          description: 'Forbidden: permission/module restrictions or authentication
+            require investigation.'
+        '429':
+          description: Rate limited; do not infer a contract change.
+        default:
+          description: Upstream failure; response bodies must not be logged.
+      x-observed-schema:
+        type: object
+        properties:
+          liczbaWiadomosciNieodczytanych:
+            type: number
+        required:
+        - liczbaWiadomosciNieodczytanych
+        additionalProperties: false
+    x-browser-request:
+      methods:
+      - get
+      query-parameters: []
+    x-discovery-hosts:
+    - student
+  /api/OgloszeniaTablica:
+    get:
+      operationId: OgloszeniaTablica
+      summary: OgloszeniaTablica
+      description: Announcements. Returns `[]` when none.
+      x-host: student
+      x-probe:
+        enabled: true
+        scope: student
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.776202+00:00'
+        samples: 2
+      parameters:
+      - name: key
+        in: query
+        required: true
+        schema:
+          type: string
+        description: Student key from Context; sensitive.
+      responses:
+        '200':
+          description: Successful JSON response. Unknown item schemas are not evidence
+            of full coverage.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {}
+        '401':
+          description: Authentication required.
+        '403':
+          description: 'Forbidden: permission/module restrictions or authentication
+            require investigation.'
+        '429':
+          description: Rate limited; do not infer a contract change.
+        default:
+          description: Upstream failure; response bodies must not be logged.
+      x-observed-schema:
+        type: array
+        items: {}
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - key
+    x-discovery-hosts:
+    - student
+  /api/UsprawiedliwieniaTablica:
+    get:
+      operationId: UsprawiedliwieniaTablica
+      summary: UsprawiedliwieniaTablica
+      description: Excuse overview.
+      x-host: student
+      x-probe:
+        enabled: true
+        scope: student
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.969955+00:00'
+        samples: 2
+      parameters:
+      - name: key
+        in: query
+        required: true
+        schema:
+          type: string
+        description: Student key from Context; sensitive.
+      responses:
+        '200':
+          description: Successful JSON response. Unknown item schemas are not evidence
+            of full coverage.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  usprawiedliwienia:
+                    type: array
+                    items: {}
+                  usprawiedliwieniaAktywne:
+                    type: boolean
+                  usprawiedliwieniaBlokada: {}
+                required:
+                - usprawiedliwienia
+                - usprawiedliwieniaAktywne
+                - usprawiedliwieniaBlokada
+                additionalProperties: true
+        '401':
+          description: Authentication required.
+        '403':
+          description: 'Forbidden: permission/module restrictions or authentication
+            require investigation.'
+        '429':
+          description: Rate limited; do not infer a contract change.
+        default:
+          description: Upstream failure; response bodies must not be logged.
+      x-observed-schema:
+        type: object
+        properties:
+          usprawiedliwienia:
+            type: array
+            items: {}
+          usprawiedliwieniaAktywne:
+            type: boolean
+          usprawiedliwieniaBlokada:
+            type: 'null'
+        required:
+        - usprawiedliwienia
+        - usprawiedliwieniaAktywne
+        - usprawiedliwieniaBlokada
+        additionalProperties: false
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - key
+    x-discovery-hosts:
+    - student
+  /api/WychowawcyTablica:
+    get:
+      operationId: WychowawcyTablica
+      summary: WychowawcyTablica
+      description: Homeroom teachers.
+      x-host: student
+      x-probe:
+        enabled: true
+        scope: student
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.972671+00:00'
+        samples: 2
+      parameters:
+      - name: key
+        in: query
+        required: true
+        schema:
+          type: string
+        description: Student key from Context; sensitive.
+      responses:
+        '200':
+          description: Successful JSON response. Unknown item schemas are not evidence
+            of full coverage.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    globalKeySkrzynka:
+                      type: string
+                    imieNazwisko:
+                      type: string
+                    isGlowny:
+                      type: boolean
+                  required: []
+                  additionalProperties: true
+        '401':
+          description: Authentication required.
+        '403':
+          description: 'Forbidden: permission/module restrictions or authentication
+            require investigation.'
+        '429':
+          description: Rate limited; do not infer a contract change.
+        default:
+          description: Upstream failure; response bodies must not be logged.
+      x-observed-schema:
+        type: array
+        items:
+          type: object
+          properties:
+            globalKeySkrzynka:
+              type: string
+            imieNazwisko:
+              type: string
+            isGlowny:
+              type: boolean
+          required:
+          - globalKeySkrzynka
+          - imieNazwisko
+          - isGlowny
+          additionalProperties: false
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - key
+    x-discovery-hosts:
+    - student
+  /api/Uwagi:
+    get:
+      operationId: Uwagi
+      summary: Uwagi
+      description: Student notes/remarks. Returns `[]` when none.
+      x-host: student
+      x-probe:
+        enabled: true
+        scope: student
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.970939+00:00'
+        samples: 2
+      parameters:
+      - name: key
+        in: query
+        required: true
+        schema:
+          type: string
+        description: Student key from Context; sensitive.
+      responses:
+        '200':
+          description: Successful JSON response. Unknown item schemas are not evidence
+            of full coverage.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    autor:
+                      type: string
+                    data:
+                      type: string
+                    id:
+                      type: number
+                    kategoria:
+                      type: string
+                    liczbaPunktow: {}
+                    rodzaj:
+                      type: number
+                    tresc:
+                      type: string
+                    typ:
+                      type: number
+                  required:
+                  - autor
+                  - data
+                  - id
+                  - kategoria
+                  - liczbaPunktow
+                  - rodzaj
+                  - tresc
+                  - typ
+                  additionalProperties: true
+        '401':
+          description: Authentication required.
+        '403':
+          description: 'Forbidden: permission/module restrictions or authentication
+            require investigation.'
+        '429':
+          description: Rate limited; do not infer a contract change.
+        default:
+          description: Upstream failure; response bodies must not be logged.
+      x-observed-schema:
+        type: array
+        items:
+          type: object
+          properties:
+            autor:
+              type: string
+            data:
+              type: string
+            id:
+              type: number
+            kategoria:
+              type: string
+            liczbaPunktow:
+              type: 'null'
+            rodzaj:
+              type: number
+            tresc:
+              type: string
+            typ:
+              type: number
+          required:
+          - autor
+          - data
+          - id
+          - kategoria
+          - liczbaPunktow
+          - rodzaj
+          - tresc
+          - typ
+          additionalProperties: false
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - key
+    x-discovery-hosts:
+    - student
+  /api/PoryLekcji:
+    get:
+      operationId: PoryLekcji
+      summary: PoryLekcji
+      description: Lesson time slots for the school.
+      x-host: student
+      x-probe:
+        enabled: true
+        scope: student
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.964824+00:00'
+        samples: 2
+      parameters:
+      - name: key
+        in: query
+        required: true
+        schema:
+          type: string
+        description: Student key from Context; sensitive.
+      responses:
+        '200':
+          description: Successful JSON response. Unknown item schemas are not evidence
+            of full coverage.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: number
+                    koniec:
+                      type: string
+                    numer:
+                      type: number
+                    poczatek:
+                      type: string
+                  required:
+                  - id
+                  - koniec
+                  - numer
+                  - poczatek
+                  additionalProperties: true
+        '401':
+          description: Authentication required.
+        '403':
+          description: 'Forbidden: permission/module restrictions or authentication
+            require investigation.'
+        '429':
+          description: Rate limited; do not infer a contract change.
+        default:
+          description: Upstream failure; response bodies must not be logged.
+      x-observed-schema:
+        type: array
+        items:
+          type: object
+          properties:
+            id:
+              type: number
+            koniec:
+              type: string
+            numer:
+              type: number
+            poczatek:
+              type: string
+          required:
+          - id
+          - koniec
+          - numer
+          - poczatek
+          additionalProperties: false
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - key
+    x-discovery-hosts:
+    - student
+  /api/Przedmioty:
+    get:
+      operationId: Przedmioty
+      summary: Przedmioty
+      description: List of subjects.
+      x-host: student
+      x-probe:
+        enabled: true
+        scope: student
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.966056+00:00'
+        samples: 2
+      parameters:
+      - name: key
+        in: query
+        required: true
+        schema:
+          type: string
+        description: Student key from Context; sensitive.
+      responses:
+        '200':
+          description: Successful JSON response. Unknown item schemas are not evidence
+            of full coverage.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: number
+                    nazwa:
+                      type: string
+                  required:
+                  - id
+                  - nazwa
+                  additionalProperties: true
+        '401':
+          description: Authentication required.
+        '403':
+          description: 'Forbidden: permission/module restrictions or authentication
+            require investigation.'
+        '429':
+          description: Rate limited; do not infer a contract change.
+        default:
+          description: Upstream failure; response bodies must not be logged.
+      x-observed-schema:
+        type: array
+        items:
+          type: object
+          properties:
+            id:
+              type: number
+            nazwa:
+              type: string
+          required:
+          - id
+          - nazwa
+          additionalProperties: false
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - key
+    x-discovery-hosts:
+    - student
+  /api/DniWolne:
+    get:
+      operationId: DniWolne
+      summary: DniWolne
+      description: School holidays/days off.
+      x-host: student
+      x-probe:
+        enabled: true
+        scope: student
+        dates: true
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.744875+00:00'
+        samples: 3
+      parameters:
+      - name: key
+        in: query
+        required: true
+        schema:
+          type: string
+        description: Student key from Context; sensitive.
+      - name: dataOd
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+        description: Start of local day in Europe/Warsaw, serialized as UTC.
+      - name: dataDo
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+        description: End of probe range, serialized as UTC.
+      responses:
+        '200':
+          description: Successful JSON response. Unknown item schemas are not evidence
+            of full coverage.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    dataDo:
+                      type: string
+                    dataOd:
+                      type: string
+                    jednostkiSkladowe:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          id:
+                            type: number
+                          nazwa:
+                            type: string
+                        required:
+                        - id
+                        - nazwa
+                        additionalProperties: true
+                    nazwa:
+                      type: string
+                    wszystkieSkladowe:
+                      type: boolean
+                  required:
+                  - dataDo
+                  - dataOd
+                  - jednostkiSkladowe
+                  - nazwa
+                  - wszystkieSkladowe
+                  additionalProperties: true
+        '401':
+          description: Authentication required.
+        '403':
+          description: 'Forbidden: permission/module restrictions or authentication
+            require investigation.'
+        '429':
+          description: Rate limited; do not infer a contract change.
+        default:
+          description: Upstream failure; response bodies must not be logged.
+      x-observed-schema:
+        type: array
+        items:
+          type: object
+          properties:
+            dataDo:
+              type: string
+            dataOd:
+              type: string
+            jednostkiSkladowe:
+              type: array
+              items:
+                type: object
+                properties:
+                  id:
+                    type: number
+                  nazwa:
+                    type: string
+                required:
+                - id
+                - nazwa
+                additionalProperties: false
+            nazwa:
+              type: string
+            wszystkieSkladowe:
+              type: boolean
+          required:
+          - dataDo
+          - dataOd
+          - jednostkiSkladowe
+          - nazwa
+          - wszystkieSkladowe
+          additionalProperties: false
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - dataDo
+      - dataOd
+      - key
+    x-discovery-hosts:
+    - student
+  /api/PlanZajecTablica:
+    get:
+      operationId: PlanZajecTablica
+      summary: PlanZajecTablica
+      description: Today's schedule. Returns a list of lesson dicts (see `PlanZajec`
+        below for field details). Despite accepting `data=` / `dataOd=` / `dataDo=`
+        query params, it **ignores them** and always returns the current day. Use
+        `PlanZajec` for any range other than today.
+      x-host: student
+      x-probe:
+        enabled: true
+        scope: student
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.962914+00:00'
+        samples: 2
+      parameters:
+      - name: key
+        in: query
+        required: true
+        schema:
+          type: string
+        description: Student key from Context; sensitive.
+      responses:
+        '200':
+          description: Successful JSON response. Unknown item schemas are not evidence
+            of full coverage.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    adnotacja:
+                      type: number
+                    data:
+                      type: string
+                    dodatkowe:
+                      type: boolean
+                    godzinaDo:
+                      type: string
+                    godzinaOd:
+                      type: string
+                    idJednostkaSkladowa:
+                      type: number
+                    podzial:
+                      anyOf:
+                      - type: 'null'
+                      - type: string
+                    prowadzacy:
+                      type: string
+                    prowadzacyWspomagajacy1:
+                      type: string
+                    prowadzacyWspomagajacy2:
+                      anyOf:
+                      - type: 'null'
+                      - type: string
+                    przedmiot:
+                      type: string
+                    pseudonim: {}
+                    sala:
+                      type: string
+                    zmiany:
+                      type: array
+                      items: {}
+                    zmianyUwagi:
+                      type: array
+                      items: {}
+                    zrealizowane:
+                      type: boolean
+                  required:
+                  - adnotacja
+                  - data
+                  - dodatkowe
+                  - godzinaDo
+                  - godzinaOd
+                  - idJednostkaSkladowa
+                  - podzial
+                  - prowadzacy
+                  - prowadzacyWspomagajacy1
+                  - prowadzacyWspomagajacy2
+                  - przedmiot
+                  - pseudonim
+                  - sala
+                  - zmiany
+                  - zmianyUwagi
+                  - zrealizowane
+                  additionalProperties: true
+        '401':
+          description: Authentication required.
+        '403':
+          description: 'Forbidden: permission/module restrictions or authentication
+            require investigation.'
+        '429':
+          description: Rate limited; do not infer a contract change.
+        default:
+          description: Upstream failure; response bodies must not be logged.
+      x-observed-schema:
+        type: array
+        items:
+          type: object
+          properties:
+            adnotacja:
+              type: number
+            data:
+              type: string
+            dodatkowe:
+              type: boolean
+            godzinaDo:
+              type: string
+            godzinaOd:
+              type: string
+            idJednostkaSkladowa:
+              type: number
+            podzial:
+              anyOf:
+              - type: 'null'
+              - type: string
+            prowadzacy:
+              type: string
+            prowadzacyWspomagajacy1:
+              type: string
+            prowadzacyWspomagajacy2:
+              anyOf:
+              - type: 'null'
+              - type: string
+            przedmiot:
+              type: string
+            pseudonim:
+              type: 'null'
+            sala:
+              type: string
+            zmiany:
+              type: array
+              items: {}
+            zmianyUwagi:
+              type: array
+              items: {}
+            zrealizowane:
+              type: boolean
+          required:
+          - adnotacja
+          - data
+          - dodatkowe
+          - godzinaDo
+          - godzinaOd
+          - idJednostkaSkladowa
+          - podzial
+          - prowadzacy
+          - prowadzacyWspomagajacy1
+          - prowadzacyWspomagajacy2
+          - przedmiot
+          - pseudonim
+          - sala
+          - zmiany
+          - zmianyUwagi
+          - zrealizowane
+          additionalProperties: false
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - key
+    x-discovery-hosts:
+    - student
+  /api/PlanZajec:
+    get:
+      operationId: PlanZajec
+      summary: PlanZajec
+      description: Schedule across a date range — the endpoint used by the web app's
+        "Plan zajęć" week/month view. Includes substitutions (`zastępstwa`).
+      x-host: student
+      x-probe:
+        enabled: true
+        scope: student
+        dates: true
+        constants:
+          zakresDanych: 2
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.957266+00:00'
+        samples: 3
+      parameters:
+      - name: key
+        in: query
+        required: true
+        schema:
+          type: string
+        description: Student key from Context; sensitive.
+      - name: dataOd
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+        description: Start of local day in Europe/Warsaw, serialized as UTC.
+      - name: dataDo
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+        description: End of probe range, serialized as UTC.
+      - name: zakresDanych
+        in: query
+        required: true
+        schema:
+          type: integer
+        description: Resolved by the on-demand probe; see x-probe.
+      responses:
+        '200':
+          description: Successful JSON response. Unknown item schemas are not evidence
+            of full coverage.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    adnotacja:
+                      type: number
+                    data:
+                      type: string
+                    dodatkowe:
+                      type: boolean
+                    godzinaDo:
+                      type: string
+                    godzinaOd:
+                      type: string
+                    idJednostkaSkladowa:
+                      anyOf:
+                      - type: 'null'
+                      - type: number
+                    podzial:
+                      anyOf:
+                      - type: 'null'
+                      - type: string
+                    prowadzacy:
+                      type: string
+                    prowadzacyWspomagajacy1:
+                      anyOf:
+                      - type: 'null'
+                      - type: string
+                    prowadzacyWspomagajacy2:
+                      anyOf:
+                      - type: 'null'
+                      - type: string
+                    przedmiot:
+                      type: string
+                    pseudonim: {}
+                    sala:
+                      type: string
+                    zmiany:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          dzien: {}
+                          godzinaDo: {}
+                          godzinaOd: {}
+                          grupa: {}
+                          informacjeNieobecnosc: {}
+                          nrLekcji: {}
+                          prowadzacy:
+                            type: string
+                          sala:
+                            type: string
+                          typProwadzacego:
+                            type: number
+                          zajecia: {}
+                          zmiana:
+                            type: number
+                        required: []
+                        additionalProperties: true
+                    zmianyUwagi:
+                      type: array
+                      items:
+                        type: string
+                    zrealizowane:
+                      type: boolean
+                  required: []
+                  additionalProperties: true
+        '401':
+          description: Authentication required.
+        '403':
+          description: 'Forbidden: permission/module restrictions or authentication
+            require investigation.'
+        '429':
+          description: Rate limited; do not infer a contract change.
+        default:
+          description: Upstream failure; response bodies must not be logged.
+      x-observed-schema:
+        type: array
+        items:
+          type: object
+          properties:
+            adnotacja:
+              type: number
+            data:
+              type: string
+            dodatkowe:
+              type: boolean
+            godzinaDo:
+              type: string
+            godzinaOd:
+              type: string
+            idJednostkaSkladowa:
+              anyOf:
+              - type: 'null'
+              - type: number
+            podzial:
+              anyOf:
+              - type: 'null'
+              - type: string
+            prowadzacy:
+              type: string
+            prowadzacyWspomagajacy1:
+              anyOf:
+              - type: 'null'
+              - type: string
+            prowadzacyWspomagajacy2:
+              anyOf:
+              - type: 'null'
+              - type: string
+            przedmiot:
+              type: string
+            pseudonim:
+              type: 'null'
+            sala:
+              type: string
+            zmiany:
+              type: array
+              items:
+                type: object
+                properties:
+                  dzien:
+                    type: 'null'
+                  godzinaDo:
+                    type: 'null'
+                  godzinaOd:
+                    type: 'null'
+                  grupa:
+                    type: 'null'
+                  informacjeNieobecnosc:
+                    type: 'null'
+                  nrLekcji:
+                    type: 'null'
+                  prowadzacy:
+                    type: string
+                  sala:
+                    type: string
+                  typProwadzacego:
+                    type: number
+                  zajecia:
+                    type: 'null'
+                  zmiana:
+                    type: number
+                required:
+                - dzien
+                - godzinaDo
+                - godzinaOd
+                - grupa
+                - informacjeNieobecnosc
+                - nrLekcji
+                - prowadzacy
+                - sala
+                - typProwadzacego
+                - zajecia
+                - zmiana
+                additionalProperties: false
+            zmianyUwagi:
+              type: array
+              items: {}
+            zrealizowane:
+              type: boolean
+          required:
+          - adnotacja
+          - data
+          - dodatkowe
+          - godzinaDo
+          - godzinaOd
+          - idJednostkaSkladowa
+          - podzial
+          - prowadzacy
+          - prowadzacyWspomagajacy1
+          - prowadzacyWspomagajacy2
+          - przedmiot
+          - pseudonim
+          - sala
+          - zmiany
+          - zmianyUwagi
+          - zrealizowane
+          additionalProperties: false
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - dataDo
+      - dataOd
+      - key
+      - zakresDanych
+    x-discovery-hosts:
+    - student
+  /api/KomunikatStartowy:
+    get:
+      operationId: KomunikatStartowy
+      summary: KomunikatStartowy
+      description: System-wide announcements. Returns `[]` when none.
+      x-host: student
+      x-probe:
+        enabled: true
+        scope: account
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.772414+00:00'
+        samples: 2
+      parameters: []
+      responses:
+        '200':
+          description: Successful JSON response. Unknown item schemas are not evidence
+            of full coverage.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {}
+        '401':
+          description: Authentication required.
+        '403':
+          description: 'Forbidden: permission/module restrictions or authentication
+            require investigation.'
+        '429':
+          description: Rate limited; do not infer a contract change.
+        default:
+          description: Upstream failure; response bodies must not be logged.
+      x-observed-schema:
+        type: array
+        items: {}
+    x-browser-request:
+      methods:
+      - get
+      query-parameters: []
+    x-discovery-hosts:
+    - student
+  /api/Skrzynki:
+    get:
+      operationId: Skrzynki
+      summary: Skrzynki
+      description: Returns mailboxes for all students. The `globalKey` matches `globalKeySkrzynka`
+        from the Context endpoint.
+      x-host: messages
+      x-probe:
+        enabled: true
+        scope: account
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.966768+00:00'
+        samples: 2
+      parameters: []
+      responses:
+        '200':
+          description: Successful JSON response. Unknown item schemas are not evidence
+            of full coverage.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    globalKey:
+                      type: string
+                    nazwa:
+                      type: string
+                    typUzytkownika:
+                      type: number
+                  required: []
+                  additionalProperties: true
+        '401':
+          description: Authentication required.
+        '403':
+          description: 'Forbidden: permission/module restrictions or authentication
+            require investigation.'
+        '429':
+          description: Rate limited; do not infer a contract change.
+        default:
+          description: Upstream failure; response bodies must not be logged.
+      servers:
+      - url: https://wiadomosci.eduvulcan.pl/{tenant}
+        variables:
+          tenant:
+            default: exampledistrict
+            description: Resolve locally from saved session; never store the actual
+              tenant in this document.
+      x-observed-schema:
+        type: array
+        items:
+          type: object
+          properties:
+            globalKey:
+              type: string
+            nazwa:
+              type: string
+            typUzytkownika:
+              type: number
+          required:
+          - globalKey
+          - nazwa
+          - typUzytkownika
+          additionalProperties: false
+    x-browser-request:
+      methods:
+      - get
+      query-parameters: []
+    x-discovery-hosts:
+    - messages
+  /api/LiczbyNieodczytanych:
+    get:
+      operationId: LiczbyNieodczytanych
+      summary: LiczbyNieodczytanych
+      description: Unread count per mailbox.
+      x-host: messages
+      x-probe:
+        enabled: true
+        scope: account
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.772617+00:00'
+        samples: 2
+      parameters: []
+      responses:
+        '200':
+          description: Successful JSON response. Unknown item schemas are not evidence
+            of full coverage.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    globalKey:
+                      type: string
+                    liczbaWiadomosci:
+                      type: number
+                  additionalProperties: true
+        '401':
+          description: Authentication required.
+        '403':
+          description: 'Forbidden: permission/module restrictions or authentication
+            require investigation.'
+        '429':
+          description: Rate limited; do not infer a contract change.
+        default:
+          description: Upstream failure; response bodies must not be logged.
+      servers:
+      - url: https://wiadomosci.eduvulcan.pl/{tenant}
+        variables:
+          tenant:
+            default: exampledistrict
+            description: Resolve locally from saved session; never store the actual
+              tenant in this document.
+      x-observed-schema:
+        type: array
+        items: {}
+    x-browser-request:
+      methods:
+      - get
+      query-parameters: []
+    x-discovery-hosts:
+    - messages
+  /api/Odebrane:
+    get:
+      operationId: Odebrane
+      summary: Odebrane
+      description: Received messages, paginated. Use `idLastWiadomosc=0` for the first
+        page.
+      x-host: messages
+      x-probe:
+        enabled: true
+        scope: account
+        constants:
+          idLastWiadomosc: 0
+          pageSize: 20
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.775785+00:00'
+        samples: 2
+      parameters:
+      - name: idLastWiadomosc
+        in: query
+        required: true
+        schema:
+          type: integer
+        description: Resolved by the on-demand probe; see x-probe.
+      - name: pageSize
+        in: query
+        required: true
+        schema:
+          type: integer
+        description: Resolved by the on-demand probe; see x-probe.
+      responses:
+        '200':
+          description: Successful JSON response. Unknown item schemas are not evidence
+            of full coverage.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    apiGlobalKey:
+                      type: string
+                    data:
+                      type: string
+                    hasZalaczniki:
+                      type: boolean
+                    id:
+                      type: number
+                    korespondenci:
+                      type: string
+                    korespondenciSzczegoly: {}
+                    nieprzeczytanePrzeczytanePrzez: {}
+                    odpowiedziana:
+                      type: boolean
+                    przeczytana:
+                      type: boolean
+                    przekazana:
+                      type: boolean
+                    skrzynka:
+                      type: string
+                    temat:
+                      type: string
+                    uzytkownikRola:
+                      type: number
+                    wazna:
+                      type: boolean
+                    wycofana:
+                      type: boolean
+                  required:
+                  - id
+                  additionalProperties: true
+        '401':
+          description: Authentication required.
+        '403':
+          description: 'Forbidden: permission/module restrictions or authentication
+            require investigation.'
+        '429':
+          description: Rate limited; do not infer a contract change.
+        default:
+          description: Upstream failure; response bodies must not be logged.
+      servers:
+      - url: https://wiadomosci.eduvulcan.pl/{tenant}
+        variables:
+          tenant:
+            default: exampledistrict
+            description: Resolve locally from saved session; never store the actual
+              tenant in this document.
+      x-observed-schema:
+        type: array
+        items:
+          type: object
+          properties:
+            apiGlobalKey:
+              type: string
+            data:
+              type: string
+            hasZalaczniki:
+              type: boolean
+            id:
+              type: number
+            korespondenci:
+              type: string
+            korespondenciSzczegoly:
+              type: 'null'
+            nieprzeczytanePrzeczytanePrzez:
+              type: 'null'
+            odpowiedziana:
+              type: boolean
+            przeczytana:
+              type: boolean
+            przekazana:
+              type: boolean
+            skrzynka:
+              type: string
+            temat:
+              type: string
+            uzytkownikRola:
+              type: number
+            wazna:
+              type: boolean
+            wycofana:
+              type: boolean
+          required:
+          - apiGlobalKey
+          - data
+          - hasZalaczniki
+          - id
+          - korespondenci
+          - korespondenciSzczegoly
+          - nieprzeczytanePrzeczytanePrzez
+          - odpowiedziana
+          - przeczytana
+          - przekazana
+          - skrzynka
+          - temat
+          - uzytkownikRola
+          - wazna
+          - wycofana
+          additionalProperties: false
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - idLastWiadomosc
+      - pageSize
+    x-discovery-hosts:
+    - messages
+  /api/WiadomoscSzczegoly:
+    get:
+      operationId: WiadomoscSzczegoly
+      summary: WiadomoscSzczegoly
+      description: Full message detail including HTML content.
+      x-host: messages
+      x-probe:
+        enabled: true
+        scope: account
+        dependency:
+          path: /api/Odebrane
+          field: apiGlobalKey
+          parameter: apiGlobalKey
+          read_only: true
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.991030+00:00'
+        samples: 3
+      parameters:
+      - name: apiGlobalKey
+        in: query
+        required: true
+        schema:
+          type: string
+        description: Message identifier from Odebrane; sensitive.
+      responses:
+        '200':
+          description: Successful JSON response. Unknown item schemas are not evidence
+            of full coverage.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  apiGlobalKey:
+                    type: string
+                  data:
+                    type: string
+                  dataWycofania: {}
+                  id:
+                    type: number
+                  nadawca:
+                    type: string
+                  nadawcaInfo:
+                    type: string
+                  nadawcaTyp:
+                    type: number
+                  odbiorcy:
+                    type: array
+                    items:
+                      type: string
+                  odczytana:
+                    type: boolean
+                  temat:
+                    type: string
+                  tresc:
+                    type: string
+                  wycofana:
+                    type: boolean
+                  zalaczniki:
+                    type: array
+                    items: {}
+                required: []
+                additionalProperties: true
+        '401':
+          description: Authentication required.
+        '403':
+          description: 'Forbidden: permission/module restrictions or authentication
+            require investigation.'
+        '429':
+          description: Rate limited; do not infer a contract change.
+        default:
+          description: Upstream failure; response bodies must not be logged.
+      servers:
+      - url: https://wiadomosci.eduvulcan.pl/{tenant}
+        variables:
+          tenant:
+            default: exampledistrict
+            description: Resolve locally from saved session; never store the actual
+              tenant in this document.
+      x-observed-schema:
+        type: object
+        properties:
+          apiGlobalKey:
+            type: string
+          data:
+            type: string
+          dataWycofania:
+            type: 'null'
+          id:
+            type: number
+          nadawca:
+            type: string
+          nadawcaInfo:
+            type: string
+          nadawcaTyp:
+            type: number
+          odbiorcy:
+            type: array
+            items:
+              type: string
+          odczytana:
+            type: boolean
+          temat:
+            type: string
+          tresc:
+            type: string
+          wycofana:
+            type: boolean
+          zalaczniki:
+            type: array
+            items: {}
+        required:
+        - apiGlobalKey
+        - data
+        - dataWycofania
+        - id
+        - nadawca
+        - nadawcaInfo
+        - nadawcaTyp
+        - odbiorcy
+        - odczytana
+        - temat
+        - tresc
+        - wycofana
+        - zalaczniki
+        additionalProperties: false
+  /api/Cache:
+    get:
+      operationId: Cache
+      summary: Cache
+      description: Shared configuration for the messages app.
+      x-host: messages
+      x-probe:
+        enabled: true
+        scope: account
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.740997+00:00'
+        samples: 2
+      parameters: []
+      responses:
+        '200':
+          description: Successful JSON response. Unknown item schemas are not evidence
+            of full coverage.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  googleDriveApiKey:
+                    type: string
+                  googleDriveClientId:
+                    type: string
+                  oneDriveClientId:
+                    type: string
+                  wychowankowieOn:
+                    type: boolean
+                required:
+                - googleDriveApiKey
+                - googleDriveClientId
+                - oneDriveClientId
+                - wychowankowieOn
+                additionalProperties: true
+        '401':
+          description: Authentication required.
+        '403':
+          description: 'Forbidden: permission/module restrictions or authentication
+            require investigation.'
+        '429':
+          description: Rate limited; do not infer a contract change.
+        default:
+          description: Upstream failure; response bodies must not be logged.
+      servers:
+      - url: https://wiadomosci.eduvulcan.pl/{tenant}
+        variables:
+          tenant:
+            default: exampledistrict
+            description: Resolve locally from saved session; never store the actual
+              tenant in this document.
+      x-observed-schema:
+        type: object
+        properties:
+          googleDriveApiKey:
+            type: string
+          googleDriveClientId:
+            type: string
+          oneDriveClientId:
+            type: string
+          wychowankowieOn:
+            type: boolean
+        required:
+        - googleDriveApiKey
+        - googleDriveClientId
+        - oneDriveClientId
+        - wychowankowieOn
+        additionalProperties: false
+    x-browser-request:
+      methods:
+      - get
+      query-parameters: []
+    x-discovery-hosts:
+    - messages
+  /api/Stopka:
+    get:
+      operationId: Stopka
+      summary: Stopka
+      description: Email signatures per mailbox.
+      x-host: messages
+      x-probe:
+        enabled: true
+        scope: account
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.967558+00:00'
+        samples: 2
+      parameters: []
+      responses:
+        '200':
+          description: Successful JSON response. Unknown item schemas are not evidence
+            of full coverage.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    skrzynkaGlobalKey:
+                      type: string
+                    tresc: {}
+                  required:
+                  - skrzynkaGlobalKey
+                  - tresc
+                  additionalProperties: true
+        '401':
+          description: Authentication required.
+        '403':
+          description: 'Forbidden: permission/module restrictions or authentication
+            require investigation.'
+        '429':
+          description: Rate limited; do not infer a contract change.
+        default:
+          description: Upstream failure; response bodies must not be logged.
+      servers:
+      - url: https://wiadomosci.eduvulcan.pl/{tenant}
+        variables:
+          tenant:
+            default: exampledistrict
+            description: Resolve locally from saved session; never store the actual
+              tenant in this document.
+      x-observed-schema:
+        type: array
+        items:
+          type: object
+          properties:
+            skrzynkaGlobalKey:
+              type: string
+            tresc:
+              type: 'null'
+          required:
+          - skrzynkaGlobalKey
+          - tresc
+          additionalProperties: false
+    x-browser-request:
+      methods:
+      - get
+      query-parameters: []
+    x-discovery-hosts:
+    - messages
+  /api/StatystykiLogowan:
+    description: Browser-observed route; request semantics require review.
+    x-browser-request:
+      methods:
+      - post
+      query-parameters: []
+      blocked-methods:
+      - post
+    x-discovery-hosts:
+    - messages
+    - student
+  /api/EgzaminyKoncoweTablica:
+    description: Browser-observed route; request semantics require review.
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - key
+    x-discovery-hosts:
+    - student
+    get:
+      operationId: EgzaminyKoncoweTablica
+      summary: EgzaminyKoncoweTablica
+      description: Browser-observed JSON GET; autonomous probing requires review.
+      x-host: student
+      x-probe:
+        enabled: false
+        scope: student
+      parameters:
+      - name: key
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Observed JSON response.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {}
+      x-observed-schema:
+        type: array
+        items: {}
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.991380+00:00'
+        samples: 1
+  /api/InformacjeTablica:
+    description: Browser-observed route; request semantics require review.
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - key
+    x-discovery-hosts:
+    - student
+    get:
+      operationId: InformacjeTablica
+      summary: InformacjeTablica
+      description: Browser-observed JSON GET; autonomous probing requires review.
+      x-host: student
+      x-probe:
+        enabled: false
+        scope: student
+      parameters:
+      - name: key
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Observed JSON response.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {}
+      x-observed-schema:
+        type: array
+        items: {}
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.991528+00:00'
+        samples: 1
+  /api/DyzurniTablica:
+    description: Browser-observed route; request semantics require review.
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - key
+    x-discovery-hosts:
+    - student
+    get:
+      operationId: DyzurniTablica
+      summary: DyzurniTablica
+      description: Browser-observed JSON GET; autonomous probing requires review.
+      x-host: student
+      x-probe:
+        enabled: false
+        scope: student
+      parameters:
+      - name: key
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Observed JSON response.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {}
+      x-observed-schema:
+        type: array
+        items: {}
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.991606+00:00'
+        samples: 1
+  /api/ZdjecieTablica:
+    description: Browser-observed route; request semantics require review.
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - key
+    x-discovery-hosts:
+    - student
+    get:
+      operationId: ZdjecieTablica
+      summary: ZdjecieTablica
+      description: Browser-observed JSON GET; autonomous probing requires review.
+      x-host: student
+      x-probe:
+        enabled: false
+        scope: student
+      parameters:
+      - name: key
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Observed JSON response.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: number
+                required:
+                - status
+                additionalProperties: true
+      x-observed-schema:
+        type: object
+        properties:
+          status:
+            type: number
+        required:
+        - status
+        additionalProperties: false
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.991757+00:00'
+        samples: 1
+  /api/SzczesliwyNumerTablica:
+    description: Browser-observed route; request semantics require review.
+    x-browser-request:
+      methods:
+      - post
+      query-parameters: []
+      blocked-methods:
+      - post
+    x-discovery-hosts:
+    - student
+    get:
+      operationId: SzczesliwyNumerTablica
+      summary: SzczesliwyNumerTablica
+      description: Browser-observed JSON GET; autonomous probing requires review.
+      x-host: student
+      x-probe:
+        enabled: false
+        scope: student
+      parameters:
+      - name: key
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Observed JSON response.
+          content:
+            application/json:
+              schema: {}
+      x-observed-schema:
+        type: 'null'
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T15:03:47.671310+00:00'
+        samples: 1
+  /api/WazneDzisiajTablica:
+    description: Browser-observed route; request semantics require review.
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - key
+    x-discovery-hosts:
+    - student
+    get:
+      operationId: WazneDzisiajTablica
+      summary: WazneDzisiajTablica
+      description: Browser-observed JSON GET; autonomous probing requires review.
+      x-host: student
+      x-probe:
+        enabled: false
+        scope: student
+      parameters:
+      - name: key
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Observed JSON response.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {}
+      x-observed-schema:
+        type: array
+        items: {}
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.992003+00:00'
+        samples: 1
+  /api/Osiagniecia:
+    get:
+      operationId: Osiagniecia
+      summary: Osiagniecia
+      description: Browser-observed JSON GET; autonomous probing requires review.
+      x-host: student
+      x-probe:
+        enabled: false
+        scope: student
+      parameters:
+      - name: key
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Observed JSON response.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {}
+      x-observed-schema:
+        type: array
+        items: {}
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.992128+00:00'
+        samples: 1
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - key
+    x-discovery-hosts:
+    - student
+  /api/Egzaminy:
+    get:
+      operationId: Egzaminy
+      summary: Egzaminy
+      description: Browser-observed JSON GET; autonomous probing requires review.
+      x-host: student
+      x-probe:
+        enabled: false
+        scope: student
+      parameters:
+      - name: key
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Observed JSON response.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {}
+      x-observed-schema:
+        type: array
+        items: {}
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.992197+00:00'
+        samples: 1
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - key
+    x-discovery-hosts:
+    - student
+  /api/EgzaminyZewnetrzne:
+    get:
+      operationId: EgzaminyZewnetrzne
+      summary: EgzaminyZewnetrzne
+      description: Browser-observed JSON GET; autonomous probing requires review.
+      x-host: student
+      x-probe:
+        enabled: false
+        scope: student
+      parameters:
+      - name: key
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Observed JSON response.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {}
+      x-observed-schema:
+        type: array
+        items: {}
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.992263+00:00'
+        samples: 1
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - key
+    x-discovery-hosts:
+    - student
+  /api/OcenyDiagnostyczne:
+    get:
+      operationId: OcenyDiagnostyczne
+      summary: OcenyDiagnostyczne
+      description: Browser-observed JSON GET; autonomous probing requires review.
+      x-host: student
+      x-probe:
+        enabled: false
+        scope: student
+      parameters:
+      - name: key
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Observed JSON response.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {}
+      x-observed-schema:
+        type: array
+        items: {}
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.992327+00:00'
+        samples: 1
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - key
+    x-discovery-hosts:
+    - student
+  /api/ZglaszanieNieobecnosciKonfiguracja:
+    get:
+      operationId: ZglaszanieNieobecnosciKonfiguracja
+      summary: ZglaszanieNieobecnosciKonfiguracja
+      description: Browser-observed JSON GET; autonomous probing requires review.
+      x-host: student
+      x-probe:
+        enabled: false
+        scope: student
+      parameters:
+      - name: key
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Observed JSON response.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  dniPrzed:
+                    type: number
+                  doGodziny:
+                    type: string
+                  rodzicMozeZglaszac:
+                    type: boolean
+                  uwzgledniacDniWolne:
+                    type: boolean
+                required:
+                - dniPrzed
+                - doGodziny
+                - rodzicMozeZglaszac
+                - uwzgledniacDniWolne
+                additionalProperties: true
+      x-observed-schema:
+        type: object
+        properties:
+          dniPrzed:
+            type: number
+          doGodziny:
+            type: string
+          rodzicMozeZglaszac:
+            type: boolean
+          uwzgledniacDniWolne:
+            type: boolean
+        required:
+        - dniPrzed
+        - doGodziny
+        - rodzicMozeZglaszac
+        - uwzgledniacDniWolne
+        additionalProperties: false
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.992556+00:00'
+        samples: 1
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - key
+    x-discovery-hosts:
+    - student
+  /api/ZgloszoneNieobecnosci:
+    get:
+      operationId: ZgloszoneNieobecnosci
+      summary: ZgloszoneNieobecnosci
+      description: Browser-observed JSON GET; autonomous probing requires review.
+      x-host: student
+      x-probe:
+        enabled: false
+        scope: student
+      parameters:
+      - name: dataDo
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: dataOd
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: key
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Observed JSON response.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {}
+      x-observed-schema:
+        type: array
+        items: {}
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.992803+00:00'
+        samples: 1
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - dataDo
+      - dataOd
+      - key
+    x-discovery-hosts:
+    - student
+  /api/RealizacjaZajec13:
+    get:
+      operationId: RealizacjaZajec13
+      summary: Planned and completed lesson realization
+      description: 'Realizacja zajęć view: status=2 selects Zaplanowane (planned),
+        status=1 selects Zrealizowane (completed). Completed items include topic/description
+        and online, after-lesson collection and resource fields. Populated resource
+        structures remain unverified.'
+      x-host: student
+      x-probe:
+        enabled: false
+        scope: student
+      parameters:
+      - name: dataDo
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: dataOd
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: key
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: status
+        in: query
+        required: false
+        schema:
+          type: integer
+          enum:
+          - 1
+          - 2
+        description: '1: completed (Zrealizowane); 2: planned (Zaplanowane). Observed
+          UI mapping.'
+      responses:
+        '200':
+          description: Observed JSON response.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    blokTematyczny:
+                      type: string
+                    data:
+                      type: string
+                    existsKolekcjePoLekcji:
+                      type: boolean
+                    id:
+                      type: number
+                    kolekcjePoLekcji:
+                      type: array
+                      items: {}
+                    nauczyciel:
+                      type: string
+                    nrLekcji:
+                      type: number
+                    online:
+                      type: string
+                    przedmiot:
+                      type: string
+                    tematOpis:
+                      type: string
+                    zasoby: {}
+                  required:
+                  - blokTematyczny
+                  - data
+                  - existsKolekcjePoLekcji
+                  - id
+                  - kolekcjePoLekcji
+                  - nauczyciel
+                  - nrLekcji
+                  - online
+                  - przedmiot
+                  - tematOpis
+                  - zasoby
+                  additionalProperties: true
+      x-observed-schema:
+        type: array
+        items:
+          type: object
+          properties:
+            blokTematyczny:
+              type: string
+            data:
+              type: string
+            existsKolekcjePoLekcji:
+              type: boolean
+            id:
+              type: number
+            kolekcjePoLekcji:
+              type: array
+              items: {}
+            nauczyciel:
+              type: string
+            nrLekcji:
+              type: number
+            online:
+              type: string
+            przedmiot:
+              type: string
+            tematOpis:
+              type: string
+            zasoby:
+              type: 'null'
+          required:
+          - blokTematyczny
+          - data
+          - existsKolekcjePoLekcji
+          - id
+          - kolekcjePoLekcji
+          - nauczyciel
+          - nrLekcji
+          - online
+          - przedmiot
+          - tematOpis
+          - zasoby
+          additionalProperties: false
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.994792+00:00'
+        samples: 2
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - dataDo
+      - dataOd
+      - key
+      - status
+    x-discovery-hosts:
+    - student
+  /api/Zebrania:
+    get:
+      operationId: Zebrania
+      summary: Zebrania
+      description: Browser-observed JSON GET; autonomous probing requires review.
+      x-host: student
+      x-probe:
+        enabled: false
+        scope: student
+      parameters:
+      - name: key
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Observed JSON response.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {}
+      x-observed-schema:
+        type: array
+        items: {}
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.998503+00:00'
+        samples: 1
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - key
+    x-discovery-hosts:
+    - student
+  /api/PodrecznikiLataSzkolne:
+    get:
+      operationId: PodrecznikiLataSzkolne
+      summary: PodrecznikiLataSzkolne
+      description: Browser-observed JSON GET; autonomous probing requires review.
+      x-host: student
+      x-probe:
+        enabled: false
+        scope: student
+      parameters:
+      - name: idDziennik
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: key
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Observed JSON response.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: number
+                    nazwa:
+                      type: string
+                    zaznaczony:
+                      type: boolean
+                  required:
+                  - id
+                  - nazwa
+                  - zaznaczony
+                  additionalProperties: true
+      x-observed-schema:
+        type: array
+        items:
+          type: object
+          properties:
+            id:
+              type: number
+            nazwa:
+              type: string
+            zaznaczony:
+              type: boolean
+          required:
+          - id
+          - nazwa
+          - zaznaczony
+          additionalProperties: false
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.998868+00:00'
+        samples: 1
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - idDziennik
+      - key
+    x-discovery-hosts:
+    - student
+  /api/PodrecznikiUcznia:
+    get:
+      operationId: PodrecznikiUcznia
+      summary: PodrecznikiUcznia
+      description: Browser-observed JSON GET; autonomous probing requires review.
+      x-host: student
+      x-probe:
+        enabled: false
+        scope: student
+      parameters:
+      - name: idDziennik
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: key
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: rokSzkolny
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Observed JSON response.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  dataDo:
+                    type: string
+                  podreczniki:
+                    type: array
+                    items: {}
+                  proponowanePodreczniki:
+                    type: array
+                    items: {}
+                  widocznePodreczniki:
+                    type: boolean
+                  widoczneProponowane:
+                    type: boolean
+                required:
+                - dataDo
+                - podreczniki
+                - proponowanePodreczniki
+                - widocznePodreczniki
+                - widoczneProponowane
+                additionalProperties: true
+      x-observed-schema:
+        type: object
+        properties:
+          dataDo:
+            type: string
+          podreczniki:
+            type: array
+            items: {}
+          proponowanePodreczniki:
+            type: array
+            items: {}
+          widocznePodreczniki:
+            type: boolean
+          widoczneProponowane:
+            type: boolean
+        required:
+        - dataDo
+        - podreczniki
+        - proponowanePodreczniki
+        - widocznePodreczniki
+        - widoczneProponowane
+        additionalProperties: false
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.999424+00:00'
+        samples: 1
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - idDziennik
+      - key
+      - rokSzkolny
+    x-discovery-hosts:
+    - student
+  /api/NajczesciejZadawanePytania:
+    get:
+      operationId: NajczesciejZadawanePytania
+      summary: NajczesciejZadawanePytania
+      description: Browser-observed JSON GET; autonomous probing requires review.
+      x-host: student
+      x-probe:
+        enabled: false
+        scope: student
+      parameters:
+      - name: key
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: language
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Observed JSON response.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {}
+      x-observed-schema:
+        type: array
+        items: {}
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.999706+00:00'
+        samples: 1
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - key
+      - language
+    x-discovery-hosts:
+    - student
+  /api/Wyslane:
+    get:
+      operationId: Wyslane
+      summary: Wyslane
+      description: Browser-observed JSON GET; autonomous probing requires review.
+      x-host: messages
+      x-probe:
+        enabled: false
+        scope: account
+      parameters:
+      - name: idLastWiadomosc
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: pageSize
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Observed JSON response.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    apiGlobalKey:
+                      type: string
+                    data:
+                      type: string
+                    hasZalaczniki:
+                      type: boolean
+                    id:
+                      type: number
+                    korespondenci:
+                      type: string
+                    korespondenciSzczegoly: {}
+                    nieprzeczytanePrzeczytanePrzez:
+                      type: string
+                    odpowiedziana:
+                      type: boolean
+                    przeczytana:
+                      type: boolean
+                    przekazana:
+                      type: boolean
+                    skrzynka:
+                      type: string
+                    temat:
+                      type: string
+                    uzytkownikRola:
+                      type: number
+                    wazna:
+                      type: boolean
+                    wycofana:
+                      type: boolean
+                  required:
+                  - apiGlobalKey
+                  - data
+                  - hasZalaczniki
+                  - id
+                  - korespondenci
+                  - korespondenciSzczegoly
+                  - nieprzeczytanePrzeczytanePrzez
+                  - odpowiedziana
+                  - przeczytana
+                  - przekazana
+                  - skrzynka
+                  - temat
+                  - uzytkownikRola
+                  - wazna
+                  - wycofana
+                  additionalProperties: true
+      servers:
+      - url: https://wiadomosci.eduvulcan.pl/{tenant}
+        variables:
+          tenant:
+            default: exampledistrict
+      x-observed-schema:
+        type: array
+        items:
+          type: object
+          properties:
+            apiGlobalKey:
+              type: string
+            data:
+              type: string
+            hasZalaczniki:
+              type: boolean
+            id:
+              type: number
+            korespondenci:
+              type: string
+            korespondenciSzczegoly:
+              type: 'null'
+            nieprzeczytanePrzeczytanePrzez:
+              type: string
+            odpowiedziana:
+              type: boolean
+            przeczytana:
+              type: boolean
+            przekazana:
+              type: boolean
+            skrzynka:
+              type: string
+            temat:
+              type: string
+            uzytkownikRola:
+              type: number
+            wazna:
+              type: boolean
+            wycofana:
+              type: boolean
+          required:
+          - apiGlobalKey
+          - data
+          - hasZalaczniki
+          - id
+          - korespondenci
+          - korespondenciSzczegoly
+          - nieprzeczytanePrzeczytanePrzez
+          - odpowiedziana
+          - przeczytana
+          - przekazana
+          - skrzynka
+          - temat
+          - uzytkownikRola
+          - wazna
+          - wycofana
+          additionalProperties: false
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:46.000878+00:00'
+        samples: 1
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - idLastWiadomosc
+      - pageSize
+    x-discovery-hosts:
+    - messages
+  /api/Usuniete:
+    description: Browser-observed route; request semantics require review.
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - idLastWiadomosc
+      - pageSize
+    x-discovery-hosts:
+    - messages
+    get:
+      operationId: Usuniete
+      summary: Usuniete
+      description: Browser-observed GET; autonomous probing requires review.
+      x-host: messages
+      x-probe:
+        enabled: false
+        scope: account
+      parameters:
+      - name: idLastWiadomosc
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: pageSize
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Observed JSON response.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    apiGlobalKey:
+                      type: string
+                    data:
+                      type: string
+                    hasZalaczniki:
+                      type: boolean
+                    id:
+                      type: number
+                    korespondenci:
+                      type: string
+                    korespondenciSzczegoly: {}
+                    nieprzeczytanePrzeczytanePrzez: {}
+                    odpowiedziana:
+                      type: boolean
+                    przeczytana:
+                      type: boolean
+                    przekazana:
+                      type: boolean
+                    skrzynka:
+                      type: string
+                    temat:
+                      type: string
+                    uzytkownikRola:
+                      type: number
+                    wazna:
+                      type: boolean
+                    wycofana:
+                      type: boolean
+                  required:
+                  - apiGlobalKey
+                  - data
+                  - hasZalaczniki
+                  - id
+                  - korespondenci
+                  - korespondenciSzczegoly
+                  - nieprzeczytanePrzeczytanePrzez
+                  - odpowiedziana
+                  - przeczytana
+                  - przekazana
+                  - skrzynka
+                  - temat
+                  - uzytkownikRola
+                  - wazna
+                  - wycofana
+                  additionalProperties: true
+      servers:
+      - url: https://wiadomosci.eduvulcan.pl/{tenant}
+        variables:
+          tenant:
+            default: exampledistrict
+      x-observed-schema:
+        type: array
+        items:
+          type: object
+          properties:
+            apiGlobalKey:
+              type: string
+            data:
+              type: string
+            hasZalaczniki:
+              type: boolean
+            id:
+              type: number
+            korespondenci:
+              type: string
+            korespondenciSzczegoly:
+              type: 'null'
+            nieprzeczytanePrzeczytanePrzez:
+              type: 'null'
+            odpowiedziana:
+              type: boolean
+            przeczytana:
+              type: boolean
+            przekazana:
+              type: boolean
+            skrzynka:
+              type: string
+            temat:
+              type: string
+            uzytkownikRola:
+              type: number
+            wazna:
+              type: boolean
+            wycofana:
+              type: boolean
+          required:
+          - apiGlobalKey
+          - data
+          - hasZalaczniki
+          - id
+          - korespondenci
+          - korespondenciSzczegoly
+          - nieprzeczytanePrzeczytanePrzez
+          - odpowiedziana
+          - przeczytana
+          - przekazana
+          - skrzynka
+          - temat
+          - uzytkownikRola
+          - wazna
+          - wycofana
+          additionalProperties: false
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:46.002339+00:00'
+        samples: 1
+  /api/Informacje:
+    description: Browser-observed route; request semantics require review.
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - key
+    x-discovery-hosts:
+    - student
+    get:
+      operationId: Informacje
+      summary: Informacje
+      description: Browser-observed GET; autonomous probing requires review.
+      x-host: student
+      x-probe:
+        enabled: false
+        scope: student
+      parameters:
+      - name: key
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Response format and structure not yet verified.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  dyrektor:
+                    type: string
+                  imienia:
+                    type: string
+                  kodPocztowy:
+                    type: string
+                  mail:
+                    type: string
+                  miejscowosc:
+                    type: string
+                  nazwa:
+                    type: string
+                  nrDomu:
+                    type: string
+                  nrMieszkania:
+                    type: string
+                  numer:
+                    type: string
+                  stronaWwwUrl:
+                    type: string
+                  telDomowy:
+                    type: string
+                  telKomorkowy:
+                    type: string
+                  telSluzbowy:
+                    type: string
+                  ulica:
+                    type: string
+                required:
+                - dyrektor
+                - imienia
+                - kodPocztowy
+                - mail
+                - miejscowosc
+                - nazwa
+                - nrDomu
+                - nrMieszkania
+                - numer
+                - stronaWwwUrl
+                - telDomowy
+                - telKomorkowy
+                - telSluzbowy
+                - ulica
+                additionalProperties: true
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.995807+00:00'
+        samples: 1
+      x-observed-schema:
+        type: object
+        properties:
+          dyrektor:
+            type: string
+          imienia:
+            type: string
+          kodPocztowy:
+            type: string
+          mail:
+            type: string
+          miejscowosc:
+            type: string
+          nazwa:
+            type: string
+          nrDomu:
+            type: string
+          nrMieszkania:
+            type: string
+          numer:
+            type: string
+          stronaWwwUrl:
+            type: string
+          telDomowy:
+            type: string
+          telKomorkowy:
+            type: string
+          telSluzbowy:
+            type: string
+          ulica:
+            type: string
+        required:
+        - dyrektor
+        - imienia
+        - kodPocztowy
+        - mail
+        - miejscowosc
+        - nazwa
+        - nrDomu
+        - nrMieszkania
+        - numer
+        - stronaWwwUrl
+        - telDomowy
+        - telKomorkowy
+        - telSluzbowy
+        - ulica
+        additionalProperties: false
+  /api/Nauczyciele:
+    get:
+      operationId: Nauczyciele
+      summary: Nauczyciele
+      description: Browser-observed GET; autonomous probing requires review.
+      x-host: student
+      x-probe:
+        enabled: false
+        scope: student
+      parameters:
+      - name: key
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Response format and structure not yet verified.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  nauczyciele:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        globalKeySkrzynka:
+                          anyOf:
+                          - type: 'null'
+                          - type: string
+                        imie:
+                          type: string
+                        nazwisko:
+                          type: string
+                        przedmiot:
+                          type: string
+                        wychowawca:
+                          type: boolean
+                      required:
+                      - globalKeySkrzynka
+                      - imie
+                      - nazwisko
+                      - przedmiot
+                      - wychowawca
+                      additionalProperties: true
+                required:
+                - nauczyciele
+                additionalProperties: true
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.997925+00:00'
+        samples: 1
+      x-observed-schema:
+        type: object
+        properties:
+          nauczyciele:
+            type: array
+            items:
+              type: object
+              properties:
+                globalKeySkrzynka:
+                  anyOf:
+                  - type: 'null'
+                  - type: string
+                imie:
+                  type: string
+                nazwisko:
+                  type: string
+                przedmiot:
+                  type: string
+                wychowawca:
+                  type: boolean
+              required:
+              - globalKeySkrzynka
+              - imie
+              - nazwisko
+              - przedmiot
+              - wychowawca
+              additionalProperties: false
+        required:
+        - nauczyciele
+        additionalProperties: false
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - key
+    x-discovery-hosts:
+    - student
+  /api/FormularzWysylanie:
+    get:
+      operationId: FormularzWysylanie
+      summary: FormularzWysylanie
+      description: Browser-observed GET; autonomous probing requires review.
+      x-host: student
+      x-probe:
+        enabled: false
+        scope: student
+      parameters:
+      - name: key
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Response format and structure not yet verified.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {}
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.998345+00:00'
+        samples: 1
+      x-observed-schema:
+        type: array
+        items: {}
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - key
+    x-discovery-hosts:
+    - student
+  /api/FormularzeSzablony:
+    get:
+      operationId: FormularzeSzablony
+      summary: FormularzeSzablony
+      description: Browser-observed GET; autonomous probing requires review.
+      x-host: student
+      x-probe:
+        enabled: false
+        scope: student
+      parameters:
+      - name: key
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Response format and structure not yet verified.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {}
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:45.998197+00:00'
+        samples: 1
+      x-observed-schema:
+        type: array
+        items: {}
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - key
+    x-discovery-hosts:
+    - student
+  /api/Kopie:
+    get:
+      operationId: Kopie
+      summary: Kopie
+      description: Browser-observed GET; autonomous probing requires review.
+      x-host: messages
+      x-probe:
+        enabled: false
+        scope: account
+      parameters:
+      - name: idLastWiadomosc
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: pageSize
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Observed JSON response.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    apiGlobalKey:
+                      type: string
+                    data:
+                      type: string
+                    hasZalaczniki:
+                      type: boolean
+                    id:
+                      type: number
+                    korespondenci:
+                      type: string
+                    korespondenciSzczegoly:
+                      anyOf:
+                      - type: 'null'
+                      - type: string
+                    nieprzeczytanePrzeczytanePrzez: {}
+                    odpowiedziana:
+                      type: boolean
+                    przeczytana:
+                      type: boolean
+                    przekazana:
+                      type: boolean
+                    skrzynka:
+                      type: string
+                    temat:
+                      type: string
+                    uzytkownikRola:
+                      type: number
+                    wazna:
+                      type: boolean
+                    wycofana:
+                      type: boolean
+                  required:
+                  - apiGlobalKey
+                  - data
+                  - hasZalaczniki
+                  - id
+                  - korespondenci
+                  - korespondenciSzczegoly
+                  - nieprzeczytanePrzeczytanePrzez
+                  - odpowiedziana
+                  - przeczytana
+                  - przekazana
+                  - skrzynka
+                  - temat
+                  - uzytkownikRola
+                  - wazna
+                  - wycofana
+                  additionalProperties: true
+      servers:
+      - url: https://wiadomosci.eduvulcan.pl/{tenant}
+        variables:
+          tenant:
+            default: exampledistrict
+      x-observed-schema:
+        type: array
+        items:
+          type: object
+          properties:
+            apiGlobalKey:
+              type: string
+            data:
+              type: string
+            hasZalaczniki:
+              type: boolean
+            id:
+              type: number
+            korespondenci:
+              type: string
+            korespondenciSzczegoly:
+              anyOf:
+              - type: 'null'
+              - type: string
+            nieprzeczytanePrzeczytanePrzez:
+              type: 'null'
+            odpowiedziana:
+              type: boolean
+            przeczytana:
+              type: boolean
+            przekazana:
+              type: boolean
+            skrzynka:
+              type: string
+            temat:
+              type: string
+            uzytkownikRola:
+              type: number
+            wazna:
+              type: boolean
+            wycofana:
+              type: boolean
+          required:
+          - apiGlobalKey
+          - data
+          - hasZalaczniki
+          - id
+          - korespondenci
+          - korespondenciSzczegoly
+          - nieprzeczytanePrzeczytanePrzez
+          - odpowiedziana
+          - przeczytana
+          - przekazana
+          - skrzynka
+          - temat
+          - uzytkownikRola
+          - wazna
+          - wycofana
+          additionalProperties: false
+      x-evidence:
+        source: live-session
+        observed-at: '2026-10-02T16:24:46.004148+00:00'
+        samples: 1
+    x-browser-request:
+      methods:
+      - get
+      query-parameters:
+      - idLastWiadomosc
+      - pageSize
+    x-discovery-hosts:
+    - messages
+components:
+  securitySchemes:
+    browserSession:
+      type: apiKey
+      in: cookie
+      name: ASP.NET_SessionId
+      description: Requires the complete domain-matched browser cookie set including
+        SSO cookies, not this cookie alone. Use session.json locally; never embed
+        cookie values.

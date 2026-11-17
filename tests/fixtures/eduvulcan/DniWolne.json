@@ -1,0 +1,54 @@
+{
+  "endpoint": "/api/DniWolne",
+  "source": "sanitized-live",
+  "responses": [
+    [
+      {
+        "nazwa": "SYNTHETIC",
+        "dataOd": "2000-01-03T08:00:00+01:00",
+        "dataDo": "2000-01-03T08:00:00+01:00",
+        "wszystkieSkladowe": false,
+        "jednostkiSkladowe": [
+          {
+            "nazwa": "SYNTHETIC",
+            "id": 1
+          }
+        ]
+      }
+    ],
+    [],
+    [
+      {
+        "nazwa": "SYNTHETIC",
+        "dataOd": "2000-01-03T08:00:00+01:00",
+        "dataDo": "2000-01-03T08:00:00+01:00",
+        "wszystkieSkladowe": false,
+        "jednostkiSkladowe": [
+          {
+            "nazwa": "SYNTHETIC",
+            "id": 1
+          }
+        ]
+      },
+      {
+        "nazwa": "SYNTHETIC",
+        "dataOd": "2000-01-03T08:00:00+01:00",
+        "dataDo": "2000-01-03T08:00:00+01:00",
+        "wszystkieSkladowe": false,
+        "jednostkiSkladowe": []
+      },
+      {
+        "nazwa": "SYNTHETIC",
+        "dataOd": "2000-01-03T08:00:00+01:00",
+        "dataDo": "2000-01-03T08:00:00+01:00",
+        "wszystkieSkladowe": false,
+        "jednostkiSkladowe": [
+          {
+            "nazwa": "SYNTHETIC",
+            "id": 1
+          }
+        ]
+      }
+    ]
+  ]
+}

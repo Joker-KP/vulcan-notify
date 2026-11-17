@@ -1,0 +1,12 @@
+{
+  "endpoint": "/api/ZglaszanieNieobecnosciKonfiguracja",
+  "source": "sanitized-live",
+  "responses": [
+    {
+      "rodzicMozeZglaszac": false,
+      "dniPrzed": 1,
+      "doGodziny": "2000-01-03T08:00:00+01:00",
+      "uwzgledniacDniWolne": false
+    }
+  ]
+}

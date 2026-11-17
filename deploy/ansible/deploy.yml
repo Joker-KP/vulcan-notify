@@ -1,0 +1,88 @@
+---
+- name: Deploy vulcan-notify from Docker Hub
+  hosts: vulcan_hosts
+  become: true
+  gather_facts: false
+  vars:
+    vulcan_install_dir: /opt/vulcan-notify
+    vulcan_image: macjoker/vulcan-notify:0.20.0
+    vulcan_env_file: "{{ playbook_dir }}/private/vulcan.env"
+    vulcan_api_bind: 127.0.0.1
+
+  pre_tasks:
+    - name: Validate deployment values
+      ansible.builtin.assert:
+        that:
+          - vulcan_install_dir is match('^/[^\n]+$')
+          - vulcan_install_dir != '/'
+          - vulcan_image is match('^macjoker/vulcan-notify(?::[a-zA-Z0-9_.-]+|@sha256:[a-f0-9]{64})$')
+          - vulcan_api_bind is match('^[0-9.]+$')
+        fail_msg: Use an absolute installation path, a version/digest image and an IPv4 API bind address.
+
+    - name: Check Docker Compose prerequisite
+      ansible.builtin.command: docker compose version --short
+      register: vulcan_compose_version
+      changed_when: false
+      check_mode: false
+
+    - name: Require Docker Compose 2.18 or newer
+      ansible.builtin.assert:
+        that:
+          - (vulcan_compose_version.stdout | regex_replace('^v', '')) is version('2.18.0', '>=')
+        fail_msg: Install Docker Engine and the Docker Compose plugin before running this playbook.
+
+    - name: Check Docker daemon access
+      ansible.builtin.command: docker info --format '{% raw %}{{.ServerVersion}}{% endraw %}'
+      changed_when: false
+      check_mode: false
+
+  tasks:
+    - name: Create persistent application directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+      loop:
+        - "{{ vulcan_install_dir }}"
+        - "{{ vulcan_install_dir }}/data"
+        - "{{ vulcan_install_dir }}/data/chromium-profile"
+
+    - name: Install the image-based Compose definition
+      ansible.builtin.copy:
+        src: ../docker/compose.yml
+        dest: "{{ vulcan_install_dir }}/compose.yml"
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Install application and deployment configuration
+      ansible.builtin.template:
+        src: env.j2
+        dest: "{{ vulcan_install_dir }}/.env"
+        owner: root
+        group: root
+        mode: '0600'
+      no_log: true
+      diff: false
+
+    # Compose resolves env_file into service configuration and recreates changed
+    # containers on up. A restart alone would retain the old environment.
+    - name: Pull the selected image and converge the API and sync services
+      community.docker.docker_compose_v2:
+        project_src: "{{ vulcan_install_dir }}"
+        project_name: vulcan-notify
+        files:
+          - compose.yml
+        services:
+          - vulcan-api
+          - vulcan-sync
+        state: present
+        build: never
+        pull: always
+        recreate: auto
+        wait: true
+        wait_timeout: 120
+      when: not ansible_check_mode
+      no_log: true

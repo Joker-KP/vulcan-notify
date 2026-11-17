@@ -1,0 +1,18 @@
+{
+  "endpoint": "/api/PodrecznikiLataSzkolne",
+  "source": "sanitized-live",
+  "responses": [
+    [
+      {
+        "nazwa": "SYNTHETIC",
+        "zaznaczony": false,
+        "id": 1
+      },
+      {
+        "nazwa": "SYNTHETIC",
+        "zaznaczony": false,
+        "id": 1
+      }
+    ]
+  ]
+}

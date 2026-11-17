@@ -1,7 +1,12 @@
 """Tests for macOS Calendar integration."""
 
-from unittest.mock import AsyncMock, patch
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
+from vulcan_notify import __main__ as cli
+from vulcan_notify import calendar as calendar_mod
 from vulcan_notify.calendar import (
     CalendarSyncResult,
     _escape_applescript,
@@ -11,6 +16,7 @@ from vulcan_notify.calendar import (
     _parse_date,
     sync_to_calendar,
 )
+from vulcan_notify.config import settings
 from vulcan_notify.db import Database
 from vulcan_notify.models import Exam, Homework, Student
 
@@ -116,17 +122,13 @@ async def test_set_and_clear_calendar_uid(db: Database) -> None:
     await db.set_calendar_uid("exams", EXAM.id, "UID-123")
     await db.commit()
 
-    cursor = await db.db.execute(
-        "SELECT calendar_uid FROM exams WHERE id = ?", (EXAM.id,)
-    )
+    cursor = await db.db.execute("SELECT calendar_uid FROM exams WHERE id = ?", (EXAM.id,))
     assert (await cursor.fetchone())[0] == "UID-123"
 
     await db.clear_calendar_uid("exams", EXAM.id)
     await db.commit()
 
-    cursor = await db.db.execute(
-        "SELECT calendar_uid FROM exams WHERE id = ?", (EXAM.id,)
-    )
+    cursor = await db.db.execute("SELECT calendar_uid FROM exams WHERE id = ?", (EXAM.id,))
     assert (await cursor.fetchone())[0] is None
 
 
@@ -181,13 +183,9 @@ async def test_clear_all_calendar_uids(db: Database) -> None:
 
     await db.clear_all_calendar_uids()
 
-    cursor = await db.db.execute(
-        "SELECT calendar_uid FROM exams WHERE id = ?", (EXAM.id,)
-    )
+    cursor = await db.db.execute("SELECT calendar_uid FROM exams WHERE id = ?", (EXAM.id,))
     assert (await cursor.fetchone())[0] is None
-    cursor = await db.db.execute(
-        "SELECT calendar_uid FROM homework WHERE id = ?", (HOMEWORK.id,)
-    )
+    cursor = await db.db.execute("SELECT calendar_uid FROM homework WHERE id = ?", (HOMEWORK.id,))
     assert (await cursor.fetchone())[0] is None
 
 
@@ -217,9 +215,7 @@ async def test_sync_creates_events(
     assert result.errors == 0
 
     # Verify UIDs stored
-    cursor = await db.db.execute(
-        "SELECT calendar_uid FROM exams WHERE id = ?", (EXAM.id,)
-    )
+    cursor = await db.db.execute("SELECT calendar_uid FROM exams WHERE id = ?", (EXAM.id,))
     assert (await cursor.fetchone())[0] == "NEW-UID-1"
 
 
@@ -243,6 +239,92 @@ async def test_sync_updates_existing_events(
 
     assert result.updated == 1
     assert result.created == 0
+
+
+@pytest.mark.parametrize("table,item", [("exams", EXAM), ("homework", HOMEWORK)])
+@pytest.mark.parametrize("operation", ["update", "delete"])
+async def test_transient_calendar_failure_retains_uid_and_retries(
+    db, monkeypatch, table, item, operation
+):
+    monkeypatch.setattr(settings, "calendar_map", {STUDENT.name: "School Alice"})
+    script = AsyncMock(side_effect=RuntimeError("temporary Calendar failure"))
+    monkeypatch.setattr(calendar_mod, "_run_applescript", script)
+    await db.upsert_student(STUDENT)
+    await getattr(db, "upsert_exam" if table == "exams" else "upsert_homework")(STUDENT.key, item)
+    await db.set_calendar_uid(table, item.id, "EXISTING")
+    if operation == "delete":
+        await db.db.execute(
+            f"UPDATE {table} SET deleted_at=CURRENT_TIMESTAMP WHERE id=?", (item.id,)
+        )
+    await db.commit()
+    failed = await sync_to_calendar(db)
+    assert failed.errors == 1
+    cursor = await db.db.execute(f"SELECT calendar_uid FROM {table} WHERE id=?", (item.id,))
+    assert (await cursor.fetchone())[0] == "EXISTING"
+    script.side_effect = None
+    script.return_value = "UPDATED"
+    retried = await sync_to_calendar(db)
+    assert retried.errors == 0
+    assert retried.created == 0
+    assert getattr(retried, "updated" if operation == "update" else "deleted") == 1
+
+
+@pytest.mark.parametrize("table,item", [("exams", EXAM), ("homework", HOMEWORK)])
+async def test_confirmed_missing_event_can_be_recreated(db, monkeypatch, table, item):
+    monkeypatch.setattr(settings, "calendar_map", {STUDENT.name: "School Alice"})
+    script = AsyncMock(return_value=calendar_mod._MISSING_EVENT)
+    monkeypatch.setattr(calendar_mod, "_run_applescript", script)
+    await db.upsert_student(STUDENT)
+    await getattr(db, "upsert_exam" if table == "exams" else "upsert_homework")(STUDENT.key, item)
+    await db.set_calendar_uid(table, item.id, "MISSING")
+    await db.commit()
+    assert (await sync_to_calendar(db)).errors == 1
+    script.return_value = "NEW-UID"
+    assert (await sync_to_calendar(db)).created == 1
+
+
+async def test_force_calendar_sync_preserves_uid_after_failed_deletion(db, monkeypatch):
+    monkeypatch.setattr(settings, "db_path", db._db_path)
+    monkeypatch.setattr(settings, "calendar_map", {STUDENT.name: "School Alice"})
+    monkeypatch.setattr(
+        calendar_mod, "_delete_event", AsyncMock(side_effect=RuntimeError("temporary"))
+    )
+    monkeypatch.setattr(cli, "sync_to_calendar", AsyncMock(return_value=CalendarSyncResult()))
+    await db.upsert_student(STUDENT)
+    await db.upsert_exam(STUDENT.key, EXAM)
+    await db.set_calendar_uid("exams", EXAM.id, "EXISTING")
+    await db.commit()
+    await cli.cmd_calendar()
+    cursor = await db.db.execute("SELECT calendar_uid FROM exams WHERE id=?", (EXAM.id,))
+    assert (await cursor.fetchone())[0] == "EXISTING"
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_applescript_deadline_and_cancellation_kill_and_reap_process(monkeypatch, cancelled):
+    monkeypatch.setattr(settings, "calendar_timeout_seconds", 0.01 if not cancelled else 30)
+    started = asyncio.Event()
+    calls = 0
+
+    async def communicate():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            started.set()
+            await asyncio.Future()
+        return b"", b""
+
+    process = MagicMock(communicate=AsyncMock(side_effect=communicate))
+    monkeypatch.setattr(
+        calendar_mod.asyncio, "create_subprocess_exec", AsyncMock(return_value=process)
+    )
+    task = asyncio.create_task(calendar_mod._run_applescript("fixture"))
+    await started.wait()
+    if cancelled:
+        task.cancel()
+    with pytest.raises(asyncio.CancelledError if cancelled else TimeoutError):
+        await task
+    process.kill.assert_called_once()
+    assert process.communicate.await_count == 2
 
 
 @patch("vulcan_notify.calendar.settings")
@@ -270,9 +352,7 @@ async def test_sync_deletes_soft_deleted_events(
     assert result.deleted == 1
 
     # UID should be cleared
-    cursor = await db.db.execute(
-        "SELECT calendar_uid FROM exams WHERE id = ?", (EXAM.id,)
-    )
+    cursor = await db.db.execute("SELECT calendar_uid FROM exams WHERE id = ?", (EXAM.id,))
     assert (await cursor.fetchone())[0] is None
 
 

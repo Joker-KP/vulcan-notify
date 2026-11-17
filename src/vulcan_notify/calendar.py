@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -19,6 +20,12 @@ _EXAM_TYPE_NAMES = {
     1: "Sprawdzian",
     2: "Kartkowka",
 }
+
+_MISSING_EVENT = "__VULCAN_EVENT_MISSING__"
+
+
+class CalendarEventMissingError(RuntimeError):
+    """Calendar confirmed that the stored UID no longer identifies an event."""
 
 
 @dataclass
@@ -65,11 +72,21 @@ def _escape_applescript(text: str) -> str:
 async def _run_applescript(script: str) -> str:
     """Run an AppleScript and return stdout."""
     proc = await asyncio.create_subprocess_exec(
-        "osascript", "-e", script,
+        "osascript",
+        "-e",
+        script,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await proc.communicate()
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=settings.calendar_timeout_seconds
+        )
+    except (TimeoutError, asyncio.CancelledError):
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        await proc.communicate()
+        raise
     if proc.returncode != 0:
         error_msg = stderr.decode().strip()
         raise RuntimeError(f"AppleScript failed: {error_msg}")
@@ -130,6 +147,9 @@ async def _update_event(
     script = f'''
 tell application "Calendar"
     tell calendar "{cal_esc}"
+        set matchingEvents to every event whose uid is "{uid_esc}"
+        if (count of matchingEvents) is 0 then return "{_MISSING_EVENT}"
+        set targetEvent to item 1 of matchingEvents
         set eventDate to current date
         set year of eventDate to {date[:4]}
         set month of eventDate to {date[5:7]}
@@ -137,15 +157,16 @@ tell application "Calendar"
         set hours of eventDate to 0
         set minutes of eventDate to 0
         set seconds of eventDate to 0
-        set targetEvent to first event whose uid is "{uid_esc}"
         set summary of targetEvent to "{title_esc}"
         set start date of targetEvent to eventDate
         set end date of targetEvent to eventDate
         set description of targetEvent to "{desc_esc}"
+        return "__VULCAN_EVENT_UPDATED__"
     end tell
 end tell
 '''
-    await _run_applescript(script)
+    if await _run_applescript(script) == _MISSING_EVENT:
+        raise CalendarEventMissingError("Calendar event no longer exists")
 
 
 async def _delete_event(calendar_name: str, uid: str) -> None:
@@ -156,7 +177,8 @@ async def _delete_event(calendar_name: str, uid: str) -> None:
     script = f'''
 tell application "Calendar"
     tell calendar "{cal_esc}"
-        delete (first event whose uid is "{uid_esc}")
+        set matchingEvents to every event whose uid is "{uid_esc}"
+        if (count of matchingEvents) is greater than 0 then delete (item 1 of matchingEvents)
     end tell
 end tell
 '''
@@ -197,10 +219,10 @@ async def sync_to_calendar(db: Database) -> CalendarSyncResult:
                     result.deleted += 1
                 except Exception:
                     logger.debug(
-                        "Failed to delete calendar event for %s %s, clearing UID",
-                        table, item["id"],
+                        "Failed to delete calendar event for %s %s; retaining UID for retry",
+                        table,
+                        item["id"],
                     )
-                    await db.clear_calendar_uid(table, int(str(item["id"])))
                     result.errors += 1
 
         # Sync active items
@@ -217,20 +239,27 @@ async def sync_to_calendar(db: Database) -> CalendarSyncResult:
             if exam["calendar_uid"]:
                 try:
                     await _update_event(
-                        calendar_name, str(exam["calendar_uid"]),
-                        title, date, body,
+                        calendar_name,
+                        str(exam["calendar_uid"]),
+                        title,
+                        date,
+                        body,
                     )
                     result.updated += 1
-                except Exception:
-                    logger.debug(
-                        "Failed to update exam %s, clearing stale UID", exam["id"]
-                    )
+                except CalendarEventMissingError:
                     await db.clear_calendar_uid("exams", int(str(exam["id"])))
+                    result.errors += 1
+                except Exception:
+                    logger.debug("Failed to update exam %s; retaining UID for retry", exam["id"])
                     result.errors += 1
             else:
                 try:
                     uid = await _create_event(
-                        calendar_name, title, date, body, reminder_hours,
+                        calendar_name,
+                        title,
+                        date,
+                        body,
+                        reminder_hours,
                     )
                     await db.set_calendar_uid("exams", int(str(exam["id"])), uid)
                     result.created += 1
@@ -249,27 +278,32 @@ async def sync_to_calendar(db: Database) -> CalendarSyncResult:
             if hw["calendar_uid"]:
                 try:
                     await _update_event(
-                        calendar_name, str(hw["calendar_uid"]),
-                        title, date, body,
+                        calendar_name,
+                        str(hw["calendar_uid"]),
+                        title,
+                        date,
+                        body,
                     )
                     result.updated += 1
-                except Exception:
-                    logger.debug(
-                        "Failed to update homework %s, clearing stale UID", hw["id"]
-                    )
+                except CalendarEventMissingError:
                     await db.clear_calendar_uid("homework", int(str(hw["id"])))
+                    result.errors += 1
+                except Exception:
+                    logger.debug("Failed to update homework %s; retaining UID for retry", hw["id"])
                     result.errors += 1
             else:
                 try:
                     uid = await _create_event(
-                        calendar_name, title, date, body, reminder_hours,
+                        calendar_name,
+                        title,
+                        date,
+                        body,
+                        reminder_hours,
                     )
                     await db.set_calendar_uid("homework", int(str(hw["id"])), uid)
                     result.created += 1
                 except Exception:
-                    logger.exception(
-                        "Failed to create homework event for %s", hw["id"]
-                    )
+                    logger.exception("Failed to create homework event for %s", hw["id"])
                     result.errors += 1
 
     await db.commit()

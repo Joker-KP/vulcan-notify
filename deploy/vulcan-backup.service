@@ -3,4 +3,5 @@ Description=vulcan-notify database backup
 
 [Service]
 Type=oneshot
+EnvironmentFile=-/opt/vulcan-notify/.env
 ExecStart=/opt/vulcan-notify/deploy/backup-db.sh

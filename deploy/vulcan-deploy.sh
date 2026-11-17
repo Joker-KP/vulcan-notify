@@ -1,6 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
+export TZ="${TZ:-${QUIET_HOURS_TZ:-Europe/Warsaw}}"
+
 DEPLOY_DIR="/opt/vulcan-notify"
 cd "$DEPLOY_DIR"
 

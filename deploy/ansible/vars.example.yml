@@ -1,0 +1,7 @@
+# Copy to private/vars.yml and adjust. Paths are on the Ansible controller.
+vulcan_install_dir: /opt/vulcan-notify
+# Select a tag that you have published, or pin an image digest.
+vulcan_image: macjoker/vulcan-notify:0.20.0
+vulcan_env_file: "{{ playbook_dir }}/private/vulcan.env"
+# API has no authentication. Use a trusted LAN address to expose it to HA.
+vulcan_api_bind: 127.0.0.1

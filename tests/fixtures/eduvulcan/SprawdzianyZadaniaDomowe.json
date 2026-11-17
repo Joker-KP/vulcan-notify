@@ -1,0 +1,7 @@
+{
+  "endpoint": "/api/SprawdzianyZadaniaDomowe",
+  "source": "sanitized-live",
+  "responses": [
+    []
+  ]
+}

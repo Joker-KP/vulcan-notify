@@ -1,0 +1,7 @@
+{
+  "endpoint": "/api/SzczesliwyNumerTablica",
+  "source": "sanitized-live",
+  "responses": [
+    null
+  ]
+}

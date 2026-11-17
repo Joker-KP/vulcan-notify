@@ -8,8 +8,14 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
+
+from vulcan_notify.config import settings
+from vulcan_notify.time_utils import as_utc
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +53,7 @@ def _format_dt(iso_with_tz: str) -> str:
     Raises ValueError on unparseable input; build_calendar skips those rows rather
     than letting one bad lesson 500 the whole feed.
     """
-    dt = datetime.fromisoformat(iso_with_tz).astimezone(UTC)
+    dt = as_utc(datetime.fromisoformat(iso_with_tz))
     return dt.strftime("%Y%m%dT%H%M%SZ")
 
 
@@ -60,7 +66,7 @@ def _parse_stamp(raw: object) -> datetime | None:
         dt = datetime.fromisoformat(text)
     except ValueError:
         return None
-    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+    return as_utc(dt)
 
 
 def _stable_uid(student_key: str, date: str, time_from: str, subject: str) -> str:
@@ -82,6 +88,7 @@ def _stale_event(student_key: str, stale_since: datetime | None, now: datetime) 
     rather than inventing a timestamp.
     """
     digest = hashlib.sha1(f"stale|{student_key}".encode()).hexdigest()[:16]
+    now = now.astimezone(settings.timezone)
     today = now.strftime("%Y%m%d")
     tomorrow = (now + timedelta(days=1)).strftime("%Y%m%d")
 
@@ -89,11 +96,9 @@ def _stale_event(student_key: str, stale_since: datetime | None, now: datetime) 
         summary = "⚠️ School sync has not completed"
         detail = "vulcan-notify has no record of a successful schedule fetch."
     else:
-        since = stale_since.strftime("%Y-%m-%d %H:%M")
+        since = as_utc(stale_since).astimezone(settings.timezone).strftime("%Y-%m-%d %H:%M %z")
         summary = f"⚠️ School sync stale since {since}"
-        detail = (
-            f"vulcan-notify has not successfully fetched the schedule since {since}."
-        )
+        detail = f"vulcan-notify has not successfully fetched the schedule since {since}."
 
     # DTSTAMP is pinned to the day, not the request: a per-request stamp would make
     # every poll look like the warning had changed.

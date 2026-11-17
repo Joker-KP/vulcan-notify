@@ -1,0 +1,112 @@
+{
+  "endpoint": "/api/Context",
+  "source": "sanitized-live",
+  "responses": [
+    {
+      "uczniowie": [
+        {
+          "idJednostkaSkladowa": 1,
+          "idOddzial": 1,
+          "idDziennik": 1,
+          "rodzajDziennika": 1,
+          "dziennikDataOd": "2000-01-03T08:00:00+01:00",
+          "dziennikDataDo": "2000-01-03T08:00:00+01:00",
+          "isUczen": false,
+          "isPrzedszkolak": false,
+          "isWychowanek": false,
+          "key": "SYNTHETIC",
+          "uczen": "SYNTHETIC",
+          "oddzial": "SYNTHETIC",
+          "jednostka": "SYNTHETIC",
+          "jednostkaGodzinaOd": null,
+          "jednostkaGodzinaDo": null,
+          "isDorosli": false,
+          "isPolicealna": false,
+          "is13": false,
+          "isArtystyczna": false,
+          "isArtystyczna13": false,
+          "isSpecjalna": false,
+          "pelnoletniUczen": false,
+          "opiekunUcznia": false,
+          "wymagaAutoryzacji": false,
+          "posiadaPesel": false,
+          "aktywny": true,
+          "globalKeySkrzynka": "00000000-0000-4000-8000-000000000001",
+          "config": {
+            "isOplaty": false,
+            "isPlatnosci": false,
+            "isZaplac": false,
+            "isScalanieKont": false,
+            "isJadlospis": false,
+            "isOffice365": false,
+            "isSynchronizacjaEsb": false,
+            "isDydaktyka": false,
+            "isNadzorPedagogiczny": false,
+            "isZmianaZdjecia": false,
+            "isZglaszanieNieobecnosci": false,
+            "isLekcjeZrealizowane": false,
+            "isLekcjeZaplanowane": false,
+            "isPodreczniki": false,
+            "oneDriveClientId": "00000000-0000-4000-8000-000000000001",
+            "projectClient": null,
+            "payByNetUrlForPayment": "SYNTHETIC",
+            "isDostepMobilny": false
+          }
+        }
+      ]
+    },
+    {
+      "uczniowie": [
+        {
+          "idJednostkaSkladowa": 1,
+          "idOddzial": 1,
+          "idDziennik": 1,
+          "rodzajDziennika": 1,
+          "dziennikDataOd": "2000-01-03T08:00:00+01:00",
+          "dziennikDataDo": "2000-01-03T08:00:00+01:00",
+          "isUczen": false,
+          "isPrzedszkolak": false,
+          "isWychowanek": false,
+          "key": "SYNTHETIC",
+          "uczen": "SYNTHETIC",
+          "oddzial": "SYNTHETIC",
+          "jednostka": "SYNTHETIC",
+          "jednostkaGodzinaOd": null,
+          "jednostkaGodzinaDo": null,
+          "isDorosli": false,
+          "isPolicealna": false,
+          "is13": false,
+          "isArtystyczna": false,
+          "isArtystyczna13": false,
+          "isSpecjalna": false,
+          "pelnoletniUczen": false,
+          "opiekunUcznia": false,
+          "wymagaAutoryzacji": false,
+          "posiadaPesel": false,
+          "aktywny": true,
+          "globalKeySkrzynka": "00000000-0000-4000-8000-000000000001",
+          "config": {
+            "isOplaty": false,
+            "isPlatnosci": false,
+            "isZaplac": false,
+            "isScalanieKont": false,
+            "isJadlospis": false,
+            "isOffice365": false,
+            "isSynchronizacjaEsb": false,
+            "isDydaktyka": false,
+            "isNadzorPedagogiczny": false,
+            "isZmianaZdjecia": false,
+            "isZglaszanieNieobecnosci": false,
+            "isLekcjeZrealizowane": false,
+            "isLekcjeZaplanowane": false,
+            "isPodreczniki": false,
+            "oneDriveClientId": "00000000-0000-4000-8000-000000000001",
+            "projectClient": null,
+            "payByNetUrlForPayment": "SYNTHETIC",
+            "isDostepMobilny": false
+          }
+        }
+      ]
+    }
+  ]
+}

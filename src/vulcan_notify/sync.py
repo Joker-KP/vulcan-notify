@@ -2,27 +2,72 @@
 
 from __future__ import annotations
 
+import json
 import logging
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
+from vulcan_notify.client import SessionExpiredError
 from vulcan_notify.config import settings
 from vulcan_notify.differ import (
     Change,
     diff_attendance,
+    diff_completed_lessons,
     diff_exams,
     diff_grades,
     diff_homework,
+    diff_remarks,
     diff_schedule,
 )
 
 if TYPE_CHECKING:
     from vulcan_notify.client import VulcanClient
     from vulcan_notify.db import Database
-    from vulcan_notify.models import Grade, Message, Student
+    from vulcan_notify.models import Grade, Lesson, Message, Student
 
 logger = logging.getLogger(__name__)
+
+_STUDENT_SECTIONS = ("grades", "attendance", "exams", "homework", "schedule")
+
+
+def _normalize_schedule(lessons: list[Lesson]) -> list[Lesson]:
+    """Choose one complete API entry per persisted lesson key before diff/save.
+
+    PlanZajec can return both substituted and plain entries for the same slot.
+    Prefer the substituted entry so a later plain duplicate cannot erase it.
+    Extra/annotated entries take precedence next; conflicting variants use a
+    stable content tie-breaker because this API provides no revision timestamp.
+    Only this fetch is considered, so removed substitutions can still clear.
+    """
+
+    def priority(lesson: Lesson) -> tuple[bool, bool, bool, str]:
+        return (
+            lesson.is_substituted,
+            lesson.is_extra,
+            bool(lesson.annotation),
+            json.dumps(asdict(lesson), sort_keys=True, ensure_ascii=False),
+        )
+
+    by_key: dict[tuple[str, str, str], Lesson] = {}
+    for lesson in lessons:
+        key = (lesson.date, lesson.time_from, lesson.subject)
+        existing = by_key.get(key)
+        if existing is None or priority(lesson) > priority(existing):
+            by_key[key] = lesson
+    return [by_key[key] for key in sorted(by_key)]
+
+
+def _api_date_window(now: datetime, days_past: int, days_future: int) -> tuple[str, str]:
+    """Serialize full local days as UTC instants, respecting DST at each bound."""
+    midnight = now.astimezone(settings.timezone).replace(hour=0, minute=0, second=0, microsecond=0)
+    start = midnight - timedelta(days=days_past)
+    end = midnight + timedelta(days=days_future + 1) - timedelta(milliseconds=1)
+    return (
+        start.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        end.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+    )
 
 
 @dataclass
@@ -38,6 +83,11 @@ class SyncResult:
     unread_messages: int = 0
     is_first_sync: bool = False
     failed_sections: dict[str, str] = field(default_factory=dict)
+    new_remarks: list[Change] = field(default_factory=list)
+    is_first_remarks_sync: bool = False
+    portal_url: str | None = None
+    completed_lesson_changes: list[Change] = field(default_factory=list)
+    is_first_completed_lessons_sync: bool = False
 
     @property
     def has_failures(self) -> bool:
@@ -51,6 +101,8 @@ class SyncResult:
             or self.new_exams
             or self.new_homework
             or self.new_substitutions
+            or self.new_remarks
+            or self.completed_lesson_changes
         )
 
     @property
@@ -61,6 +113,8 @@ class SyncResult:
             + self.new_exams
             + self.new_homework
             + self.new_substitutions
+            + self.new_remarks
+            + self.completed_lesson_changes
         )
 
 
@@ -71,6 +125,21 @@ class FullSyncResult:
     student_results: list[SyncResult]
     new_messages: list[Message] = field(default_factory=list)
     is_first_message_sync: bool = False
+    message_failure: str | None = None
+    # Stable across repeated output delivery, distinct for each synchronization run.
+    notification_id: str = field(default_factory=lambda: uuid4().hex, repr=False, compare=False)
+
+    @property
+    def has_failures(self) -> bool:
+        return self.message_failure is not None or any(r.has_failures for r in self.student_results)
+
+
+class SyncSessionExpiredError(SessionExpiredError):
+    """Carry already persisted changes to outputs before authentication is retried."""
+
+    def __init__(self, message: str, partial_result: FullSyncResult) -> None:
+        super().__init__(message)
+        self.partial_result = partial_result
 
 
 async def sync_student(
@@ -89,15 +158,48 @@ async def sync_student(
 
     # Check if this is the first sync for this student
     last_sync = await db.get_state(f"last_sync:{student.key}")
-    is_first = last_sync is None
+    # Initialize once so a failed first fetch cannot inherit the student marker
+    # on the next run. Old installations with no section history retain their
+    # existing baseline; tracked installations inherit only confirmed successes.
+    initialized = f"baseline_sections:{student.key}"
+    if await db.get_state(initialized) is None:
+        if last_sync is not None:
+            cursor = await db.db.execute(
+                "SELECT 1 FROM sync_sections WHERE student_key = ? LIMIT 1", (student.key,)
+            )
+            legacy = await cursor.fetchone() is None
+            for section in _STUDENT_SECTIONS:
+                successful = await db.get_state(f"last_success:{student.key}:{section}")
+                if legacy or successful is not None:
+                    await db.set_state(
+                        f"last_sync:{student.key}:{section}", successful or last_sync
+                    )
+        await db.set_state(initialized, "1")
+        await db.commit()
+    first_sections = {
+        section: await db.get_state(f"last_sync:{student.key}:{section}") is None
+        for section in _STUDENT_SECTIONS
+    }
+    is_first = last_sync is None and all(first_sections.values())
 
-    result = SyncResult(student=student, is_first_sync=is_first)
+    result = SyncResult(
+        student=student, is_first_sync=is_first, portal_url=client.student_portal_url(student)
+    )
 
     async def section_ok(section: str, item_count: int) -> None:
-        if run_id is not None:
-            await db.record_section(
-                run_id, section, "ok", student_key=student.key, item_count=item_count
-            )
+        try:
+            await db.set_state(f"last_sync:{student.key}:{section}", datetime.now(UTC).isoformat())
+            if run_id is not None:
+                await db.record_section(
+                    run_id, section, "ok", student_key=student.key, item_count=item_count
+                )
+            else:
+                await db.commit()
+        except Exception:
+            # Failed commits must not leave a ready marker for section_failed()
+            # to accidentally commit when it records the failure.
+            await db.db.rollback()
+            raise
 
     async def section_failed(section: str, exc: Exception) -> None:
         detail = f"{type(exc).__name__}: {exc}"[:500]
@@ -107,6 +209,8 @@ async def sync_student(
             await db.record_section(
                 run_id, section, "failed", student_key=student.key, error_detail=detail
             )
+        if isinstance(exc, SessionExpiredError):
+            raise SyncSessionExpiredError(str(exc), FullSyncResult([result])) from exc
 
     # ── Grades ───────────────────────────────────────────────────
     try:
@@ -128,14 +232,17 @@ async def sync_student(
                 existing = all_grades.get(key)
                 if existing is None:
                     all_grades[key] = grade
-                elif existing.superseded_by_grade_id is not None and grade.superseded_by_grade_id is None:
+                elif (
+                    existing.superseded_by_grade_id is not None
+                    and grade.superseded_by_grade_id is None
+                ):
                     # Replace the original with the improvement
                     all_grades[key] = grade
             for summary in summaries:
                 await db.upsert_subject_summary(student.key, summary)
 
         deduplicated = list(all_grades.values())
-        if not is_first:
+        if not first_sections["grades"]:
             result.new_grades.extend(await diff_grades(student, deduplicated, db))
 
         for grade in deduplicated:
@@ -146,115 +253,136 @@ async def sync_student(
 
     # ── Attendance ───────────────────────────────────────────────
     try:
-        now = datetime.now()
-        date_from = (now - timedelta(days=settings.sync_attendance_days)).strftime(
-            "%Y-%m-%dT00:00:00.000Z"
-        )
-        date_to = now.strftime("%Y-%m-%dT23:59:59.999Z")
+        now = datetime.now(settings.timezone)
+        date_from, date_to = _api_date_window(now, settings.sync_attendance_days, 0)
 
         attendance = await client.get_attendance(student, date_from, date_to)
 
-        if not is_first:
-            result.new_attendance = await diff_attendance(student, attendance, db)
+        full_attendance_marker = f"last_sync:{student.key}:attendance_full"
+        first_full_attendance = await db.get_state(full_attendance_marker) is None
+        if not first_sections["attendance"]:
+            comparable = [
+                entry
+                for entry in attendance
+                if not first_full_attendance or entry.source == "oddzialy"
+            ]
+            result.new_attendance = await diff_attendance(student, comparable, db)
 
         for entry in attendance:
             await db.upsert_attendance(student.key, entry)
+        await db.set_state(full_attendance_marker, datetime.now(UTC).isoformat())
         await section_ok("attendance", len(attendance))
     except Exception as exc:
         await section_failed("attendance", exc)
 
     # ── Exams ────────────────────────────────────────────────────
     try:
-        exams = await client.get_exams(student)
-        stored_exam_ids = await db.get_exam_ids_for_student(student.key)
+        now = datetime.now(settings.timezone)
+        date_from, date_to = _api_date_window(
+            now, settings.sync_exam_days, settings.sync_exam_future_days
+        )
+        exams = await client.get_exams(student, date_from, date_to)
+        calendar_baseline = f"last_sync:{student.key}:exams_calendar"
+        first_exams = first_sections["exams"] or await db.get_state(calendar_baseline) is None
+        detailed_exam_ids: set[int] = set()
+        for exam in exams:
+            try:
+                detail = await client.get_exam_detail(student, exam.id)
+                if detail:
+                    exam.details = detail
+                    description = detail.get("opis")
+                    teacher = detail.get("nauczycielImieNazwisko")
+                    exam.description = description if isinstance(description, str) else None
+                    exam.teacher = teacher if isinstance(teacher, str) else None
+                    detailed_exam_ids.add(exam.id)
+            except SessionExpiredError:
+                raise
+            except Exception:
+                logger.debug("Failed to fetch exam detail for %d", exam.id)
 
-        if not is_first:
+        if not first_exams:
             result.new_exams = await diff_exams(student, exams, db)
-
         for exam in exams:
-            await db.upsert_exam(student.key, exam)
-
-        # Fetch detail for new exams or exams missing description
-        missing_detail = await db.get_exams_missing_detail(student.key)
-        for exam in exams:
-            if exam.id not in stored_exam_ids or exam.id in missing_detail:
-                try:
-                    detail = await client.get_exam_detail(student, exam.id)
-                    if detail:
-                        description = detail.get("opis", "")
-                        teacher = detail.get("nauczycielImieNazwisko", "")
-                        if description:
-                            await db.update_exam_description(
-                                exam.id, str(description), str(teacher) if teacher else None
-                            )
-                except Exception:
-                    logger.debug("Failed to fetch exam detail for %d", exam.id)
-
-        # Mark exams no longer returned by API as soft-deleted
-        if not is_first:
-            deleted = await db.mark_missing(student.key, "exams", {e.id for e in exams})
+            await db.upsert_exam(student.key, exam, detail_fetched=exam.id in detailed_exam_ids)
+        if not first_exams:
+            deleted = await db.mark_missing_exams_in_window(
+                student.key, {e.id for e in exams}, date_from, date_to
+            )
             if deleted:
                 logger.info("Soft-deleted %d exams for %s", deleted, student.name)
+        await db.set_state(calendar_baseline, datetime.now(UTC).isoformat())
         await section_ok("exams", len(exams))
     except Exception as exc:
         await section_failed("exams", exc)
 
     # ── Homework ─────────────────────────────────────────────────
     try:
-        homework = await client.get_homework(student)
-        stored_hw_ids = await db.get_homework_ids_for_student(student.key)
+        now = datetime.now(settings.timezone)
+        date_from, date_to = _api_date_window(
+            now, settings.sync_homework_days, settings.sync_homework_future_days
+        )
+        homework = await client.get_homework(student, date_from, date_to)
+        calendar_baseline = f"last_sync:{student.key}:homework_calendar"
+        first_homework = first_sections["homework"] or await db.get_state(calendar_baseline) is None
+        # Refresh each returned task: descriptions, resources and responses can change.
+        detailed_ids: set[int] = set()
+        for hw in homework:
+            try:
+                detail = await client.get_homework_detail(student, hw.id)
+                if detail:
+                    hw.details = detail
+                    for field, source in (
+                        ("content", "opis"),
+                        ("teacher", "nauczycielImieNazwisko"),
+                        ("response_deadline", "terminOdpowiedzi"),
+                    ):
+                        value = detail.get(source)
+                        setattr(hw, field, value if isinstance(value, str) else None)
+                    links = detail.get("linki")
+                    hw.links = links if isinstance(links, list) else None
+                    required = detail.get("odpowiedzWymagana")
+                    hw.response_required = required if isinstance(required, bool) else None
+                    detailed_ids.add(hw.id)
+            except SessionExpiredError:
+                raise
+            except Exception:
+                logger.debug("Failed to fetch homework detail for %d", hw.id)
 
-        if not is_first:
+        if not first_homework:
             result.new_homework = await diff_homework(student, homework, db)
 
         for hw in homework:
-            await db.upsert_homework(student.key, hw)
-
-        # Fetch detail for new homework or homework missing content
-        missing_detail = await db.get_homework_missing_detail(student.key)
-        for hw in homework:
-            if hw.id not in stored_hw_ids or hw.id in missing_detail:
-                try:
-                    detail = await client.get_homework_detail(student, hw.id)
-                    if detail:
-                        content = detail.get("opis", "")
-                        teacher = detail.get("nauczycielImieNazwisko", "")
-                        if content:
-                            await db.update_homework_content(
-                                hw.id, str(content), str(teacher) if teacher else None
-                            )
-                except Exception:
-                    logger.debug("Failed to fetch homework detail for %d", hw.id)
+            await db.upsert_homework(student.key, hw, detail_fetched=hw.id in detailed_ids)
 
         # Mark homework no longer returned by API as soft-deleted
-        if not is_first:
-            deleted = await db.mark_missing(student.key, "homework", {h.id for h in homework})
+        if not first_homework:
+            deleted = await db.mark_missing_homework_in_window(
+                student.key, {h.id for h in homework}, date_from, date_to
+            )
             if deleted:
                 logger.info("Soft-deleted %d homework for %s", deleted, student.name)
+        await db.set_state(calendar_baseline, datetime.now(UTC).isoformat())
         await section_ok("homework", len(homework))
     except Exception as exc:
         await section_failed("homework", exc)
 
     # ── Schedule / Substitutions ─────────────────────────────────
     try:
-        now = datetime.now()
-        # Previous week + next two weeks, expressed as UTC ISO for the API.
-        date_from_api = (now - timedelta(days=7)).strftime("%Y-%m-%dT00:00:00.000Z")
-        date_to_api = (now + timedelta(days=14)).strftime("%Y-%m-%dT23:59:59.999Z")
+        now = datetime.now(settings.timezone)
+        # Whole local days, converted to UTC ISO for the API.
+        date_from_api, date_to_api = _api_date_window(now, 7, 14)
 
-        lessons = await client.get_schedule(student, date_from_api, date_to_api)
+        lessons = _normalize_schedule(
+            await client.get_schedule(student, date_from_api, date_to_api)
+        )
 
-        # Anchor the diff window to the fetched lessons' actual local-date range
-        # so that timezone drift in the UTC API window doesn't park a lesson
-        # outside the DB lookup and resurrect it as "new" on every sync.
-        if lessons:
-            date_from_local = min(lesson.date for lesson in lessons)
-            date_to_local = max(lesson.date for lesson in lessons)
-        else:
-            date_from_local = (now - timedelta(days=7)).strftime("%Y-%m-%d")
-            date_to_local = (now + timedelta(days=14)).strftime("%Y-%m-%d")
+        # Include the full requested window, even when its boundary days vanish.
+        # Extend it for returned boundary dates to retain timezone-drift tolerance.
+        dates = [lesson.date for lesson in lessons]
+        date_from_local = min([(now - timedelta(days=7)).strftime("%Y-%m-%d"), *dates])
+        date_to_local = max([(now + timedelta(days=14)).strftime("%Y-%m-%d"), *dates])
 
-        if not is_first:
+        if not first_sections["schedule"]:
             result.new_substitutions = await diff_schedule(
                 student, lessons, db, date_from_local, date_to_local
             )
@@ -265,7 +393,51 @@ async def sync_student(
     except Exception as exc:
         await section_failed("schedule", exc)
 
-    # Commit all entity upserts in one transaction
+    # Remarks have their own baseline for installations that already sync students.
+    # Only a successful fetch + persistence initializes this marker, including [].
+    try:
+        marker = f"last_sync:{student.key}:remarks"
+        result.is_first_remarks_sync = await db.get_state(marker) is None
+        remarks = await client.get_remarks(student)
+        changes = (
+            []
+            if result.is_first_remarks_sync or is_first
+            else await diff_remarks(student, remarks, db)
+        )
+        for remark in remarks:
+            await db.upsert_remark(student.key, remark)
+        await db.mark_missing_remarks(student.key, {remark.id for remark in remarks})
+        await db.set_state(marker, datetime.now(UTC).isoformat())
+        await db.commit()
+        result.new_remarks = changes
+        await section_ok("remarks", len(remarks))
+    except Exception as exc:
+        await section_failed("remarks", exc)
+
+    # New categories baseline independently, including upgrades of existing databases.
+    try:
+        marker = f"last_sync:{student.key}:completed_lessons"
+        result.is_first_completed_lessons_sync = await db.get_state(marker) is None
+        now = datetime.now(settings.timezone)
+        date_from, date_to = _api_date_window(now, settings.sync_completed_lessons_days, 0)
+        completed = await client.get_completed_lessons(student, date_from, date_to)
+        changes = (
+            []
+            if result.is_first_completed_lessons_sync
+            else await diff_completed_lessons(student, completed, db)
+        )
+        for completed_lesson in completed:
+            await db.upsert_completed_lesson(student.key, completed_lesson)
+        await db.mark_missing_completed_lessons(
+            student.key, {lesson.id for lesson in completed}, date_from, date_to
+        )
+        await section_ok("completed_lessons", len(completed))
+        result.completed_lesson_changes = changes
+    except Exception as exc:
+        await db.db.rollback()
+        await section_failed("completed_lessons", exc)
+
+    # Flush remaining writes; recording section outcomes commits each section.
     await db.commit()
 
     # Mark sync attempted. This is the "have we ever seen this student" flag that
@@ -273,7 +445,7 @@ async def sync_student(
     # last_success:<student>:<section>, which only advances on a confirmed fetch.
     await db.set_state(
         f"last_sync:{student.key}",
-        datetime.now().isoformat(),
+        datetime.now(UTC).isoformat(),
     )
     await db.commit()
 
@@ -301,6 +473,8 @@ async def sync_messages(
         logger.exception("Failed to fetch messages")
         if run_id is not None:
             await db.record_section(run_id, "messages", "failed", error_detail=detail)
+        if isinstance(exc, SessionExpiredError):
+            raise
         return [], is_first, detail
 
     known_ids = await db.get_message_ids()
@@ -320,6 +494,10 @@ async def sync_messages(
             if content:
                 msg.content = content
                 await db.update_message_content(msg.id, content)
+        except SessionExpiredError as exc:
+            raise SyncSessionExpiredError(
+                str(exc), FullSyncResult([], new_messages, is_first)
+            ) from exc
         except Exception:
             logger.exception("Failed to fetch message detail for %d", msg.id)
 
@@ -331,12 +509,16 @@ async def sync_messages(
             content = await client.get_message_detail(api_key)
             if content:
                 await db.update_message_content(msg_id, content)
+        except SessionExpiredError as exc:
+            raise SyncSessionExpiredError(
+                str(exc), FullSyncResult([], new_messages, is_first)
+            ) from exc
         except Exception:
             logger.exception("Failed to backfill message detail for %d", msg_id)
     if backfill:
         logger.info("Backfilled content for %d message(s)", len(backfill))
 
-    await db.set_state("last_sync:messages", datetime.now().isoformat())
+    await db.set_state("last_sync:messages", datetime.now(UTC).isoformat())
     await db.commit()
 
     if run_id is not None:
@@ -360,6 +542,7 @@ async def sync_all(
     run_id = await db.create_sync_run()
     errors = 0
     items = 0
+    student_results: list[SyncResult] = []
 
     try:
         students = await client.get_students()
@@ -370,7 +553,7 @@ async def sync_all(
             await db.complete_sync_run(
                 run_id, "failed", 0, 0, 1, "roster empty: no active students returned"
             )
-            return FullSyncResult(student_results=[])
+            return FullSyncResult(student_results=[], notification_id=f"sync:{run_id}")
 
         # Vulcan's current roster is the source of truth for which keys are live.
         # Do this before syncing so a mid-loop failure still leaves the flags right.
@@ -379,7 +562,6 @@ async def sync_all(
             logger.info("Retired %d student row(s) from a previous school year", retired)
             await db.commit()
 
-        student_results: list[SyncResult] = []
         failures: list[str] = []
         for student in students:
             logger.info("Syncing %s (%s)...", student.name, student.class_name)
@@ -412,7 +594,19 @@ async def sync_all(
             student_results=student_results,
             new_messages=new_messages,
             is_first_message_sync=is_first_msg,
+            message_failure=msg_failure,
+            notification_id=f"sync:{run_id}",
         )
+    except SessionExpiredError as exc:
+        await db.complete_sync_run(
+            run_id, "failed", len(student_results), items, errors + 1, str(exc)
+        )
+        partial = (
+            exc.partial_result if isinstance(exc, SyncSessionExpiredError) else FullSyncResult([])
+        )
+        partial.student_results = student_results + partial.student_results
+        partial.notification_id = f"sync:{run_id}"
+        raise SyncSessionExpiredError(str(exc), partial) from exc
     except Exception as exc:
         await db.complete_sync_run(run_id, "failed", 0, items, errors + 1, str(exc))
         raise

@@ -1,0 +1,42 @@
+{
+  "endpoint": "/api/Usuniete",
+  "source": "sanitized-live",
+  "responses": [
+    [
+      {
+        "apiGlobalKey": "00000000-0000-4000-8000-000000000001",
+        "korespondenci": "SYNTHETIC",
+        "korespondenciSzczegoly": null,
+        "temat": "SYNTHETIC",
+        "data": "2000-01-03T08:00:00+01:00",
+        "skrzynka": "SYNTHETIC",
+        "hasZalaczniki": false,
+        "przeczytana": false,
+        "nieprzeczytanePrzeczytanePrzez": null,
+        "wazna": false,
+        "uzytkownikRola": 1,
+        "wycofana": false,
+        "odpowiedziana": false,
+        "przekazana": false,
+        "id": 1
+      },
+      {
+        "apiGlobalKey": "00000000-0000-4000-8000-000000000001",
+        "korespondenci": "SYNTHETIC",
+        "korespondenciSzczegoly": null,
+        "temat": "SYNTHETIC",
+        "data": "2000-01-03T08:00:00+01:00",
+        "skrzynka": "SYNTHETIC",
+        "hasZalaczniki": false,
+        "przeczytana": false,
+        "nieprzeczytanePrzeczytanePrzez": null,
+        "wazna": false,
+        "uzytkownikRola": 1,
+        "wycofana": false,
+        "odpowiedziana": false,
+        "przekazana": false,
+        "id": 1
+      }
+    ]
+  ]
+}

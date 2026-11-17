@@ -2,29 +2,42 @@
 
 from __future__ import annotations
 
+import json
 import logging
-from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, TypedDict
 
 import aiosqlite
 
+from vulcan_notify.config import settings
 from vulcan_notify.freshness import ages
+from vulcan_notify.time_utils import local_storage_timestamps
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from vulcan_notify.models import (
         AttendanceEntry,
+        CompletedLesson,
         Exam,
         Grade,
         Homework,
         Lesson,
         Message,
+        Remark,
         Student,
         SubjectSummary,
     )
 
 logger = logging.getLogger(__name__)
+
+
+class MqttOutboxRow(TypedDict):
+    id: int
+    topic: str
+    payload: str
+    attempts: int
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS students (
@@ -88,8 +101,10 @@ CREATE TABLE IF NOT EXISTS attendance (
     teacher TEXT,
     time_from TEXT,
     time_to TEXT,
+    source TEXT NOT NULL DEFAULT 'oddzialy',
+    entry_key TEXT NOT NULL DEFAULT '',
     first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (student_key, date, lesson_number),
+    PRIMARY KEY (student_key, date, lesson_number, source, entry_key),
     FOREIGN KEY (student_key) REFERENCES students(key)
 );
 
@@ -101,6 +116,8 @@ CREATE TABLE IF NOT EXISTS exams (
     type INTEGER NOT NULL,
     description TEXT,
     teacher TEXT,
+    details TEXT,
+    detail_fetched_at TIMESTAMP,
     first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     deleted_at TIMESTAMP,
@@ -115,10 +132,54 @@ CREATE TABLE IF NOT EXISTS homework (
     subject TEXT NOT NULL,
     content TEXT,
     teacher TEXT,
+    links TEXT,
+    response_required INTEGER,
+    response_deadline TEXT,
+    detail_fetched_at TIMESTAMP,
+    details TEXT,
     first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     deleted_at TIMESTAMP,
     calendar_uid TEXT,
+    FOREIGN KEY (student_key) REFERENCES students(key)
+);
+
+CREATE TABLE IF NOT EXISTS remarks (
+    student_key TEXT NOT NULL,
+    id INTEGER NOT NULL,
+    date TEXT NOT NULL,
+    category TEXT NOT NULL,
+    type INTEGER NOT NULL,
+    author TEXT NOT NULL,
+    content TEXT NOT NULL,
+    kind INTEGER NOT NULL,
+    points REAL,
+    url TEXT,
+    first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP,
+    PRIMARY KEY (student_key, id),
+    FOREIGN KEY (student_key) REFERENCES students(key)
+);
+
+CREATE TABLE IF NOT EXISTS completed_lessons (
+    student_key TEXT NOT NULL,
+    id INTEGER NOT NULL,
+    date TEXT NOT NULL,
+    lesson_number INTEGER NOT NULL,
+    subject TEXT NOT NULL,
+    teacher TEXT NOT NULL,
+    topic TEXT NOT NULL,
+    thematic_block TEXT NOT NULL,
+    online TEXT NOT NULL,
+    collections TEXT NOT NULL,
+    has_collections BOOLEAN NOT NULL,
+    resources TEXT NOT NULL,
+    url TEXT,
+    first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP,
+    PRIMARY KEY (student_key, id),
     FOREIGN KEY (student_key) REFERENCES students(key)
 );
 
@@ -166,6 +227,40 @@ CREATE TABLE IF NOT EXISTS mqtt_outbox (
     last_error TEXT
 );
 
+-- Successful rows retain only delivery identity/metadata; private content is cleared.
+CREATE TABLE IF NOT EXISTS email_outbox (
+    delivery_key TEXT PRIMARY KEY,
+    sender TEXT,
+    recipient TEXT,
+    subject TEXT,
+    body TEXT,
+    html_body TEXT,
+    message_id TEXT NOT NULL,
+    date_header TEXT NOT NULL,
+    enqueued_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    sent_at TIMESTAMP,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT
+);
+
+-- One shared substitution/cancellation window per recipient (all students).
+CREATE TABLE IF NOT EXISTS email_schedule_state (
+    recipient_key TEXT PRIMARY KEY,
+    quiet_until TEXT,
+    pending_delivery_key TEXT
+);
+
+-- Clearing payload after enqueue preserves ingestion deduplication without private content.
+CREATE TABLE IF NOT EXISTS email_schedule_events (
+    recipient_key TEXT NOT NULL,
+    event_key TEXT NOT NULL,
+    payload TEXT,
+    detected_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (recipient_key, event_key)
+);
+CREATE INDEX IF NOT EXISTS email_schedule_pending
+    ON email_schedule_events (recipient_key) WHERE payload IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS sync_state (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
@@ -202,7 +297,16 @@ CREATE INDEX IF NOT EXISTS idx_sync_runs_started ON sync_runs(started_at);
 
 # Data sections a sync covers. Health is reported per section so a partial
 # outage names the broken part instead of just going red.
-SECTIONS = ("grades", "attendance", "exams", "homework", "schedule", "messages")
+SECTIONS = (
+    "grades",
+    "attendance",
+    "exams",
+    "homework",
+    "schedule",
+    "remarks",
+    "completed_lessons",
+    "messages",
+)
 
 
 class Database:
@@ -233,6 +337,13 @@ class Database:
 
     async def _migrate(self) -> None:
         """Handle schema migrations."""
+        # Preserve queued plain-text emails when adding multipart notifications.
+        cursor = await self.db.execute("PRAGMA table_info(email_outbox)")
+        email_columns = {row[1] for row in await cursor.fetchall()}
+        if email_columns and "html_body" not in email_columns:
+            await self.db.execute("ALTER TABLE email_outbox ADD COLUMN html_body TEXT")
+            logger.info("Migrating: adding html_body column to email_outbox")
+
         # Drop legacy hash-based tables
         for table in ("seen_items", "poll_state"):
             cursor = await self.db.execute(
@@ -243,6 +354,31 @@ class Database:
                 logger.info("Migrating: dropping legacy %s table", table)
                 await self.db.execute(f"DROP TABLE {table}")
 
+        # Extra activities lack lesson numbers; extend identity without losing history.
+        cursor = await self.db.execute("PRAGMA table_info(attendance)")
+        attendance_columns = {row[1] for row in await cursor.fetchall()}
+        if attendance_columns and "source" not in attendance_columns:
+            await self.db.execute("SAVEPOINT attendance_migration")
+            try:
+                schema = SCHEMA.split("CREATE TABLE IF NOT EXISTS attendance (", 1)[1].split(
+                    ";", 1
+                )[0]
+                await self.db.execute("CREATE TABLE attendance_expanded (" + schema)
+                await self.db.execute(
+                    "INSERT INTO attendance_expanded "
+                    "(student_key, date, lesson_number, category, subject, teacher, "
+                    "time_from, time_to, first_seen) "
+                    "SELECT student_key, date, lesson_number, category, subject, "
+                    "teacher, time_from, time_to, first_seen FROM attendance"
+                )
+                await self.db.execute("DROP TABLE attendance")
+                await self.db.execute("ALTER TABLE attendance_expanded RENAME TO attendance")
+                await self.db.execute("RELEASE attendance_migration")
+            except Exception:
+                await self.db.execute("ROLLBACK TO attendance_migration")
+                await self.db.execute("RELEASE attendance_migration")
+                raise
+
         # Migrate exams table (add new columns)
         cursor = await self.db.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='exams'"
@@ -252,6 +388,8 @@ class Database:
             columns = {row[1] for row in await col_cursor.fetchall()}
             for col, col_type in [
                 ("description", "TEXT"),
+                ("details", "TEXT"),
+                ("detail_fetched_at", "TIMESTAMP"),
                 ("teacher", "TEXT"),
                 ("last_seen", "TIMESTAMP"),
                 ("deleted_at", "TIMESTAMP"),
@@ -271,6 +409,11 @@ class Database:
             for col, col_type in [
                 ("content", "TEXT"),
                 ("teacher", "TEXT"),
+                ("links", "TEXT"),
+                ("response_required", "INTEGER"),
+                ("response_deadline", "TEXT"),
+                ("detail_fetched_at", "TIMESTAMP"),
+                ("details", "TEXT"),
                 ("last_seen", "TIMESTAMP"),
                 ("deleted_at", "TIMESTAMP"),
                 ("calendar_uid", "TEXT"),
@@ -359,9 +502,10 @@ class Database:
         )
         return cursor.rowcount
 
-    async def get_all_students(self) -> list[dict[str, object]]:
+    async def get_all_students(self, *, active_only: bool = False) -> list[dict[str, object]]:
+        where = " WHERE active=1" if active_only else ""
         cursor = await self.db.execute(
-            "SELECT key, name, class_name, school FROM students ORDER BY name"
+            f"SELECT key, name, class_name, school FROM students{where} ORDER BY name"
         )
         rows = await cursor.fetchall()
         return [{"key": r[0], "name": r[1], "class_name": r[2], "school": r[3]} for r in rows]
@@ -455,9 +599,9 @@ class Database:
     async def upsert_attendance(self, student_key: str, entry: AttendanceEntry) -> None:
         await self.db.execute(
             "INSERT INTO attendance (student_key, date, lesson_number, category, "
-            "subject, teacher, time_from, time_to) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(student_key, date, lesson_number) DO UPDATE SET "
+            "subject, teacher, time_from, time_to, source, entry_key) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(student_key, date, lesson_number, source, entry_key) DO UPDATE SET "
             "category=excluded.category, subject=excluded.subject, "
             "teacher=excluded.teacher, time_from=excluded.time_from, "
             "time_to=excluded.time_to",
@@ -470,12 +614,15 @@ class Database:
                 entry.teacher,
                 entry.time_from,
                 entry.time_to,
+                entry.source,
+                entry.entry_key,
             ),
         )
 
     async def get_attendance_for_student(self, student_key: str) -> list[dict[str, object]]:
         cursor = await self.db.execute(
-            "SELECT date, lesson_number, category, subject, teacher, time_from, time_to "
+            "SELECT date, lesson_number, category, subject, teacher, time_from, time_to, "
+            "source, entry_key "
             "FROM attendance WHERE student_key = ?",
             (student_key,),
         )
@@ -489,20 +636,30 @@ class Database:
                 "teacher": r[4],
                 "time_from": r[5],
                 "time_to": r[6],
+                "source": r[7],
+                "entry_key": r[8],
             }
             for r in rows
         ]
 
     # ── Exams ────────────────────────────────────────────────────────
 
-    async def upsert_exam(self, student_key: str, exam: Exam) -> None:
+    async def upsert_exam(
+        self, student_key: str, exam: Exam, *, detail_fetched: bool = False
+    ) -> None:
         await self.db.execute(
-            "INSERT INTO exams (id, student_key, date, subject, type, description, teacher) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "INSERT INTO exams (id, student_key, date, subject, type, description, "
+            "teacher, details, detail_fetched_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? THEN CURRENT_TIMESTAMP END) "
             "ON CONFLICT(id) DO UPDATE SET "
             "date=excluded.date, subject=excluded.subject, type=excluded.type, "
-            "description=COALESCE(excluded.description, exams.description), "
-            "teacher=COALESCE(excluded.teacher, exams.teacher), "
+            "description=CASE WHEN excluded.detail_fetched_at IS NOT NULL THEN "
+            "excluded.description ELSE COALESCE(excluded.description, exams.description) "
+            "END, "
+            "teacher=CASE WHEN excluded.detail_fetched_at IS NOT NULL THEN "
+            "excluded.teacher ELSE COALESCE(excluded.teacher, exams.teacher) END, "
+            "details=COALESCE(excluded.details, exams.details), "
+            "detail_fetched_at=COALESCE(excluded.detail_fetched_at, exams.detail_fetched_at), "
             "last_seen=CURRENT_TIMESTAMP, deleted_at=NULL",
             (
                 exam.id,
@@ -512,6 +669,8 @@ class Database:
                 exam.type,
                 exam.description,
                 exam.teacher,
+                json.dumps(exam.details, ensure_ascii=False) if exam.details is not None else None,
+                detail_fetched,
             ),
         )
 
@@ -539,7 +698,7 @@ class Database:
 
     async def get_exams_for_student(self, student_key: str) -> list[dict[str, object]]:
         cursor = await self.db.execute(
-            "SELECT id, date, subject, type, description, teacher "
+            "SELECT id, date, subject, type, description, teacher, details "
             "FROM exams WHERE student_key = ? AND deleted_at IS NULL "
             "ORDER BY date DESC",
             (student_key,),
@@ -553,22 +712,50 @@ class Database:
                 "type": r[3],
                 "description": r[4],
                 "teacher": r[5],
+                "details": json.loads(r[6]) if r[6] is not None else None,
             }
             for r in rows
         ]
 
     # ── Homework ─────────────────────────────────────────────────────
 
-    async def upsert_homework(self, student_key: str, hw: Homework) -> None:
+    async def upsert_homework(
+        self, student_key: str, hw: Homework, *, detail_fetched: bool = False
+    ) -> None:
         await self.db.execute(
-            "INSERT INTO homework (id, student_key, date, subject, content, teacher) "
-            "VALUES (?, ?, ?, ?, ?, ?) "
+            "INSERT INTO homework (id, student_key, date, subject, content, teacher, "
+            "links, response_required, response_deadline, detail_fetched_at, details) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? THEN CURRENT_TIMESTAMP END, ?) "
             "ON CONFLICT(id) DO UPDATE SET "
             "date=excluded.date, subject=excluded.subject, "
-            "content=COALESCE(excluded.content, homework.content), "
-            "teacher=COALESCE(excluded.teacher, homework.teacher), "
+            "content=CASE WHEN excluded.detail_fetched_at IS NOT NULL THEN "
+            "excluded.content ELSE COALESCE(excluded.content, homework.content) END, "
+            "teacher=CASE WHEN excluded.detail_fetched_at IS NOT NULL THEN "
+            "excluded.teacher ELSE COALESCE(excluded.teacher, homework.teacher) END, "
+            "links=CASE WHEN excluded.detail_fetched_at IS NOT NULL THEN excluded.links "
+            "ELSE COALESCE(excluded.links, homework.links) END, "
+            "response_required=CASE WHEN excluded.detail_fetched_at IS NOT NULL THEN "
+            "excluded.response_required ELSE COALESCE(excluded.response_required, "
+            "homework.response_required) END, "
+            "response_deadline=CASE WHEN excluded.detail_fetched_at IS NOT NULL THEN "
+            "excluded.response_deadline ELSE COALESCE(excluded.response_deadline, "
+            "homework.response_deadline) END, "
+            "detail_fetched_at=COALESCE(excluded.detail_fetched_at, homework.detail_fetched_at), "
+            "details=COALESCE(excluded.details, homework.details), "
             "last_seen=CURRENT_TIMESTAMP, deleted_at=NULL",
-            (hw.id, student_key, hw.date, hw.subject, hw.content, hw.teacher),
+            (
+                hw.id,
+                student_key,
+                hw.date,
+                hw.subject,
+                hw.content,
+                hw.teacher,
+                json.dumps(hw.links, ensure_ascii=False) if hw.links is not None else None,
+                hw.response_required,
+                hw.response_deadline,
+                detail_fetched,
+                json.dumps(hw.details, ensure_ascii=False) if hw.details is not None else None,
+            ),
         )
 
     async def update_homework_content(
@@ -588,14 +775,16 @@ class Database:
 
     async def get_homework_missing_detail(self, student_key: str) -> set[int]:
         cursor = await self.db.execute(
-            "SELECT id FROM homework WHERE student_key = ? AND content IS NULL",
+            "SELECT id FROM homework WHERE student_key = ? "
+            "AND (detail_fetched_at IS NULL OR details IS NULL)",
             (student_key,),
         )
         return {row[0] for row in await cursor.fetchall()}
 
     async def get_homework_for_student(self, student_key: str) -> list[dict[str, object]]:
         cursor = await self.db.execute(
-            "SELECT id, date, subject, content, teacher "
+            "SELECT id, date, subject, content, teacher, links, "
+            "response_required, response_deadline, details "
             "FROM homework WHERE student_key = ? AND deleted_at IS NULL "
             "ORDER BY date DESC",
             (student_key,),
@@ -608,6 +797,10 @@ class Database:
                 "subject": r[2],
                 "content": r[3],
                 "teacher": r[4],
+                "links": json.loads(r[5]) if r[5] is not None else None,
+                "response_required": bool(r[6]) if r[6] is not None else None,
+                "response_deadline": r[7],
+                "details": json.loads(r[8]) if r[8] is not None else None,
             }
             for r in rows
         ]
@@ -620,7 +813,7 @@ class Database:
             (topic, payload),
         )
 
-    async def list_mqtt_outbox(self) -> list[dict[str, object]]:
+    async def list_mqtt_outbox(self) -> list[MqttOutboxRow]:
         cursor = await self.db.execute(
             "SELECT id, topic, payload, attempts FROM mqtt_outbox ORDER BY id ASC"
         )
@@ -641,6 +834,253 @@ class Database:
             f"UPDATE mqtt_outbox SET attempts = attempts + 1, last_error = ? "
             f"WHERE id IN ({placeholders})",
             [error, *ids],
+        )
+
+    async def upsert_remark(self, student_key: str, remark: Remark) -> None:
+        await self.db.execute(
+            "INSERT INTO remarks (student_key, id, date, category, type, author, content, "
+            "kind, points, url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(student_key, id) DO UPDATE SET date=excluded.date, "
+            "category=excluded.category, type=excluded.type, author=excluded.author, "
+            "content=excluded.content, kind=excluded.kind, points=excluded.points, "
+            "url=excluded.url, last_seen=CURRENT_TIMESTAMP, deleted_at=NULL",
+            (
+                student_key,
+                remark.id,
+                remark.date,
+                remark.category,
+                remark.type,
+                remark.author,
+                remark.content,
+                remark.kind,
+                remark.points,
+                remark.url,
+            ),
+        )
+
+    async def get_remarks_for_student(self, student_key: str) -> list[dict[str, Any]]:
+        cursor = await self.db.execute(
+            "SELECT * FROM remarks WHERE student_key = ? ORDER BY date DESC, id DESC",
+            (student_key,),
+        )
+        columns = [column[0] for column in cursor.description or []]
+        return [dict(zip(columns, row, strict=True)) for row in await cursor.fetchall()]
+
+    async def mark_missing_remarks(self, student_key: str, active_ids: set[int]) -> None:
+        """Retain history; an ID that reappears must not be announced as new."""
+        stored = await self.get_remarks_for_student(student_key)
+        missing = [
+            (student_key, row["id"])
+            for row in stored
+            if row["id"] not in active_ids and row["deleted_at"] is None
+        ]
+        await self.db.executemany(
+            "UPDATE remarks SET deleted_at=CURRENT_TIMESTAMP WHERE student_key=? AND id=?",
+            missing,
+        )
+
+    async def upsert_completed_lesson(self, student_key: str, lesson: CompletedLesson) -> None:
+        await self.db.execute(
+            "INSERT INTO completed_lessons (student_key, id, date, lesson_number, subject, "
+            "teacher, topic, thematic_block, online, collections, has_collections, resources, url) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(student_key, id) DO UPDATE SET date=excluded.date, "
+            "lesson_number=excluded.lesson_number, subject=excluded.subject, "
+            "teacher=excluded.teacher, topic=excluded.topic, "
+            "thematic_block=excluded.thematic_block, "
+            "online=excluded.online, collections=excluded.collections, "
+            "has_collections=excluded.has_collections, resources=excluded.resources, "
+            "url=excluded.url, last_seen=CURRENT_TIMESTAMP, deleted_at=NULL",
+            (
+                student_key,
+                lesson.id,
+                lesson.date,
+                lesson.lesson_number,
+                lesson.subject,
+                lesson.teacher,
+                lesson.topic,
+                lesson.thematic_block,
+                lesson.online,
+                json.dumps(lesson.collections, ensure_ascii=False),
+                lesson.has_collections,
+                json.dumps(lesson.resources, ensure_ascii=False),
+                lesson.url,
+            ),
+        )
+
+    async def get_completed_lessons_for_student(self, student_key: str) -> list[dict[str, Any]]:
+        cursor = await self.db.execute(
+            "SELECT * FROM completed_lessons WHERE student_key=? "
+            "ORDER BY julianday(date) DESC, lesson_number DESC, id DESC",
+            (student_key,),
+        )
+        columns = [column[0] for column in cursor.description or []]
+        rows = [dict(zip(columns, row, strict=True)) for row in await cursor.fetchall()]
+        for row in rows:
+            row["collections"] = json.loads(row["collections"])
+            row["resources"] = json.loads(row["resources"])
+            row["has_collections"] = bool(row["has_collections"])
+        return rows
+
+    async def get_lessons_for_summary(
+        self, date_from: str, date_to: str, student_keys: list[str] | None = None
+    ) -> list[dict[str, object]]:
+        """Read active topics by lesson date, with explicit UTC window boundaries."""
+        if student_keys == []:
+            return []
+        params: list[str] = [date_from, date_to]
+        student_filter = ""
+        if student_keys is not None:
+            placeholders = ",".join("?" for _ in student_keys)
+            student_filter = f" AND l.student_key IN ({placeholders})"
+            params.extend(student_keys)
+        cursor = await self.db.execute(
+            "SELECT s.key AS student_key, s.name AS student, s.class_name, "
+            "l.subject, l.date, l.lesson_number, l.topic, l.thematic_block "
+            "FROM completed_lessons l JOIN students s ON s.key=l.student_key "
+            "WHERE s.active=1 AND l.deleted_at IS NULL "
+            "AND trim(l.topic) != '' "
+            "AND julianday(l.date) BETWEEN julianday(?) AND julianday(?)"
+            + student_filter
+            + " ORDER BY s.key, l.subject, julianday(l.date), l.lesson_number, l.id",
+            params,
+        )
+        columns = [column[0] for column in cursor.description or []]
+        return [dict(zip(columns, row, strict=True)) for row in await cursor.fetchall()]
+
+    async def mark_missing_completed_lessons(
+        self, student_key: str, active_ids: set[int], date_from: str, date_to: str
+    ) -> None:
+        """Soft-delete only absent records inside the successfully fetched window."""
+        cursor = await self.db.execute(
+            "SELECT id FROM completed_lessons WHERE student_key=? AND deleted_at IS NULL "
+            "AND julianday(date) BETWEEN julianday(?) AND julianday(?)",
+            (student_key, date_from, date_to),
+        )
+        missing = [
+            (student_key, row[0]) for row in await cursor.fetchall() if row[0] not in active_ids
+        ]
+        await self.db.executemany(
+            "UPDATE completed_lessons SET deleted_at=CURRENT_TIMESTAMP "
+            "WHERE student_key=? AND id=?",
+            missing,
+        )
+
+    # ── Email outbox ────────────────────────────────────────────────
+
+    async def enqueue_email(
+        self,
+        delivery_key: str,
+        sender: str,
+        recipient: str,
+        subject: str,
+        body: str,
+        message_id: str,
+        date_header: str,
+        html_body: str | None = None,
+    ) -> bool:
+        cursor = await self.db.execute(
+            "INSERT OR IGNORE INTO email_outbox "
+            "(delivery_key, sender, recipient, subject, body, message_id, date_header, html_body) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (delivery_key, sender, recipient, subject, body, message_id, date_header, html_body),
+        )
+        return cursor.rowcount == 1
+
+    async def update_email_body(
+        self, delivery_key: str, body: str, *, html_body: str | None = None
+    ) -> None:
+        await self.db.execute(
+            "UPDATE email_outbox SET body = ?, html_body = COALESCE(?, html_body) "
+            "WHERE delivery_key = ? AND sent_at IS NULL",
+            (body, html_body, delivery_key),
+        )
+
+    async def has_email_delivery(self, delivery_key: str) -> bool:
+        cursor = await self.db.execute(
+            "SELECT 1 FROM email_outbox WHERE delivery_key = ?", (delivery_key,)
+        )
+        return await cursor.fetchone() is not None
+
+    async def buffer_schedule_email(self, recipient_key: str, event_key: str, payload: str) -> None:
+        await self.db.execute(
+            "INSERT OR IGNORE INTO email_schedule_events (recipient_key, event_key, payload) "
+            "VALUES (?, ?, ?)",
+            (recipient_key, event_key, payload),
+        )
+
+    async def get_schedule_email_events(self, recipient_key: str) -> list[tuple[str, str]]:
+        cursor = await self.db.execute(
+            "SELECT event_key, payload FROM email_schedule_events "
+            "WHERE recipient_key = ? AND payload IS NOT NULL ORDER BY detected_at, rowid",
+            (recipient_key,),
+        )
+        return [(row[0], row[1]) for row in await cursor.fetchall()]
+
+    async def consume_schedule_email_events(self, recipient_key: str) -> None:
+        """Call in the same transaction as outbox enqueue; retain ingestion receipts."""
+        await self.db.execute(
+            "UPDATE email_schedule_events SET payload = NULL "
+            "WHERE recipient_key = ? AND payload IS NOT NULL",
+            (recipient_key,),
+        )
+
+    async def get_schedule_email_state(self, recipient_key: str) -> tuple[str | None, str | None]:
+        cursor = await self.db.execute(
+            "SELECT quiet_until, pending_delivery_key FROM email_schedule_state "
+            "WHERE recipient_key = ?",
+            (recipient_key,),
+        )
+        row = await cursor.fetchone()
+        return (row[0], row[1]) if row else (None, None)
+
+    async def reserve_schedule_email(self, recipient_key: str, delivery_key: str) -> None:
+        await self.db.execute(
+            "INSERT INTO email_schedule_state (recipient_key, pending_delivery_key) VALUES (?, ?) "
+            "ON CONFLICT(recipient_key) DO UPDATE SET "
+            "pending_delivery_key = excluded.pending_delivery_key",
+            (recipient_key, delivery_key),
+        )
+
+    async def complete_schedule_email(self, delivery_key: str, quiet_until: str) -> None:
+        """Start the window only after SMTP acceptance, alongside marking the email sent."""
+        await self.db.execute(
+            "UPDATE email_schedule_state SET quiet_until = ?, pending_delivery_key = NULL "
+            "WHERE pending_delivery_key = ?",
+            (quiet_until, delivery_key),
+        )
+
+    async def list_email_outbox(self) -> list[dict[str, str]]:
+        cursor = await self.db.execute(
+            "SELECT delivery_key, sender, recipient, subject, body, message_id, date_header, "
+            "COALESCE(html_body, '') "
+            "FROM email_outbox WHERE sent_at IS NULL ORDER BY enqueued_at, rowid"
+        )
+        columns = [
+            "delivery_key",
+            "sender",
+            "recipient",
+            "subject",
+            "body",
+            "message_id",
+            "date_header",
+            "html_body",
+        ]
+        return [dict(zip(columns, row, strict=True)) for row in await cursor.fetchall()]
+
+    async def mark_email_sent(self, delivery_key: str) -> None:
+        await self.db.execute(
+            "UPDATE email_outbox SET sent_at = CURRENT_TIMESTAMP, sender = NULL, "
+            "recipient = NULL, subject = NULL, body = NULL, html_body = NULL, last_error = NULL "
+            "WHERE delivery_key = ?",
+            (delivery_key,),
+        )
+
+    async def mark_email_failure(self, delivery_key: str, error_type: str) -> None:
+        await self.db.execute(
+            "UPDATE email_outbox SET attempts = attempts + 1, last_error = ? "
+            "WHERE delivery_key = ? AND sent_at IS NULL",
+            (error_type, delivery_key),
         )
 
     # ── Schedule ─────────────────────────────────────────────────────
@@ -938,6 +1378,38 @@ class Database:
         )
         return cursor.rowcount
 
+    async def mark_missing_homework_in_window(
+        self, student_key: str, current_ids: set[int], date_from: str, date_to: str
+    ) -> int:
+        return await self._mark_missing_in_window(
+            "homework", student_key, current_ids, date_from, date_to
+        )
+
+    async def mark_missing_exams_in_window(
+        self, student_key: str, current_ids: set[int], date_from: str, date_to: str
+    ) -> int:
+        return await self._mark_missing_in_window(
+            "exams", student_key, current_ids, date_from, date_to
+        )
+
+    async def _mark_missing_in_window(
+        self, table: str, student_key: str, current_ids: set[int], date_from: str, date_to: str
+    ) -> int:
+        """Only a successfully fetched interval can retire items, including an empty result."""
+        if table not in ("exams", "homework"):
+            raise ValueError(f"Window-scoped deletion not supported for table: {table}")
+        query = (
+            f"UPDATE {table} SET deleted_at = CURRENT_TIMESTAMP "
+            "WHERE student_key = ? AND deleted_at IS NULL "
+            "AND julianday(date) BETWEEN julianday(?) AND julianday(?)"
+        )
+        params: list[object] = [student_key, date_from, date_to]
+        if current_ids:
+            query += f" AND id NOT IN ({','.join('?' for _ in current_ids)})"
+            params.extend(sorted(current_ids))
+        cursor = await self.db.execute(query, params)
+        return cursor.rowcount
+
     # ── Calendar sync ────────────────────────────────────────────────
 
     async def set_calendar_uid(self, table: str, item_id: int, uid: str) -> None:
@@ -1105,7 +1577,7 @@ class Database:
         if status == "ok":
             await self.set_state(
                 f"last_success:{student_key}:{section}",
-                datetime.now().isoformat(),
+                datetime.now(UTC).isoformat(),
             )
         await self.commit()
 
@@ -1148,7 +1620,7 @@ class Database:
         data endpoint. It answers "when did this data last come back from Vulcan for
         real", which is a different question from "did the loop run".
         """
-        now = datetime.now()
+        now = datetime.now(UTC)
         last_run = await self.get_last_sync_run()
 
         cursor = await self.db.execute("SELECT key FROM students WHERE active = 1")
@@ -1189,9 +1661,7 @@ class Database:
         else:
             status = "ok"
 
-        fresh_ages = [
-            s["age_seconds"] for s in sections.values() if s["age_seconds"] is not None
-        ]
+        fresh_ages = [s["age_seconds"] for s in sections.values() if s["age_seconds"] is not None]
 
         return {
             "status": status,
@@ -1200,6 +1670,6 @@ class Database:
             "age_seconds": max(fresh_ages) if fresh_ages else None,
             "stale_after_seconds": stale_after_seconds,
             "sections": sections,
-            "last_run": last_run,
-            "generated_at": now.isoformat(),
+            "last_run": local_storage_timestamps(last_run),
+            "generated_at": now.astimezone(settings.timezone).isoformat(),
         }

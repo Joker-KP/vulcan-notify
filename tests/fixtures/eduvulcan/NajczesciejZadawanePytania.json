@@ -1,0 +1,7 @@
+{
+  "endpoint": "/api/NajczesciejZadawanePytania",
+  "source": "sanitized-live",
+  "responses": [
+    []
+  ]
+}
